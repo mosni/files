@@ -56,4 +56,17 @@ describe("can()", () => {
     expect(() => can(claims({ roles: [42, null, { x: 1 }] }), "files:write")).not.toThrow();
     expect(can(claims({ roles: [42, null, { x: 1 }] }), "files:write")).toBe(false);
   });
+
+  // A role string that happens to name an Object.prototype key must be treated as just an unknown role.
+  // The implication table is looked up by held-role name, so a prototype-chain hit would resolve to a
+  // function rather than an array. `can()` is the app-wide authorization gate - it fails closed, but it
+  // must fail closed by returning false, not by throwing a 500 out of every route that checks a role.
+  it.each(["toString", "constructor", "hasOwnProperty", "valueOf", "__proto__"])(
+    "treats the prototype-chain name %s as an unknown role, without throwing",
+    (held) => {
+      expect(() => can(claims({ roles: [held] }), "files:write")).not.toThrow();
+      expect(can(claims({ roles: [held] }), "files:write")).toBe(false);
+      expect(can(claims({ roles: [held] }), "files:admin")).toBe(false);
+    },
+  );
 });

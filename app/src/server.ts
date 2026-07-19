@@ -9,6 +9,7 @@ import { loadConfig } from "./config.ts";
 import { applySchema, initDb } from "./storage/db.ts";
 import { getRedisClient, initRedis } from "./storage/redis.ts";
 import { registerGrantableRoles } from "./auth/grantable-roles.ts";
+import { renderNotFoundPage } from "./views/NotFound.tsx";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 // D-48: the SPA is built into the image (web/dist, alongside this built server at app/dist/server.js)
@@ -49,6 +50,13 @@ export async function buildServer(redis: Redis): Promise<FastifyInstance> {
   // lib/deploy's healthy() accepts any response < 500; `dl.mosni.dev` is never health-checked (only the
   // apps.list domain is), so a broken `dl.` vhost will not fail a deploy - check it by hand.
   app.get("/health", async () => ({ status: "ok" }));
+
+  // Renders a real .tsx view through renderToString (technical-baseline.md §1: React SSR via JSX). This
+  // is also what makes D-44 verifiable rather than assumed - JSX cannot be type-stripped, so a server
+  // that renders this at all is a server that was genuinely built.
+  app.setNotFoundHandler((_request, reply) => {
+    reply.code(404).type("text/html; charset=utf-8").send(renderNotFoundPage());
+  });
 
   return app;
 }
