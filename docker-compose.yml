@@ -1,0 +1,27 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      BOT_API: http://bot-core:8080
+      PORT: "3000"
+    # Host port is allocated from the stack range (stack.env PORT_BASE..PORT_MAX) on the box at deploy.
+    # PORT NOTE (infra/port-allocation): 33001 is a placeholder so the file stays valid - auth already
+    # occupies 33000. At deploy, confirm the next-free port on the box (scan apps/ for 127.0.0.1:<port>)
+    # and replace BOTH this value and the one in nginx.conf before bringing the container up.
+    ports: ["127.0.0.1:33001:3000"]
+    networks:
+      # Mandatory (D-32/D-49): auth identifies a calling app by its network alias, which must equal its
+      # role namespace ("files"). Without this every internal API call returns 403 unknown_caller.
+      stack:
+        aliases: [files]
+    volumes:
+      # Uploaded bytes live on the host disk, never baked into the image (D-13). This path is also what
+      # nginx.conf's dl.mosni.dev vhost reads directly via X-Accel-Redirect (D-5/D-18: not backed up).
+      - /srv/stack/apps/files/storage:/data/storage
+networks:
+  stack:
+    external: true

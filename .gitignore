@@ -1,0 +1,9 @@
+agent-docs
+CLAUDE.md
+node_modules
+app/dist
+web/dist
+coverage
+.env
+test-results
+playwright-report

@@ -1,0 +1,15 @@
+name: deploy
+on:
+  push:
+    branches: [main]
+    tags: ['deploy-*']
+  workflow_dispatch: {}
+concurrency:
+  group: deploy-${{ github.repository }}
+  cancel-in-progress: false
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  deploy:
+    uses: mosni/github-workflows/.github/workflows/deploy.yml@main

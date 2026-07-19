@@ -1,0 +1,8 @@
+node_modules
+app/dist
+web/dist
+coverage
+.env
+.git
+.github
+agent-docs

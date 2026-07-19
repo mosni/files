@@ -1,0 +1,127 @@
+# D-45: verification runs in Docker. The integration suite needs real MariaDB + redis anyway, and the dev
+# checkout is on Node 20 against a Node 24 target - a host-native gate would pass or fail differently per
+# machine, which is not a gate.
+#
+# Three tiers:
+#   - `verify-unit` - fast, service-free (app/test/unit only, no datastores, no builds). The TDD inner loop.
+#   - `verify`      - the full gate and definition of done: coverage-gated unit + integration tests, both
+#                     Vite builds, against real MariaDB + redis.
+#   - `verify-e2e`  - browser-driven (D-53, reverses D-28): `app-e2e` runs the actual built image against
+#                     real MariaDB + redis, and `verify-e2e` drives a real Chromium against it via
+#                     Playwright. Separate from `verify` since it needs the production image built, not
+#                     just the Vite outputs, and a browser-capable base image.
+#
+# Both build (rather than bind-mount, as an earlier version of this file did) so `npm ci` is a cached
+# layer: it only re-runs when package.json/package-lock.json actually change (Docker caches by content
+# hash), not on every invocation. A bind-mount + `npm ci` on every run reinstalled 200+ packages every
+# time - a real cost for a TDD project meant to run its suite constantly - and also let the container's
+# Linux `npm ci` overwrite the host's own `node_modules/.bin` shims through the mount, breaking host-side
+# `tsc`. Building instead avoids both problems.
+x-node-build: &node-build
+  context: .
+  dockerfile_inline: |
+    FROM node:24-alpine
+    WORKDIR /repo
+    COPY package.json package-lock.json ./
+    RUN npm ci
+    COPY . .
+
+services:
+  redis:
+    image: redis:7-alpine
+
+  mariadb:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: files
+      MARIADB_USER: files
+      MARIADB_PASSWORD: filespass
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  verify-unit:
+    build: *node-build
+    working_dir: /repo
+    command: ["npx", "vitest", "run", "app/test/unit"]
+
+  verify:
+    build: *node-build
+    working_dir: /repo
+    depends_on:
+      redis:
+        condition: service_started
+      mariadb:
+        condition: service_healthy
+    environment:
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_USER: files
+      DB_PASS: filespass
+      DB_NAME: files
+      REDIS_URL: redis://redis:6379
+      BOT_API: http://bot-core:8080
+      AUTH_ISSUER: https://auth.mosni.dev
+      APP_ORIGIN: https://files.mosni.dev
+      DL_ORIGIN: https://dl.mosni.dev
+      STORAGE_ROOT: /tmp/storage
+      PORT: "3000"
+    command:
+      - sh
+      - -lc
+      - >-
+        npx vitest run --coverage &&
+        npx vite build &&
+        npx vite build --config vite.ssr.config.ts
+
+  # The real, production-built image (Dockerfile), not the dev toolchain - so e2e exercises what actually
+  # ships. No published port; verify-e2e reaches it by service name over the compose network.
+  app-e2e:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_started
+      mariadb:
+        condition: service_healthy
+    environment:
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_USER: files
+      DB_PASS: filespass
+      DB_NAME: files
+      REDIS_URL: redis://redis:6379
+      BOT_API: http://bot-core:8080
+      AUTH_ISSUER: https://auth.mosni.dev
+      APP_ORIGIN: https://files.mosni.dev
+      DL_ORIGIN: https://dl.mosni.dev
+      STORAGE_ROOT: /data/storage
+      PORT: "3000"
+    healthcheck:
+      # 127.0.0.1, not localhost: this alpine image's `localhost` resolves ::1 (IPv6) first, and Fastify's
+      # `host: "0.0.0.0"` binds IPv4 only - wget would get "connection refused" against the IPv6 attempt.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  verify-e2e:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM mcr.microsoft.com/playwright:v1.61.1-noble
+        WORKDIR /repo
+        COPY package.json package-lock.json ./
+        RUN npm ci
+        COPY . .
+    working_dir: /repo
+    depends_on:
+      app-e2e:
+        condition: service_healthy
+    environment:
+      BASE_URL: http://app-e2e:3000
+    command: ["npx", "playwright", "test"]
