@@ -19,7 +19,7 @@ import type { Config } from "../config.ts";
 import { verify } from "../auth/verify.ts";
 import { can, type Claims } from "../lib/roles.ts";
 import { isIgnoredEntry, safeSegment, suffixForCollision } from "../lib/paths.ts";
-import { readablePathResolves, type Protection } from "../lib/protection.ts";
+import { buildFileUrls } from "../lib/fileUrls.ts";
 import { getOrCreateDefaultCollection } from "../storage/collections.ts";
 import { insertUploadedFile } from "../storage/files.ts";
 import { stripInPlace } from "../storage/strip.ts";
@@ -48,26 +48,6 @@ function tusError(status_code: number, body: string): never {
 function bearerToken(req: http.IncomingMessage): string | null {
   const auth = req.headers.authorization;
   return typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : null;
-}
-
-function buildResultUrls(
-  config: Config,
-  protection: Protection,
-  collectionName: string,
-  fileName: string,
-  linkToken: string,
-): { previewUrl: string; directUrl: string } {
-  const readable = readablePathResolves(protection);
-  const previewPath = readable
-    ? `/${encodeURIComponent(collectionName)}/${encodeURIComponent(fileName)}`
-    : `/f/${linkToken}`;
-  const directPath = readable
-    ? `/${encodeURIComponent(collectionName)}/${encodeURIComponent(fileName)}`
-    : `/${linkToken}`;
-  return {
-    previewUrl: `${config.appOrigin}${previewPath}`,
-    directUrl: `${config.dlOrigin}${directPath}`,
-  };
 }
 
 function buildTusServer(config: Config): TusServer {
@@ -141,7 +121,7 @@ function buildTusServer(config: Config): TusServer {
         collection: collection.name,
       });
 
-      const urls = buildResultUrls(config, record.protection, collection.name, finalName, record.linkToken);
+      const urls = buildFileUrls(config, record.protection, collection.name, finalName, record.linkToken);
       return {
         res,
         // The tus spec's PATCH response is 204, and 204 responses MUST NOT carry a body - Node's
