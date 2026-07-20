@@ -5,23 +5,27 @@ import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import type { Redis } from "ioredis";
-import { loadConfig } from "./config.ts";
+import { loadConfig, type Config } from "./config.ts";
 import { applySchema, initDb } from "./storage/db.ts";
 import { getRedisClient, initRedis } from "./storage/redis.ts";
 import { initAudit } from "./storage/audit.ts";
 import { initFilesStorage } from "./storage/files.ts";
 import { registerGrantableRoles } from "./auth/grantable-roles.ts";
 import { renderNotFoundPage } from "./views/NotFound.tsx";
+import { registerUploadRoutes } from "./routes/upload.ts";
+import { registerDeliveryRoutes } from "./routes/delivery.ts";
+import { registerPreviewRoutes } from "./routes/preview.ts";
+import { registerContextRoutes } from "./routes/context.ts";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 // D-48: the SPA is built into the image (web/dist, alongside this built server at app/dist/server.js)
 // and served by Fastify, not nginx - nginx has no path into a kind=container image's filesystem.
 const SPA_ROOT = path.join(moduleDir, "..", "..", "web", "dist");
 
-// Pure wiring - no business logic (technical-baseline.md §2: routes own no logic that belongs in `lib`;
-// E1 ships none yet). `redis` is passed in explicitly rather than reached for as a global singleton, so
-// this builds cleanly in a test without running the full non-fatal boot sequence below.
-export async function buildServer(redis: Redis): Promise<FastifyInstance> {
+// Pure wiring - no business logic (technical-baseline.md §2: routes own no logic that belongs in `lib`).
+// `redis`/`config` are passed in explicitly rather than reached for as global singletons, so this builds
+// cleanly in a test without running the full non-fatal boot sequence below.
+export async function buildServer(redis: Redis, config: Config): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
 
   // Security invariants 3/4 (technical-baseline.md §1): `X-Content-Type-Options: nosniff` and
@@ -49,7 +53,19 @@ export async function buildServer(redis: Redis): Promise<FastifyInstance> {
     },
   });
 
-  await app.register(rateLimit, { redis, global: true, max: 100, timeWindow: "1 minute" });
+  // nameSpace is mandatory here, not cosmetic: @fastify/rate-limit's Redis key defaults to
+  // `fastify-rate-limit-<ip>` regardless of which plugin registration created it. Without distinct
+  // namespaces, this global limiter and upload.ts's dedicated 600/min one would silently share counters
+  // over the same redis instance - heavy tus traffic would count against (and could trip) everything
+  // else's 100/min budget too, exactly what D1 exists to prevent. Confirmed empirically: an early version
+  // without this let upload.test.ts's own rate-limit test 429 unrelated tests elsewhere in the same run.
+  await app.register(rateLimit, {
+    redis,
+    global: true,
+    max: 100,
+    timeWindow: "1 minute",
+    nameSpace: "fastify-rate-limit-global-",
+  });
 
   // Missing web/dist (e.g. before the SPA has been built) only warns, per @fastify/static - it does not
   // fail registration, which is what lets this build cleanly in a test that never runs `vite build`.
@@ -58,6 +74,13 @@ export async function buildServer(redis: Redis): Promise<FastifyInstance> {
   // lib/deploy's healthy() accepts any response < 500; `dl.mosni.dev` is never health-checked (only the
   // apps.list domain is), so a broken `dl.` vhost will not fail a deploy - check it by hand.
   app.get("/health", async () => ({ status: "ok" }));
+
+  // E2/E5a. Each registers its own host constraint (files.mosni.dev vs dl.mosni.dev) so the origin split
+  // (D-4) holds even though both hosts are proxied to this same process.
+  await registerUploadRoutes(app, config, redis);
+  await registerDeliveryRoutes(app, config);
+  await registerPreviewRoutes(app, config);
+  await registerContextRoutes(app, config);
 
   // Renders a real .tsx view through renderToString (technical-baseline.md §1: React SSR via JSX). This
   // is also what makes D-44 verifiable rather than assumed - JSX cannot be type-stripped, so a server
@@ -86,7 +109,7 @@ export async function start(): Promise<FastifyInstance> {
   initAudit(config.botApi);
   initFilesStorage(config.storageRoot);
 
-  const app = await buildServer(getRedisClient());
+  const app = await buildServer(getRedisClient(), config);
 
   try {
     await applySchema();

@@ -2,6 +2,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   isIgnoredEntry,
+  NON_RESERVED_COLLECTION_PARAM,
   RESERVED_COLLECTION_NAMES,
   resolveCollectionPath,
   resolveStoragePath,
@@ -15,6 +16,24 @@ describe("RESERVED_COLLECTION_NAMES", () => {
       ["api", "assets", "f", "favicon.ico", "health"].sort(),
     );
   });
+});
+
+describe("NON_RESERVED_COLLECTION_PARAM (routes/preview.ts, routes/delivery.ts route patterns)", () => {
+  // Extract the regex find-my-way would apply to a single path segment, so this can be unit-tested
+  // without spinning up a Fastify router. Shape: `:collection(^(?!...)....+)`.
+  const match = NON_RESERVED_COLLECTION_PARAM.match(/^:collection\((.*)\)$/);
+  const segmentRegex = new RegExp(match![1]!);
+
+  it.each([...RESERVED_COLLECTION_NAMES])("rejects the reserved name %s", (name) => {
+    expect(segmentRegex.test(name)).toBe(false);
+  });
+
+  it.each(["hannah", "vacation-photos", "f2", "apix", "assets2"])(
+    "accepts an ordinary collection name %s",
+    (name) => {
+      expect(segmentRegex.test(name)).toBe(true);
+    },
+  );
 });
 
 describe("safeSegment() - mandatory, never-delete (D-56 / security invariant)", () => {

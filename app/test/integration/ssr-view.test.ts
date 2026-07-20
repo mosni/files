@@ -1,6 +1,7 @@
 import { Redis } from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildServer } from "../../src/server.ts";
+import { makeTestConfig } from "../helpers/testConfig.ts";
 
 // Acceptance criterion 3 / D-44: the server must actually RENDER a `.tsx` view, not merely be built from
 // a toolchain that could. Node's type-stripping erases type annotations but cannot transform JSX - that
@@ -12,7 +13,7 @@ describe("SSR .tsx view rendering (D-44)", () => {
 
   beforeAll(async () => {
     redis = new Redis(process.env.REDIS_URL ?? "redis://redis:6379");
-    app = await buildServer(redis);
+    app = await buildServer(redis, makeTestConfig());
     await app.ready();
   }, 30_000);
 

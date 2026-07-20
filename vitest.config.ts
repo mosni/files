@@ -12,7 +12,10 @@ export default defineConfig({
     // @playwright/test - Vitest's default include pattern matches *.spec.ts too and tries to load them
     // as its own tests, which conflicts with Playwright's runner. Playwright tests run only via
     // `npx playwright test` (npm run test:e2e), never through Vitest.
-    exclude: ["**/node_modules/**", "e2e/**"],
+    // .claude/worktrees/ holds other agents' isolated checkouts of this same repo (see agent-docs)) -
+    // without this exclusion Vitest's default include glob walks into them too, double-running (and
+    // double-counting against the shared redis rate-limit store) whatever tests happen to exist there.
+    exclude: ["**/node_modules/**", "e2e/**", ".claude/worktrees/**"],
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],

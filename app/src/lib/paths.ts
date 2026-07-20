@@ -4,6 +4,16 @@ import path from "node:path";
 // names can never be claimed by a collection.
 export const RESERVED_COLLECTION_NAMES = ["f", "api", "health", "assets", "favicon.ico"] as const;
 
+// Fastify/find-my-way route-parameter fragment for a `:collection` segment that excludes every reserved
+// name at the ROUTER level, not just inside a handler. Static routes always out-rank parametric ones in
+// find-my-way's match order, EXCEPT against @fastify/static's SPA fallback, which is a lower-priority
+// wildcard (`/*`) - without this exclusion, routes/preview.ts's and routes/delivery.ts's `/:collection/
+// :name` pattern would silently swallow requests like `/assets/index-abc123.js` before the SPA's static
+// files ever get served.
+export const NON_RESERVED_COLLECTION_PARAM = `:collection(^(?!(?:${RESERVED_COLLECTION_NAMES.map((name) =>
+  name.replace(/\./g, "\\."),
+).join("|")})$).+)`;
+
 const CONTROL_CHAR = /[\x00-\x1f\x7f]/;
 const ONLY_DOTS_OR_WHITESPACE = /^[.\s]+$/;
 

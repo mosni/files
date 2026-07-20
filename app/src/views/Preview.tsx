@@ -20,7 +20,7 @@ function OgTags({ file, directUrl }: { file: FileRecord; directUrl: string }) {
   return (
     <>
       <meta property="og:title" content={file.name} />
-      <meta property="og:description" content="Shared via files.mosni.dev" />
+      <meta property="og:description" content="Shared via Hannah's File Drop" />
       <meta property="og:type" content="website" />
       {strategy === "image" && <meta property="og:image" content={directUrl} />}
       {strategy === "video" && (
@@ -53,7 +53,7 @@ function PreviewPage({ file, previewUrl, directUrl }: { file: FileRecord } & Pre
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>{`${file.name} · files.mosni.dev`}</title>
+        <title>{`${file.name} · Hannah's File Drop`}</title>
         <OgTags file={file} directUrl={directUrl} />
         {/* F3's load-order rule applies here too: sdk.js first, so mosnicat.js's window.mosni ??= {}
             merge (and now sdk.js's own merge, D-63) never races. */}

@@ -15,7 +15,7 @@ function NotFound() {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Not found · files.mosni.dev</title>
+        <title>Not found · Hannah's File Drop</title>
       </head>
       <body>
         <main>

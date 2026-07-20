@@ -1,8 +1,9 @@
 import { createRoot } from "react-dom/client";
+import { DropZone } from "./components/DropZone.tsx";
 
-// Placeholder SPA entry. E1 ships no drop zone, file browser, or admin panel yet (those land in later
-// epics) - this exists only so the Vite/React toolchain has something real to build against.
+// F1-F5: the drop zone is the whole landing page for now (D-64) - the full landing page with a file
+// browser and admin-panel entry point is a later epic (E4).
 const root = document.getElementById("root");
 if (root) {
-  createRoot(root).render(null);
+  createRoot(root).render(<DropZone />);
 }

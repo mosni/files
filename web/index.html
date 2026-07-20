@@ -3,7 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>files.mosni.dev</title>
+    <title>Hannah's File Drop</title>
+    <!-- Deliberate order (belt-and-braces): sdk.js before mosnicat.js, to avoid a cross-repo bug where
+         the chrome's toast and the auth SDK can clobber each other's window.mosni depending on load
+         order. The cross-repo half of that fix already landed separately. -->
+    <script src="https://auth.mosni.dev/sdk.js"></script>
+    <script src="https://ui.mosni.dev/mosnicat.js"></script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,6 +1,7 @@
 import { Redis } from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildServer } from "../../src/server.ts";
+import { makeTestConfig } from "../helpers/testConfig.ts";
 
 // Mandatory, never-delete tests (verification-concept.md): each maps to a security invariant in
 // technical-baseline.md §1 and must never be deleted, skipped, or weakened to make a change pass.
@@ -12,7 +13,7 @@ describe("security headers", () => {
   // connection is occasionally slow under the verify container's constrained resources, not a hang.
   beforeAll(async () => {
     redis = new Redis(process.env.REDIS_URL ?? "redis://redis:6379");
-    app = await buildServer(redis);
+    app = await buildServer(redis, makeTestConfig());
     await app.ready();
   }, 30_000);
 

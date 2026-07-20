@@ -151,6 +151,10 @@ export async function registerUploadRoutes(app: FastifyInstance, config: Config,
       global: true,
       max: 600,
       timeWindow: "1 minute",
+      // Distinct nameSpace so this never shares a Redis key with the global limiter (server.ts) -
+      // @fastify/rate-limit's default key is IP-only with no per-registration isolation otherwise. See
+      // the matching comment in server.ts for why this is a correctness fix, not just tidiness.
+      nameSpace: "fastify-rate-limit-upload-",
       keyGenerator: (request: FastifyRequest) => {
         const auth = request.headers.authorization;
         return typeof auth === "string" ? auth : request.ip;

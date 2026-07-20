@@ -9,6 +9,7 @@ import { claimsFromBearer } from "../auth/bearer.ts";
 import { can } from "../lib/roles.ts";
 import { contentDisposition } from "../lib/mime.ts";
 import { isLinkTokenShaped } from "../lib/tokens.ts";
+import { NON_RESERVED_COLLECTION_PARAM } from "../lib/paths.ts";
 import { readablePathResolves } from "../lib/protection.ts";
 import { hasAclGrant, resolveByPath, resolveByToken, type FileRecord } from "../storage/files.ts";
 
@@ -85,12 +86,16 @@ export async function registerDeliveryRoutes(app: FastifyInstance, config: Confi
     await deliver(request, reply, config, await resolveByToken(maybeToken));
   });
 
-  app.get("/:collection/:name", { constraints: { host: dlHost } }, async (request, reply) => {
-    const { collection, name } = request.params as { collection: string; name: string };
-    const record = await resolveByPath(collection, name);
-    // `secret` must 404 at its readable path, not 403 - a 403 confirms existence, which is the one thing
-    // this level exists to hide (D-59).
-    const gated = record !== null && !readablePathResolves(record.protection) ? null : record;
-    await deliver(request, reply, config, gated);
-  });
+  app.get(
+    `/${NON_RESERVED_COLLECTION_PARAM}/:name`,
+    { constraints: { host: dlHost } },
+    async (request, reply) => {
+      const { collection, name } = request.params as { collection: string; name: string };
+      const record = await resolveByPath(collection, name);
+      // `secret` must 404 at its readable path, not 403 - a 403 confirms existence, which is the one
+      // thing this level exists to hide (D-59).
+      const gated = record !== null && !readablePathResolves(record.protection) ? null : record;
+      await deliver(request, reply, config, gated);
+    },
+  );
 }
