@@ -26,8 +26,10 @@ describe("formatAuditLine()", () => {
   });
 
   it("includes protection level when present", () => {
-    const line = formatAuditLine(base({ action: "upload", protection: "semi-private" }));
-    expect(line).toContain("(semi-private)");
+    // D-59: "semi-private" split into unlisted/secret - protection now tracks lib/protection.ts's
+    // four-level Protection type.
+    const line = formatAuditLine(base({ action: "upload", protection: "unlisted" }));
+    expect(line).toContain("(unlisted)");
   });
 
   it("includes size when present, human-readable", () => {

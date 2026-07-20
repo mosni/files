@@ -2,6 +2,8 @@
 // Pure formatting only - the emit (the actual POST /say) lives in storage/audit.ts. This module must never
 // perform I/O.
 
+import type { Protection } from "./protection.ts";
+
 export type WriteAction =
   | "upload"
   | "rename"
@@ -15,7 +17,9 @@ export type AuditEvent = {
   action: WriteAction;
   actor: string;
   target: string;
-  protection?: "public" | "semi-private" | "private";
+  // D-59 (session 006) split "semi-private" into unlisted/secret - this now tracks lib/protection.ts's
+  // Protection type directly instead of a hardcoded copy, so the two can never drift again.
+  protection?: Protection;
   bytes?: number;
   collection?: string;
 };
