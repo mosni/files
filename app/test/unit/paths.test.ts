@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   isIgnoredEntry,
   RESERVED_COLLECTION_NAMES,
+  resolveCollectionPath,
   resolveStoragePath,
   safeSegment,
   suffixForCollision,
@@ -131,6 +132,22 @@ describe("resolveStoragePath()", () => {
     // Belt and braces: this should already be caught by safeSegment, but resolveStoragePath
     // must not trust that alone.
     expect(resolveStoragePath(root, "hannah", "image.png")).not.toBeNull();
+  });
+});
+
+describe("resolveCollectionPath() (Wave C: collection auto-create needs a directory-only resolve)", () => {
+  const root = "/srv/storage";
+
+  it("joins root and collection into an absolute path", () => {
+    expect(resolveCollectionPath(root, "hannah")).toBe(path.resolve(root, "hannah"));
+  });
+
+  it("returns null for an unsafe collection segment", () => {
+    expect(resolveCollectionPath(root, "../../etc")).toBeNull();
+  });
+
+  it("returns null for a reserved collection name", () => {
+    expect(resolveCollectionPath(root, "f")).toBeNull();
   });
 });
 

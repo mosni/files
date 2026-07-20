@@ -63,20 +63,33 @@ export function safeSegment(name: string, kind: "file" | "collection" = "file"):
   return name;
 }
 
+// Belt and braces (D-56): safeSegment() should already make escape impossible, but this is the
+// security boundary for attacker-controlled path segments, so it doesn't rely on that alone.
+function resolveWithinRoot(root: string, segments: readonly string[]): string | null {
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.resolve(resolvedRoot, ...segments);
+
+  const rootPrefix = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
+  if (resolved !== resolvedRoot && !resolved.startsWith(rootPrefix)) return null;
+
+  return resolved;
+}
+
 export function resolveStoragePath(root: string, collection: string, file: string): string | null {
   const safeCollection = safeSegment(collection, "collection");
   const safeFile = safeSegment(file, "file");
   if (safeCollection === null || safeFile === null) return null;
 
-  const resolvedRoot = path.resolve(root);
-  const resolved = path.resolve(resolvedRoot, safeCollection, safeFile);
+  return resolveWithinRoot(root, [safeCollection, safeFile]);
+}
 
-  // Belt and braces (D-56): safeSegment() should already make escape impossible, but this is the
-  // security boundary for attacker-controlled path segments, so it doesn't rely on that alone.
-  const rootPrefix = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
-  if (resolved !== resolvedRoot && !resolved.startsWith(rootPrefix)) return null;
+// Directory-only resolve, needed by storage/collections.ts to stat a collection's directory on disk
+// before deciding whether to auto-create its row (D-57's "first touch").
+export function resolveCollectionPath(root: string, collection: string): string | null {
+  const safeCollection = safeSegment(collection, "collection");
+  if (safeCollection === null) return null;
 
-  return resolved;
+  return resolveWithinRoot(root, [safeCollection]);
 }
 
 // D-14's surviving half: duplicate display names are suffixed within a collection, not made opaque.

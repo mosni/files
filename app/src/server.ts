@@ -9,6 +9,7 @@ import { loadConfig } from "./config.ts";
 import { applySchema, initDb } from "./storage/db.ts";
 import { getRedisClient, initRedis } from "./storage/redis.ts";
 import { initAudit } from "./storage/audit.ts";
+import { initFilesStorage } from "./storage/files.ts";
 import { registerGrantableRoles } from "./auth/grantable-roles.ts";
 import { renderNotFoundPage } from "./views/NotFound.tsx";
 
@@ -83,6 +84,7 @@ export async function start(): Promise<FastifyInstance> {
   });
   initRedis(config.redisUrl);
   initAudit(config.botApi);
+  initFilesStorage(config.storageRoot);
 
   const app = await buildServer(getRedisClient());
 

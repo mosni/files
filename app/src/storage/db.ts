@@ -59,7 +59,9 @@ export async function closeDb(): Promise<void> {
   pool = undefined;
 }
 
-function getPool(): Pool {
+// Exported so the rest of storage/ (files.ts, collections.ts) can run their own queries against the
+// same pool - db.ts owns the connection lifecycle, but it is not the only module that queries MariaDB.
+export function getPool(): Pool {
   if (pool === undefined) {
     throw new Error("db: initDb() must be called before use");
   }
