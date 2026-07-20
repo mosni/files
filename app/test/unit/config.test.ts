@@ -27,6 +27,7 @@ describe("loadConfig()", () => {
       appOrigin: "https://files.mosni.dev",
       dlOrigin: "https://dl.mosni.dev",
       storageRoot: "/data/storage",
+      tusTempDir: "/data/storage/.tus",
       port: 3000,
     });
   });

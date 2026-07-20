@@ -21,6 +21,7 @@ x-node-build: &node-build
   context: .
   dockerfile_inline: |
     FROM node:24-alpine
+    RUN apk add --no-cache ffmpeg
     WORKDIR /repo
     COPY package.json package-lock.json ./
     RUN npm ci

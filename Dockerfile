@@ -9,6 +9,9 @@ RUN npx vite build --config vite.ssr.config.ts
 
 # --- runtime image ---
 FROM node:24-alpine
+# D-60: video metadata stripping runs ffmpeg -map_metadata -1 -c copy at ingest (never a transcode - D-20,
+# the box is too weak).
+RUN apk add --no-cache ffmpeg
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev

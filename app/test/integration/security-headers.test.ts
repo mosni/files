@@ -53,4 +53,20 @@ describe("security headers", () => {
     expect(csp).toMatch(/img-src[^;]*dl\.mosni\.dev/);
     expect(csp).toMatch(/media-src[^;]*dl\.mosni\.dev/);
   });
+
+  it("CSP allows auth.mosni.dev as a frame-src, unblocking the SDK's silent-refresh iframe (Wave A5)", async () => {
+    const res = await app.inject({ method: "GET", url: "/health" });
+    const csp = res.headers["content-security-policy"] as string;
+    expect(csp).toMatch(/frame-src[^;]*https:\/\/auth\.mosni\.dev/);
+  });
+
+  it("CSP allows data:/blob: as img-src, for the drop zone's local thumbnail preview (F1)", async () => {
+    const res = await app.inject({ method: "GET", url: "/health" });
+    const csp = res.headers["content-security-policy"] as string;
+    const imgSrc = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("img-src"));
+
+    expect(imgSrc).toBeDefined();
+    expect(imgSrc).toContain("data:");
+    expect(imgSrc).toContain("blob:");
+  });
 });

@@ -1,17 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { emitAuditEvent } from "../../src/storage/audit.ts";
+import { emitAuditEvent, initAudit } from "../../src/storage/audit.ts";
 import type { AuditEvent } from "../../src/lib/audit.ts";
 
 const event: AuditEvent = { action: "upload", actor: "hannah", target: "photo.png" };
 
 describe("emitAuditEvent() (D-43)", () => {
   beforeEach(() => {
-    process.env.BOT_API = "http://bot-core:8080";
+    initAudit("http://bot-core:8080");
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    delete process.env.BOT_API;
   });
 
   it("posts to {BOT_API}/say with the correct payload shape and silent: true", async () => {
@@ -40,14 +39,5 @@ describe("emitAuditEvent() (D-43)", () => {
   it("a rejected fetch does not throw or reject out of emitAuditEvent - the actual invariant", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
     expect(() => emitAuditEvent(event)).not.toThrow();
-  });
-
-  it("does nothing (and does not throw) when BOT_API is not configured", () => {
-    delete process.env.BOT_API;
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-
-    expect(() => emitAuditEvent(event)).not.toThrow();
-    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

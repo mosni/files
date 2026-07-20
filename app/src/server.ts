@@ -8,6 +8,7 @@ import type { Redis } from "ioredis";
 import { loadConfig } from "./config.ts";
 import { applySchema, initDb } from "./storage/db.ts";
 import { getRedisClient, initRedis } from "./storage/redis.ts";
+import { initAudit } from "./storage/audit.ts";
 import { registerGrantableRoles } from "./auth/grantable-roles.ts";
 import { renderNotFoundPage } from "./views/NotFound.tsx";
 
@@ -34,7 +35,13 @@ export async function buildServer(redis: Redis): Promise<FastifyInstance> {
         defaultSrc: ["'self'"],
         scriptSrc: ["'self'", "https://ui.mosni.dev", "https://auth.mosni.dev"],
         styleSrc: ["'self'", "https://ui.mosni.dev", "'unsafe-inline'"],
-        imgSrc: ["'self'", "https://dl.mosni.dev"],
+        // frame-src: auth's SDK does its silent-refresh in a hidden iframe pointing at
+        // https://auth.mosni.dev/authorize. With no frame-src directive, helmet's CSP fell back to
+        // default-src 'self' and silently blocked it - sessions would die at token expiry instead of
+        // renewing (session 006 finding, Wave A5).
+        frameSrc: ["'self'", "https://auth.mosni.dev"],
+        // data:/blob: let the drop zone show a local thumbnail before the upload completes (F1).
+        imgSrc: ["'self'", "https://dl.mosni.dev", "data:", "blob:"],
         mediaSrc: ["'self'", "https://dl.mosni.dev"],
         connectSrc: ["'self'", "https://auth.mosni.dev"],
       },
@@ -75,6 +82,7 @@ export async function start(): Promise<FastifyInstance> {
     database: config.db.name,
   });
   initRedis(config.redisUrl);
+  initAudit(config.botApi);
 
   const app = await buildServer(getRedisClient());
 

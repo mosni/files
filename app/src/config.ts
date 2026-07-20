@@ -2,6 +2,8 @@
 // missing required var, in contrast to D-32 (role registration) and D-43 (the audit emitter), which are
 // both non-fatal by design - a misconfigured deploy should crash at boot, not limp along silently.
 
+import path from "node:path";
+
 export type Config = {
   db: { host: string; port: number; user: string; pass: string; name: string };
   redisUrl: string;
@@ -10,6 +12,7 @@ export type Config = {
   appOrigin: string;
   dlOrigin: string;
   storageRoot: string;
+  tusTempDir: string;
   port: number;
 };
 
@@ -51,6 +54,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     appOrigin: env.APP_ORIGIN!,
     dlOrigin: env.DL_ORIGIN!,
     storageRoot: env.STORAGE_ROOT!,
+    // Derived, not a separate env var. Must live inside STORAGE_ROOT so the tus-finish -> final-path
+    // rename() is same-filesystem (atomic), and dot-prefixed so isIgnoredEntry() skips it during
+    // reconciliation (D-57).
+    tusTempDir: path.join(env.STORAGE_ROOT!, ".tus"),
     port: Number(env.PORT),
   };
 }
