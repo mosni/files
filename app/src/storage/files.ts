@@ -58,6 +58,28 @@ async function deleteFileRow(collectionId: string, displayName: string): Promise
   ]);
 }
 
+async function insertFileRow(
+  collection: CollectionRecord,
+  displayName: string,
+  bytes: number,
+  uploaderSub: string | null,
+): Promise<FileRecord> {
+  const linkToken = generateLinkToken();
+  await getPool().query(
+    "INSERT INTO files (collection_id, display_name, bytes, protection, link_token, uploader_sub) VALUES (?, ?, ?, ?, ?, ?)",
+    [collection.id, displayName, bytes, collection.protection, linkToken, uploaderSub],
+  );
+  return {
+    collection: collection.name,
+    name: displayName,
+    bytes,
+    protection: collection.protection,
+    linkToken,
+    ownerSub: collection.ownerSub,
+    uploaderSub,
+  };
+}
+
 // Inserts a row for a disk entry with no matching row yet (a hand-copied drop-in, D-56), then strips it.
 // On strip failure the just-inserted row is rolled back and this returns null - the caller must treat the
 // file as unservable rather than serve an unstripped original (D-60); the next reconcile simply retries.
@@ -67,11 +89,7 @@ async function reconcileNewEntry(
   absolutePath: string,
   bytes: number,
 ): Promise<FileRecord | null> {
-  const linkToken = generateLinkToken();
-  await getPool().query(
-    "INSERT INTO files (collection_id, display_name, bytes, protection, link_token, uploader_sub) VALUES (?, ?, ?, ?, ?, NULL)",
-    [collection.id, displayName, bytes, collection.protection, linkToken],
-  );
+  const record = await insertFileRow(collection, displayName, bytes, null);
 
   try {
     await stripInPlace(absolutePath);
@@ -81,15 +99,20 @@ async function reconcileNewEntry(
     return null;
   }
 
-  return {
-    collection: collection.name,
-    name: displayName,
-    bytes,
-    protection: collection.protection,
-    linkToken,
-    ownerSub: collection.ownerSub,
-    uploaderSub: null,
-  };
+  return record;
+}
+
+// The upload-finish commit path (D2): unlike reconcileNewEntry, the caller has already stripped the file
+// and confirmed success BEFORE calling this - an upload that fails to strip is failed outright (D-60: an
+// unstripped original is never stored), so there is no "insert then roll back" step here, and
+// uploaderSub is a real, verified sub rather than null.
+export async function insertUploadedFile(
+  collection: CollectionRecord,
+  displayName: string,
+  bytes: number,
+  uploaderSub: string,
+): Promise<FileRecord> {
+  return insertFileRow(collection, displayName, bytes, uploaderSub);
 }
 
 function rowToRecord(collection: CollectionRecord, row: FileRow, bytes: number): FileRecord {

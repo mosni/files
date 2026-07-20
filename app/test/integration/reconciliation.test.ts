@@ -8,11 +8,12 @@ import { applySchema, closeDb, getPool, initDb } from "../../src/storage/db.ts";
 import {
   hasAclGrant,
   initFilesStorage,
+  insertUploadedFile,
   listCollection,
   resolveByPath,
   resolveByToken,
 } from "../../src/storage/files.ts";
-import { getCollectionByName } from "../../src/storage/collections.ts";
+import { getCollectionByName, getOrCreateCollectionForDiskEntry } from "../../src/storage/collections.ts";
 
 // Against real MariaDB and a real temp directory (D-45). This is the D-56 acceptance suite: the
 // filesystem is the source of truth, and a file copied into the storage tree by hand must become
@@ -219,6 +220,27 @@ describe("storage/files.ts - lazy, request-scoped reconciliation (D-56/D-57)", (
       await resolveByPath(collection, "unshared.txt");
 
       expect(await hasAclGrant(collection, "unshared.txt", `user:${randomUUID()}`)).toBe(false);
+    });
+  });
+
+  describe("insertUploadedFile() (D2's commit path - distinct from reconciliation's insert)", () => {
+    it("records the real uploader sub, unlike a reconciled hand-copied file", async () => {
+      const collectionName = await freshCollectionDir();
+      const collection = await getOrCreateCollectionForDiskEntry(root, collectionName);
+      const uploaderSub = `user:${randomUUID()}`;
+      // insertUploadedFile only writes the DB row (D2's caller already renamed the bytes to their final
+      // path before calling it) - resolveByToken() below still stats the real file, so it must exist.
+      const content = "already-uploaded-and-stripped-content";
+      await writeFile(path.join(root, collectionName, "uploaded.txt"), content);
+
+      const record = await insertUploadedFile(collection!, "uploaded.txt", content.length, uploaderSub);
+
+      expect(record.uploaderSub).toBe(uploaderSub);
+      expect(record.protection).toBe(collection!.protection);
+      expect(record.linkToken).toMatch(/^[A-Za-z0-9_-]{22}$/);
+
+      const resolved = await resolveByToken(record.linkToken);
+      expect(resolved?.uploaderSub).toBe(uploaderSub);
     });
   });
 });
