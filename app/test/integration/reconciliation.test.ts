@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import sharp from "sharp";
 import { applySchema, closeDb, getPool, initDb } from "../../src/storage/db.ts";
 import {
+  hasAclGrant,
   initFilesStorage,
   listCollection,
   resolveByPath,
@@ -191,5 +192,33 @@ describe("storage/files.ts - lazy, request-scoped reconciliation (D-56/D-57)", (
       [collection],
     );
     expect((rows as { n: number }[])[0]?.n).toBe(0);
+  });
+
+  describe("hasAclGrant() (security invariant 6 - byte-for-byte sub match, never parsed)", () => {
+    it("returns true only for the exact sub granted, never a prefix or fragment", async () => {
+      const collection = await freshCollectionDir();
+      await writeFile(path.join(root, collection, "shared.txt"), "content");
+      await resolveByPath(collection, "shared.txt"); // reconcile so a files row exists
+
+      const grantedSub = `user:${randomUUID()}`;
+      await getPool().query(
+        `INSERT INTO file_acl (collection_id, display_name, sub)
+         VALUES ((SELECT id FROM collections WHERE name = ?), ?, ?)`,
+        [collection, "shared.txt", grantedSub],
+      );
+
+      expect(await hasAclGrant(collection, "shared.txt", grantedSub)).toBe(true);
+      expect(await hasAclGrant(collection, "shared.txt", grantedSub.slice(0, -1))).toBe(false);
+      expect(await hasAclGrant(collection, "shared.txt", `${grantedSub}x`)).toBe(false);
+      expect(await hasAclGrant(collection, "shared.txt", `other-${randomUUID()}`)).toBe(false);
+    });
+
+    it("returns false when no grant exists at all", async () => {
+      const collection = await freshCollectionDir();
+      await writeFile(path.join(root, collection, "unshared.txt"), "content");
+      await resolveByPath(collection, "unshared.txt");
+
+      expect(await hasAclGrant(collection, "unshared.txt", `user:${randomUUID()}`)).toBe(false);
+    });
   });
 });

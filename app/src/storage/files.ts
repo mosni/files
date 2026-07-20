@@ -176,6 +176,20 @@ interface FileWithCollectionRow extends FileRow {
   collection_owner_sub: string | null;
 }
 
+// Security invariant 6: sub is matched byte-for-byte, never parsed - a plain equality WHERE clause on the
+// stored string is exactly that, never a prefix or fragment match. Used by the delivery route to decide
+// `private` access when the requester is neither the owner nor an admin.
+export async function hasAclGrant(collectionName: string, name: string, sub: string): Promise<boolean> {
+  const [rows] = await getPool().query<RowDataPacket[]>(
+    `SELECT 1 FROM file_acl
+     JOIN collections ON file_acl.collection_id = collections.id
+     WHERE collections.name = ? AND file_acl.display_name = ? AND file_acl.sub = ?
+     LIMIT 1`,
+    [collectionName, name, sub],
+  );
+  return rows.length > 0;
+}
+
 export async function resolveByToken(token: string): Promise<FileRecord | null> {
   const root = getStorageRoot();
   const [rows] = await getPool().query<FileWithCollectionRow[]>(
