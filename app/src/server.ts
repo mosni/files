@@ -67,13 +67,14 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
     nameSpace: "fastify-rate-limit-global-",
   });
 
-  // Serve the SPA on the files host ONLY. The host constraint matters: dl.mosni.dev's delivery route is a
-  // catch-all `/*`, and without constraining static to the files host its own `/*` SPA fallback would
-  // collide with delivery's on dl. (and could leak app JS onto the containment origin, D-33). Missing
-  // web/dist (before the SPA is built) only warns, which is what lets this build in a test that never
-  // runs `vite build`.
-  const filesHost = new URL(config.appOrigin).hostname;
-  await app.register(fastifyStatic, { root: SPA_ROOT, constraints: { host: filesHost } });
+  // Serve the SPA. Deliberately UNconstrained by host: the SPA must be reachable both at files.mosni.dev
+  // (via nginx's Host: files.mosni.dev) and at the container's own host (the deploy healthcheck / e2e hit
+  // app-e2e:3000 directly). D-33 (no SPA/app-JS on dl.) is still upheld: delivery registers a host-
+  // constrained `/*` on the dl host, and find-my-way prefers that host match over this unconstrained
+  // wildcard, so every dl. request goes to delivery (a file or a 404) and static content never serves
+  // there. Missing web/dist (before the SPA is built) only warns, which lets this build in a test that
+  // never runs `vite build`.
+  await app.register(fastifyStatic, { root: SPA_ROOT });
 
   // E2/E5a. Each registers its own host constraint (files.mosni.dev vs dl.mosni.dev) so the origin split
   // (D-4) holds even though both hosts are proxied to this same process. Delivery is dl-only; preview,
