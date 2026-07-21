@@ -1,4 +1,4 @@
-// Shared bearer-token verification for plain Fastify routes (routes/delivery.ts, routes/context.ts).
+// Shared bearer-token verification for plain Fastify routes (currently controllers/delivery.ts).
 // routes/upload.ts does its own equivalent for tus's hooks, which receive a raw http.IncomingMessage
 // rather than a FastifyRequest - not worth unifying across two different request shapes.
 

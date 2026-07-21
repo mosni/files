@@ -107,6 +107,24 @@ describe("routes/delivery.ts (E5a - the security-critical route, session 007 URL
     it("returns 404 for a path with no row", async () => {
       expect((await get(`/${randomUUID()}/nope.txt`)).statusCode).toBe(404);
     });
+
+    // The URLs handed to users are percent-encoded per segment (buildFileUrls), so a name with a space or
+    // a non-ASCII character only works if the router hands the handler the DECODED path. Every other test
+    // here uses plain ASCII names and would miss a regression in that.
+    it("resolves a percent-encoded name (space and non-ASCII) back to the stored path", async () => {
+      const folder = `enc-${randomUUID()}`;
+      const name = "a b ü.png";
+      const relPath = `${folder}/${name}`;
+      await seed({ relPath, protection: "public" });
+
+      const encoded = `/${folder}/${encodeURIComponent(name)}`;
+      const res = await get(encoded);
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["x-accel-redirect"]).toBe(
+        `/internal-storage/${folder}/${encodeURIComponent(name)}`,
+      );
+      expect(res.headers["content-disposition"]).toContain("filename*=UTF-8''");
+    });
   });
 
   describe("token delivery (/t/:token)", () => {
