@@ -1,15 +1,22 @@
-import { randomBytes } from "node:crypto";
+import { randomInt } from "node:crypto";
 
-// The token alphabet is exactly base64url's ([A-Za-z0-9_-]) so a token can never be confused with a
-// path segment (no "/") or with standard-base64 output (no "+"), letting isLinkTokenShaped() double as
-// a router-level guard between "this URL segment is a token" and "this URL segment is a filename".
-const TOKEN_LENGTH = 22; // 16 random bytes, base64url-encoded, no padding.
-const TOKEN_SHAPE = /^[A-Za-z0-9_-]{22}$/;
+// Short, human-friendly share tokens (preliminary-review P5). Deliberately base62, NOT numeric: a literal
+// 5-digit numeric token is only 100 000 values - brute-forceable in minutes - and it is what guards
+// `secret`/`unlisted` files, so numeric would make those levels meaningless. 5 base62 characters is ~916M
+// (~30 bits) for the same "short and copyable" feel with far less brute-force surface. Anything genuinely
+// sensitive must lean on `private` + auth, never on token secrecy. Length and alphabet are the one place
+// to change - if you bump LINK_TOKEN_LENGTH, widen the link_token column in schema.sql to match.
+export const LINK_TOKEN_LENGTH = 5;
+const TOKEN_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const TOKEN_SHAPE = new RegExp(`^[A-Za-z0-9]{${LINK_TOKEN_LENGTH}}$`);
 
-// 16 bytes = 128 bits of entropy, generated once per file and stored in the database - unrelated to the
-// file's on-disk name (see agent-docs D-59 for the protection-level context that consumes this).
 export function generateLinkToken(): string {
-  return randomBytes(16).toString("base64url");
+  // crypto.randomInt is uniform over [0, n) - no modulo bias, unlike `randomBytes % 62`.
+  let token = "";
+  for (let i = 0; i < LINK_TOKEN_LENGTH; i++) {
+    token += TOKEN_ALPHABET[randomInt(TOKEN_ALPHABET.length)];
+  }
+  return token;
 }
 
 export function isLinkTokenShaped(value: string): boolean {

@@ -6,15 +6,15 @@ describe("registerGrantableRoles() (D-32)", () => {
     vi.unstubAllGlobals();
   });
 
-  it("registers all three roles against auth's internal API", async () => {
+  it("registers both roles against auth's internal API (files:admin dropped session 007)", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
     await registerGrantableRoles();
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     const roles = fetchMock.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string).role);
-    expect(roles.sort()).toEqual(["files:admin", "files:delete", "files:write"]);
+    expect(roles.sort()).toEqual(["files:delete", "files:write"]);
     for (const [, init] of fetchMock.mock.calls) {
       const body = JSON.parse((init as RequestInit).body as string);
       expect(body.namespace).toBe("files");
@@ -27,7 +27,7 @@ describe("registerGrantableRoles() (D-32)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(registerGrantableRoles()).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("a non-ok response does not throw", async () => {

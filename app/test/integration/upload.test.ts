@@ -26,7 +26,7 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
   let app: FastifyInstance;
   let redis: Redis;
   let config: Config;
-  const createdCollectionNames: string[] = [];
+  const createdFolders: string[] = [];
 
   beforeAll(async () => {
     initDb({
@@ -69,13 +69,11 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
 
   afterEach(async () => {
     vi.mocked(verify).mockReset();
-    while (createdCollectionNames.length > 0) {
-      const name = createdCollectionNames.pop()!;
-      await getPool().query(
-        "DELETE FROM files WHERE collection_id IN (SELECT id FROM collections WHERE name = ?)",
-        [name],
-      );
-      await getPool().query("DELETE FROM collections WHERE name = ?", [name]);
+    while (createdFolders.length > 0) {
+      const folder = createdFolders.pop()!;
+      // Files are path-keyed now (no collections table) - clean up everything under the uploader's folder.
+      await getPool().query("DELETE FROM file_acl WHERE path LIKE ?", [`${folder}/%`]);
+      await getPool().query("DELETE FROM files WHERE path LIKE ?", [`${folder}/%`]);
     }
   });
 
@@ -163,7 +161,7 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
     mockAuthorizedAs(uploaderSub);
     // The default collection this upload lands in is named from the sub (no preferred name given) -
     // track it for cleanup.
-    createdCollectionNames.push(uploaderSub);
+    createdFolders.push(uploaderSub);
 
     const content = Buffer.from("hello from the tus lifecycle test");
     const createRes = await createUpload(uploaderSub, content.length, {
@@ -195,9 +193,9 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
     expect(patch2.status).toBe(200);
 
     const body = (await patch2.json()) as { previewUrl: string; directUrl: string };
-    expect(body.previewUrl).toContain("files.mosni.dev");
-    expect(body.directUrl).toContain("dl.mosni.dev");
-    // unlisted (the default) resolves at the readable collection/name path, not a token path.
+    // unlisted (the default) resolves at the readable /f/<path> preview and plain dl path, not a token.
+    expect(body.previewUrl).toContain("files.mosni.dev/f/");
+    expect(body.directUrl).toContain("dl.mosni.dev/");
     expect(body.previewUrl).toContain(encodeURIComponent(uploaderSub));
     expect(body.previewUrl).toContain("greeting.txt");
 
@@ -207,7 +205,7 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
 
   it("rejects a traversal-shaped filename and leaves nothing on disk", async () => {
     const uploaderSub = `user:${randomUUID()}`;
-    createdCollectionNames.push(uploaderSub);
+    createdFolders.push(uploaderSub);
     mockAuthorizedAs(uploaderSub);
 
     const content = Buffer.from("malicious");
@@ -229,7 +227,7 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
 
   it("an uploaded JPEG carrying GPS EXIF has no GPS on disk afterwards (D-60 end to end)", async () => {
     const uploaderSub = `user:${randomUUID()}`;
-    createdCollectionNames.push(uploaderSub);
+    createdFolders.push(uploaderSub);
     mockAuthorizedAs(uploaderSub);
 
     const jpegBytes = await sharp({

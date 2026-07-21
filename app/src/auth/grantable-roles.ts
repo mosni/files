@@ -1,9 +1,11 @@
-// D-32: grantable-role registration is idempotent and non-fatal. Registers this app's three roles with
-// auth's internal API on boot; auth's addGrantableRole() is INSERT IGNORE, so repeated calls are no-ops.
-// MUST be called only after the container has joined the `stack` network, since resolving the `auth`
-// alias (and being resolvable AS `files` in turn - auth's peer check) depends on it.
-
-const GRANTABLE_ROLES = ["files:write", "files:delete", "files:admin"] as const;
+// D-32: grantable-role registration is idempotent and non-fatal. Registers this app's roles with auth's
+// internal API on boot; auth's addGrantableRole() is INSERT IGNORE, so repeated calls are no-ops. MUST be
+// called only after the container has joined the `stack` network, since resolving the `auth` alias (and
+// being resolvable AS `files` in turn - auth's peer check) depends on it.
+//
+// files:admin was dropped in session 007 (preliminary-review, Hannah's call): an admin is a user assigned
+// both lower roles directly in auth, so there is no third role to register.
+const GRANTABLE_ROLES = ["files:write", "files:delete"] as const;
 
 // Fixed convention, not a per-deploy setting: auth's internal-only listener, reachable via the `auth`
 // network alias at its documented default INTERNAL_PORT (../auth/README.md - "compose never publishes

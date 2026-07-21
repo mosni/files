@@ -1,6 +1,8 @@
 // D-9/D-54: server-rendered so messenger crawlers (which do not run JavaScript) get a real OG unfurl.
-// Rendered identically for everyone, anonymous-shaped (D-63) - the session-aware island probe is a small
-// inline script, not server-side branching, so the HTML this view produces never depends on who asked.
+// Rendered identically for everyone. The session-aware island probe (old D-41/D-63) was dropped in
+// session 007 - E5a ships no island, so it was speculative build-ahead; E5 adds hydration when a real
+// island exists. Only the design-system chrome loads here (for styling + the copy toast); the auth SDK
+// does not, since nothing on this page reads a session.
 
 import { renderToString } from "react-dom/server";
 import type { FileRecord } from "../storage/files.ts";
@@ -8,12 +10,6 @@ import { isInlineAllowed } from "../lib/mime.ts";
 import { stripStrategyFor } from "../lib/media.ts";
 
 type PreviewUrls = { previewUrl: string; directUrl: string };
-
-function escapeForInlineScript(value: string): string {
-  // This value is interpolated into a <script> body, not HTML - `<` is the only character that can break
-  // out (via "</script>"), but escape defensively rather than assume the token/URL shapes never contain it.
-  return value.replace(/</g, "\\u003c");
-}
 
 function OgTags({ file, directUrl }: { file: FileRecord; directUrl: string }) {
   const strategy = stripStrategyFor(file.name);
@@ -42,7 +38,7 @@ function InlineMedia({ file, directUrl }: { file: FileRecord; directUrl: string 
   if (strategy === "image") {
     return <img src={directUrl} alt={file.name} style={{ maxWidth: "100%" }} />;
   }
-  // isInlineAllowed also covers pdf/txt - a plain object/iframe embed rather than an image/video tag.
+  // isInlineAllowed also covers pdf/txt - a plain iframe embed rather than an image/video tag.
   return <iframe src={directUrl} title={file.name} style={{ width: "100%", height: "80vh", border: 0 }} />;
 }
 
@@ -55,9 +51,6 @@ function PreviewPage({ file, previewUrl, directUrl }: { file: FileRecord } & Pre
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>{`${file.name} · Hannah's File Drop`}</title>
         <OgTags file={file} directUrl={directUrl} />
-        {/* F3's load-order rule applies here too: sdk.js first, so mosnicat.js's window.mosni ??= {}
-            merge (and now sdk.js's own merge, D-63) never races. */}
-        <script src="https://auth.mosni.dev/sdk.js"></script>
         <script src="https://ui.mosni.dev/mosnicat.js"></script>
       </head>
       <body>
@@ -74,38 +67,42 @@ function PreviewPage({ file, previewUrl, directUrl }: { file: FileRecord } & Pre
             </div>
           )}
           <div className="panel">
-            {/* D-1: one primary copy button (the preview link, which unfurls), the direct link secondary. */}
-            <button type="button" className="btn" data-copy-link={previewUrl}>
-              Copy link
+            {/* D-1 + preliminary-review P9: a read-only link input with a copy button, not two rival
+                buttons. The preview link (which unfurls) is primary; the direct link is a smaller,
+                secondary read-only input below it. */}
+            <label>
+              Share link
+              <input type="text" readOnly value={previewUrl} data-copy-source="preview" />
+            </label>
+            <button type="button" className="btn" data-copy-for="preview">
+              Copy
             </button>
-            <a className="btn" href={directUrl}>
+            <label>
               Direct link
-            </a>
+              <input type="text" readOnly value={directUrl} data-copy-source="direct" />
+            </label>
+            <button type="button" data-copy-for="direct">
+              Copy direct
+            </button>
           </div>
         </main>
         <script
-          // D-63's mechanism: read the token client-side, call the context endpoint, but hydrate
-          // nothing yet (E5a ships no island). Guards every step so a missing/failed auth SDK never
-          // breaks the page - this script's failure must be invisible, not console-noisy on every load.
+          // Vanilla copy handler (no framework on the SSR page). Guards every step so a missing/failed
+          // chrome never breaks the copy itself - the toast is a nicety, not a requirement.
           dangerouslySetInnerHTML={{
             __html: `
 (function () {
-  var copyBtn = document.querySelector("[data-copy-link]");
-  if (copyBtn) {
-    copyBtn.addEventListener("click", function () {
-      navigator.clipboard.writeText(copyBtn.getAttribute("data-copy-link")).then(function () {
+  document.querySelectorAll("[data-copy-for]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var key = btn.getAttribute("data-copy-for");
+      var input = document.querySelector("[data-copy-source='" + key + "']");
+      if (!input) return;
+      navigator.clipboard.writeText(input.value).then(function () {
+        input.select();
         if (window.mosni && window.mosni.toast) window.mosni.toast("Link copied", { variant: "success" });
       }).catch(function () {});
     });
-  }
-  try {
-    if (!window.mosni || typeof window.mosni.token !== "function") return;
-    var token = window.mosni.token();
-    if (!token) return;
-    fetch("/api/f/${escapeForInlineScript(file.linkToken)}/context", {
-      headers: { Authorization: "Bearer " + token },
-    }).catch(function () {});
-  } catch (e) {}
+  });
 })();
 `,
           }}
@@ -116,5 +113,7 @@ function PreviewPage({ file, previewUrl, directUrl }: { file: FileRecord } & Pre
 }
 
 export function renderPreviewPage(file: FileRecord, urls: PreviewUrls): string {
-  return `<!DOCTYPE html>${renderToString(<PreviewPage file={file} previewUrl={urls.previewUrl} directUrl={urls.directUrl} />)}`;
+  return `<!DOCTYPE html>${renderToString(
+    <PreviewPage file={file} previewUrl={urls.previewUrl} directUrl={urls.directUrl} />,
+  )}`;
 }

@@ -2,6 +2,7 @@ import { Redis } from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildServer } from "../../src/server.ts";
 import { makeTestConfig } from "../helpers/testConfig.ts";
+import { UPLOAD_CHUNK_SIZE } from "../../src/lib/uploadConfig.ts";
 
 // Mandatory, never-delete tests (verification-concept.md): each maps to a security invariant in
 // technical-baseline.md §1 and must never be deleted, skipped, or weakened to make a change pass.
@@ -69,5 +70,15 @@ describe("security headers", () => {
     expect(imgSrc).toBeDefined();
     expect(imgSrc).toContain("data:");
     expect(imgSrc).toContain("blob:");
+  });
+
+  it("GET /api/config returns the server-authoritative upload chunk size (P10)", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/config",
+      headers: { host: "files.mosni.dev" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ uploadChunkSize: UPLOAD_CHUNK_SIZE });
   });
 });

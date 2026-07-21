@@ -1,20 +1,19 @@
-// D-56/D-57: the ONLY module that walks the storage tree. Reconciliation is lazy and request-scoped -
-// there is no background scan and no watcher. Listing a collection reads exactly that one directory;
-// resolving a download stats exactly that one path. Never readdir recursively.
+// The only module that maps files between the database and the disk. Preliminary-review P7: there is NO
+// reconciliation - a `files` row exists only because an upload created it. A lookup queries the row and
+// stats the one path it names; it never scans a directory and never inserts a row for a file it happens to
+// find on disk (no drop-in). "Keep the filesystem intact" still holds: bytes live at their real mirrored
+// paths; they are just indexed by the DB rather than discovered by walking.
 
-import { readdir, stat } from "node:fs/promises";
-import path from "node:path";
+import { stat, unlink } from "node:fs/promises";
 import type { RowDataPacket } from "mysql2/promise";
-import { isIgnoredEntry, resolveStoragePath } from "../lib/paths.ts";
+import { resolveRelPath, safeRelPath } from "../lib/paths.ts";
 import type { Protection } from "../lib/protection.ts";
 import { generateLinkToken } from "../lib/tokens.ts";
-import { getOrCreateCollectionForDiskEntry, type CollectionRecord } from "./collections.ts";
 import { getPool } from "./db.ts";
-import { stripInPlace } from "./strip.ts";
 
 export type FileRecord = {
-  collection: string;
-  name: string;
+  path: string; // relative path from STORAGE_ROOT - the DB key, the disk suffix, and the URL suffix
+  name: string; // basename, for Content-Disposition and the preview title
   bytes: number;
   protection: Protection;
   linkToken: string;
@@ -35,211 +34,130 @@ function getStorageRoot(): string {
   return storageRoot;
 }
 
+export function baseName(relPath: string): string {
+  const segments = relPath.split("/");
+  return segments[segments.length - 1] ?? relPath;
+}
+
 interface FileRow extends RowDataPacket {
-  collection_id: string;
-  display_name: string;
+  path: string;
   bytes: number;
   protection: Protection;
   link_token: string;
+  owner_sub: string | null;
   uploader_sub: string | null;
 }
 
-async function deleteFileRow(collectionId: string, displayName: string): Promise<void> {
-  const pool = getPool();
-  // file_acl has no ON DELETE CASCADE (matches the pre-existing schema convention) - clean it up
-  // explicitly, before the parent row, in FK-safe order.
-  await pool.query("DELETE FROM file_acl WHERE collection_id = ? AND display_name = ?", [
-    collectionId,
-    displayName,
-  ]);
-  await pool.query("DELETE FROM files WHERE collection_id = ? AND display_name = ?", [
-    collectionId,
-    displayName,
-  ]);
-}
-
-async function insertFileRow(
-  collection: CollectionRecord,
-  displayName: string,
-  bytes: number,
-  uploaderSub: string | null,
-): Promise<FileRecord> {
-  const linkToken = generateLinkToken();
-  await getPool().query(
-    "INSERT INTO files (collection_id, display_name, bytes, protection, link_token, uploader_sub) VALUES (?, ?, ?, ?, ?, ?)",
-    [collection.id, displayName, bytes, collection.protection, linkToken, uploaderSub],
-  );
+function rowToRecord(row: FileRow, bytes: number): FileRecord {
   return {
-    collection: collection.name,
-    name: displayName,
-    bytes,
-    protection: collection.protection,
-    linkToken,
-    ownerSub: collection.ownerSub,
-    uploaderSub,
-  };
-}
-
-// Inserts a row for a disk entry with no matching row yet (a hand-copied drop-in, D-56), then strips it.
-// On strip failure the just-inserted row is rolled back and this returns null - the caller must treat the
-// file as unservable rather than serve an unstripped original (D-60); the next reconcile simply retries.
-async function reconcileNewEntry(
-  collection: CollectionRecord,
-  displayName: string,
-  absolutePath: string,
-  bytes: number,
-): Promise<FileRecord | null> {
-  const record = await insertFileRow(collection, displayName, bytes, null);
-
-  try {
-    await stripInPlace(absolutePath);
-  } catch (err) {
-    console.error(`storage/files: stripInPlace failed for ${absolutePath} - excluding from listing`, err);
-    await deleteFileRow(collection.id, displayName);
-    return null;
-  }
-
-  return record;
-}
-
-// The upload-finish commit path (D2): unlike reconcileNewEntry, the caller has already stripped the file
-// and confirmed success BEFORE calling this - an upload that fails to strip is failed outright (D-60: an
-// unstripped original is never stored), so there is no "insert then roll back" step here, and
-// uploaderSub is a real, verified sub rather than null.
-export async function insertUploadedFile(
-  collection: CollectionRecord,
-  displayName: string,
-  bytes: number,
-  uploaderSub: string,
-): Promise<FileRecord> {
-  return insertFileRow(collection, displayName, bytes, uploaderSub);
-}
-
-function rowToRecord(collection: CollectionRecord, row: FileRow, bytes: number): FileRecord {
-  return {
-    collection: collection.name,
-    name: row.display_name,
+    path: row.path,
+    name: baseName(row.path),
     bytes,
     protection: row.protection,
     linkToken: row.link_token,
-    ownerSub: collection.ownerSub,
+    ownerSub: row.owner_sub,
     uploaderSub: row.uploader_sub,
   };
 }
 
-export async function listCollection(collectionName: string): Promise<FileRecord[]> {
-  const root = getStorageRoot();
-  const collection = await getOrCreateCollectionForDiskEntry(root, collectionName);
-  if (collection === null) return [];
+export async function deleteFileRow(relPath: string): Promise<void> {
+  const pool = getPool();
+  await pool.query("DELETE FROM file_acl WHERE path = ?", [relPath]);
+  await pool.query("DELETE FROM files WHERE path = ?", [relPath]);
+}
 
-  const dirPath = path.join(root, collectionName);
-  const dirents = await readdir(dirPath, { withFileTypes: true }).catch(() => []);
-  const diskNames = new Set(
-    dirents.filter((entry) => entry.isFile() && !isIgnoredEntry(entry.name)).map((entry) => entry.name),
-  );
+// Resolves the DB row for a relative path, then confirms the bytes are actually on disk. A row whose file
+// has vanished is deleted and treated as gone (D-16: a dead link 404s). A path with no row is null - there
+// is no drop-in, so an un-indexed file on disk is not served.
+export async function resolveByPath(relPath: string): Promise<FileRecord | null> {
+  const root = getStorageRoot();
+  const safe = safeRelPath(relPath);
+  if (safe === null) return null;
 
   const [rows] = await getPool().query<FileRow[]>(
-    "SELECT collection_id, display_name, bytes, protection, link_token, uploader_sub FROM files WHERE collection_id = ?",
-    [collection.id],
+    "SELECT path, bytes, protection, link_token, owner_sub, uploader_sub FROM files WHERE path = ?",
+    [safe],
   );
+  const row = rows[0];
+  if (row === undefined) return null;
 
-  // Row with no entry on disk -> delete it (D-56/D-57: the filesystem is the truth).
-  for (const row of rows) {
-    if (!diskNames.has(row.display_name)) {
-      await deleteFileRow(collection.id, row.display_name);
-    }
+  const absolutePath = resolveRelPath(root, safe);
+  const entryStat = absolutePath === null ? null : await stat(absolutePath).catch(() => null);
+  if (entryStat === null) {
+    await deleteFileRow(safe);
+    return null;
   }
-  const rowsByName = new Map(
-    rows.filter((row) => diskNames.has(row.display_name)).map((row) => [row.display_name, row]),
-  );
-
-  const records: FileRecord[] = [];
-  for (const name of diskNames) {
-    const absolutePath = path.join(dirPath, name);
-    const entryStat = await stat(absolutePath).catch(() => null);
-    if (entryStat === null) continue; // vanished between readdir and stat - next call reconciles
-
-    const existingRow = rowsByName.get(name);
-    if (existingRow !== undefined) {
-      records.push(rowToRecord(collection, existingRow, entryStat.size));
-    } else {
-      const record = await reconcileNewEntry(collection, name, absolutePath, entryStat.size);
-      if (record !== null) records.push(record);
-    }
-  }
-
-  return records;
-}
-
-export async function resolveByPath(collectionName: string, name: string): Promise<FileRecord | null> {
-  const root = getStorageRoot();
-  const collection = await getOrCreateCollectionForDiskEntry(root, collectionName);
-  if (collection === null) return null;
-
-  const absolutePath = resolveStoragePath(root, collectionName, name);
-  if (absolutePath === null) return null;
-
-  const entryStat = await stat(absolutePath).catch(() => null);
-  if (entryStat === null) return null;
-
-  const [rows] = await getPool().query<FileRow[]>(
-    "SELECT collection_id, display_name, bytes, protection, link_token, uploader_sub FROM files WHERE collection_id = ? AND display_name = ?",
-    [collection.id, name],
-  );
-  const existingRow = rows[0];
-  if (existingRow !== undefined) {
-    return rowToRecord(collection, existingRow, entryStat.size);
-  }
-
-  return reconcileNewEntry(collection, name, absolutePath, entryStat.size);
-}
-
-interface FileWithCollectionRow extends FileRow {
-  collection_name: string;
-  collection_owner_sub: string | null;
-}
-
-// Security invariant 6: sub is matched byte-for-byte, never parsed - a plain equality WHERE clause on the
-// stored string is exactly that, never a prefix or fragment match. Used by the delivery route to decide
-// `private` access when the requester is neither the owner nor an admin.
-export async function hasAclGrant(collectionName: string, name: string, sub: string): Promise<boolean> {
-  const [rows] = await getPool().query<RowDataPacket[]>(
-    `SELECT 1 FROM file_acl
-     JOIN collections ON file_acl.collection_id = collections.id
-     WHERE collections.name = ? AND file_acl.display_name = ? AND file_acl.sub = ?
-     LIMIT 1`,
-    [collectionName, name, sub],
-  );
-  return rows.length > 0;
+  return rowToRecord(row, entryStat.size);
 }
 
 export async function resolveByToken(token: string): Promise<FileRecord | null> {
   const root = getStorageRoot();
-  const [rows] = await getPool().query<FileWithCollectionRow[]>(
-    `SELECT files.collection_id, files.display_name, files.bytes, files.protection, files.link_token,
-            files.uploader_sub, collections.name AS collection_name, collections.owner_sub AS collection_owner_sub
-     FROM files JOIN collections ON files.collection_id = collections.id
-     WHERE files.link_token = ?`,
+  const [rows] = await getPool().query<FileRow[]>(
+    "SELECT path, bytes, protection, link_token, owner_sub, uploader_sub FROM files WHERE link_token = ?",
     [token],
   );
   const row = rows[0];
   if (row === undefined) return null;
 
-  const absolutePath = resolveStoragePath(root, row.collection_name, row.display_name);
+  const absolutePath = resolveRelPath(root, row.path);
   const entryStat = absolutePath === null ? null : await stat(absolutePath).catch(() => null);
   if (entryStat === null) {
-    // D-16: a dead link 404s. The file is gone - clean up the row rather than serving a ghost record.
-    await deleteFileRow(row.collection_id, row.display_name);
+    await deleteFileRow(row.path);
     return null;
   }
+  return rowToRecord(row, entryStat.size);
+}
 
-  return {
-    collection: row.collection_name,
-    name: row.display_name,
-    bytes: entryStat.size,
-    protection: row.protection,
-    linkToken: row.link_token,
-    ownerSub: row.collection_owner_sub,
-    uploaderSub: row.uploader_sub,
-  };
+// Security invariant 6: sub is matched byte-for-byte, never parsed - a plain equality WHERE clause is
+// exactly that. Used by the delivery controller to authorize `private` access for a non-owner/non-admin.
+export async function hasAclGrant(relPath: string, sub: string): Promise<boolean> {
+  const [rows] = await getPool().query<RowDataPacket[]>(
+    "SELECT 1 FROM file_acl WHERE path = ? AND sub = ? LIMIT 1",
+    [relPath, sub],
+  );
+  return rows.length > 0;
+}
+
+function isLinkTokenDuplicate(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: string }).code === "ER_DUP_ENTRY" &&
+    /link_token|uniq_link_token/.test((err as { message?: string }).message ?? "")
+  );
+}
+
+// The upload-commit insert (preliminary-review P8: the file was already stripped on disk before this is
+// called). Retries only on the astronomically-unlikely short-token collision; a duplicate PRIMARY KEY on
+// `path` is a real conflict the caller should have avoided by suffixing, so it propagates.
+export async function insertUploadedFile(params: {
+  path: string;
+  bytes: number;
+  protection: Protection;
+  ownerSub: string;
+  uploaderSub: string;
+}): Promise<FileRecord> {
+  const pool = getPool();
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const linkToken = generateLinkToken();
+    try {
+      await pool.query(
+        "INSERT INTO files (path, bytes, protection, link_token, owner_sub, uploader_sub) VALUES (?, ?, ?, ?, ?, ?)",
+        [params.path, params.bytes, params.protection, linkToken, params.ownerSub, params.uploaderSub],
+      );
+      return {
+        path: params.path,
+        name: baseName(params.path),
+        bytes: params.bytes,
+        protection: params.protection,
+        linkToken,
+        ownerSub: params.ownerSub,
+        uploaderSub: params.uploaderSub,
+      };
+    } catch (err) {
+      if (isLinkTokenDuplicate(err)) continue; // regenerate the token and retry
+      throw err;
+    }
+  }
+  throw new Error("storage/files: could not generate a unique link token after 5 attempts");
 }

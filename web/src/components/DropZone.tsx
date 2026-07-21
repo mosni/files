@@ -5,10 +5,8 @@
 import { useEffect, useRef, useState } from "react";
 import * as tus from "tus-js-client";
 import { can, type Claims } from "../../../app/src/lib/roles.ts";
+import { UPLOAD_CHUNK_SIZE } from "../../../app/src/lib/uploadConfig.ts";
 import { CopyLink } from "./CopyLink.tsx";
-
-// Matches the server's rate-limit budget for PATCH chunks (Wave D) - do not change independently of it.
-const CHUNK_SIZE = 5 * 1024 * 1024;
 
 type MosniUser = Claims | null;
 type MosniToastOptions = { variant?: "success" | "error" | "info" };
@@ -50,10 +48,15 @@ type FileUpload = {
 
 let nextUploadId = 0;
 
-function startUpload(file: File, token: string | null, onUpdate: (state: UploadState) => void) {
+function startUpload(
+  file: File,
+  token: string | null,
+  chunkSize: number,
+  onUpdate: (state: UploadState) => void,
+) {
   const upload = new tus.Upload(file, {
     endpoint: "/api/upload",
-    chunkSize: CHUNK_SIZE,
+    chunkSize,
     metadata: { filename: file.name },
     headers: { Authorization: `Bearer ${token ?? ""}` },
     onProgress: (bytesSent, bytesTotal) => {
@@ -79,7 +82,23 @@ export function DropZone() {
   const [user, setUser] = useState<MosniUser>(null);
   const [authReady, setAuthReady] = useState(false);
   const [uploads, setUploads] = useState<FileUpload[]>([]);
+  // Server-authoritative chunk size (P10): the shared constant is the compile-time fallback, but the
+  // running server is the source of truth so the client and the server's rate-limit budget cannot drift.
+  const [chunkSize, setChunkSize] = useState(UPLOAD_CHUNK_SIZE);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/config")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((cfg: { uploadChunkSize?: unknown } | null) => {
+        if (!cancelled && cfg && typeof cfg.uploadChunkSize === "number") setChunkSize(cfg.uploadChunkSize);
+      })
+      .catch(() => {}); // unreachable /api/config just means we keep the fallback - never blocks uploads
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -120,7 +139,7 @@ export function DropZone() {
     Array.from(fileList).forEach((file) => {
       const id = `upload-${nextUploadId++}`;
       setUploads((prev) => [...prev, { id, name: file.name, state: { status: "uploading", progress: 0 } }]);
-      startUpload(file, token, (state) => updateUpload(id, state));
+      startUpload(file, token, chunkSize, (state) => updateUpload(id, state));
     });
   }
 

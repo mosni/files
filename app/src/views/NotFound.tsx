@@ -1,11 +1,7 @@
-// The first server-rendered view (technical-baseline.md §2: markup lives in .tsx, never in template
-// literals - D-10). E1 ships no preview or share page yet; this error view exists because the app needs
-// *some* real JSX on the server for D-44 to be proven rather than assumed, and a 404 page is the one
-// server-rendered page that owes nothing to a later epic.
-//
-// Deliberately self-contained: no design-system script, no auth SDK, no client JS at all. An error page
-// is reachable on any path, including ones a share link got wrong, so it stays the cheapest possible
-// response.
+// Server-rendered 404 (technical-baseline.md §2/D-10: markup lives in .tsx). Preliminary-review P1: now
+// styled with the design-system chrome (.panel/.btn), softening D-54's "deliberately bare" choice. It
+// still loads no auth SDK and no app JS - an error page is reachable on any path, so it stays a cheap,
+// self-contained response with only the one chrome stylesheet/script.
 
 import { renderToString } from "react-dom/server";
 
@@ -16,11 +12,17 @@ function NotFound() {
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Not found · Hannah's File Drop</title>
+        <script src="https://ui.mosni.dev/mosnicat.js"></script>
       </head>
       <body>
         <main>
-          <h1>Not found</h1>
-          <p>There is nothing at this address. The link may be wrong, or the file may have been deleted.</p>
+          <div className="panel">
+            <h1>Not found</h1>
+            <p>There is nothing at this address. The link may be wrong, or the file may have been deleted.</p>
+            <a className="btn" href="/">
+              Go to Hannah&rsquo;s File Drop
+            </a>
+          </div>
         </main>
       </body>
     </html>

@@ -24,17 +24,17 @@ test("tus upload is rejected with no bearer token (real production image, D1)", 
   expect(res.status()).toBe(401);
 });
 
-test("delivery 404s for a file that does not exist (real production image)", async ({ request }) => {
-  const res = await request.get("/some-nonexistent-collection/nope.txt", {
-    // dl.mosni.dev's host-constrained route - app-e2e has no real dl. vhost in this compose network, so
-    // this hits the same process directly and relies on the Host header, exactly as nginx's proxy_pass
+test("plain-path delivery 404s for a path with no row (real production image)", async ({ request }) => {
+  const res = await request.get("/nobody/here/nope.txt", {
+    // dl.mosni.dev's host-constrained /* route - app-e2e has no real dl. vhost in this compose network,
+    // so this hits the same process directly and relies on the Host header, exactly as nginx's proxy_pass
     // would forward it in production.
     headers: { host: "dl.mosni.dev" },
   });
   expect(res.status()).toBe(404);
 });
 
-test("a bare single segment that is not token-shaped 404s on the delivery host", async ({ request }) => {
-  const res = await request.get("/not-a-token", { headers: { host: "dl.mosni.dev" } });
+test("token delivery 404s for an unknown token (real production image)", async ({ request }) => {
+  const res = await request.get("/t/ZZZZZ", { headers: { host: "dl.mosni.dev" } });
   expect(res.status()).toBe(404);
 });

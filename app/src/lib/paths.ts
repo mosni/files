@@ -1,18 +1,8 @@
 import path from "node:path";
 
-// D-58: collection names share a flat namespace with the app's own routes, so these first-segment
-// names can never be claimed by a collection.
-export const RESERVED_COLLECTION_NAMES = ["f", "api", "health", "assets", "favicon.ico"] as const;
-
-// Fastify/find-my-way route-parameter fragment for a `:collection` segment that excludes every reserved
-// name at the ROUTER level, not just inside a handler. Static routes always out-rank parametric ones in
-// find-my-way's match order, EXCEPT against @fastify/static's SPA fallback, which is a lower-priority
-// wildcard (`/*`) - without this exclusion, routes/preview.ts's and routes/delivery.ts's `/:collection/
-// :name` pattern would silently swallow requests like `/assets/index-abc123.js` before the SPA's static
-// files ever get served.
-export const NON_RESERVED_COLLECTION_PARAM = `:collection(^(?!(?:${RESERVED_COLLECTION_NAMES.map((name) =>
-  name.replace(/\./g, "\\."),
-).join("|")})$).+)`;
+// Security-critical: user-controlled names flow into filesystem paths (the app mirrors URLs onto disk).
+// This module is the boundary that keeps that safe. It REJECTS unsafe input (returns null) rather than
+// sanitising it - trimming or rewriting a hostile name would make two distinct names collide.
 
 const CONTROL_CHAR = /[\x00-\x1f\x7f]/;
 const ONLY_DOTS_OR_WHITESPACE = /^[.\s]+$/;
@@ -35,11 +25,8 @@ function splitExtension(name: string): { base: string; ext: string } {
   return { base: name.slice(0, splitAt), ext: name.slice(splitAt) };
 }
 
-// `kind` rather than a bare boolean: RESERVED_COLLECTION_NAMES only applies to the first path segment
-// (the collection), never to a file's display name, and a caller reading `safeSegment(x, "collection")`
-// doesn't need to remember what `true` meant here. Reserved-name checking stays inside this module
-// (where the list already lives) instead of becoming every caller's job.
-export function safeSegment(name: string, kind: "file" | "collection" = "file"): string | null {
+/** Returns a safe single path segment (one level, no slashes), or null if it cannot be made safe. */
+export function safeSegment(name: string): string | null {
   if (typeof name !== "string" || name.length === 0) return null;
   if (name === "." || name === "..") return null;
   if (ONLY_DOTS_OR_WHITESPACE.test(name)) return null;
@@ -66,15 +53,31 @@ export function safeSegment(name: string, kind: "file" | "collection" = "file"):
     // Not a valid percent-encoding - nothing further to check.
   }
 
-  if (kind === "collection" && (RESERVED_COLLECTION_NAMES as readonly string[]).includes(name)) {
-    return null;
-  }
-
   return name;
 }
 
-// Belt and braces (D-56): safeSegment() should already make escape impossible, but this is the
-// security boundary for attacker-controlled path segments, so it doesn't rely on that alone.
+/**
+ * Validates a URL-supplied relative path (preliminary-review P6: URLs mirror the on-disk tree, arbitrary
+ * depth). Every `/`-separated segment must pass safeSegment - so `..`, control characters, empty segments
+ * (a `//` or a leading/trailing slash), and per-segment traversal are all rejected. Returns the safe
+ * relative path (the DB key and disk suffix), or null. Leading/trailing slashes are rejected rather than
+ * trimmed, for the same "two inputs must not collapse to one" reason safeSegment rejects rather than trims.
+ */
+export function safeRelPath(relPath: string): string | null {
+  if (typeof relPath !== "string" || relPath.length === 0) return null;
+  const segments = relPath.split("/");
+  const safe: string[] = [];
+  for (const segment of segments) {
+    const s = safeSegment(segment);
+    if (s === null) return null;
+    safe.push(s);
+  }
+  return safe.join("/");
+}
+
+// Belt and braces: safeSegment/safeRelPath should already make escape impossible, but this is the
+// security boundary for attacker-controlled path segments, so it verifies containment after path.resolve
+// rather than trusting the segment checks alone.
 function resolveWithinRoot(root: string, segments: readonly string[]): string | null {
   const resolvedRoot = path.resolve(root);
   const resolved = path.resolve(resolvedRoot, ...segments);
@@ -85,24 +88,14 @@ function resolveWithinRoot(root: string, segments: readonly string[]): string | 
   return resolved;
 }
 
-export function resolveStoragePath(root: string, collection: string, file: string): string | null {
-  const safeCollection = safeSegment(collection, "collection");
-  const safeFile = safeSegment(file, "file");
-  if (safeCollection === null || safeFile === null) return null;
-
-  return resolveWithinRoot(root, [safeCollection, safeFile]);
+/** Joins STORAGE_ROOT + a (validated) relative path into an absolute path, or null if the path is unsafe. */
+export function resolveRelPath(root: string, relPath: string): string | null {
+  const safe = safeRelPath(relPath);
+  if (safe === null) return null;
+  return resolveWithinRoot(root, safe.split("/"));
 }
 
-// Directory-only resolve, needed by storage/collections.ts to stat a collection's directory on disk
-// before deciding whether to auto-create its row (D-57's "first touch").
-export function resolveCollectionPath(root: string, collection: string): string | null {
-  const safeCollection = safeSegment(collection, "collection");
-  if (safeCollection === null) return null;
-
-  return resolveWithinRoot(root, [safeCollection]);
-}
-
-// D-14's surviving half: duplicate display names are suffixed within a collection, not made opaque.
+// Duplicate display names are suffixed within a directory (`image.png` -> `image(2).png`), not made opaque.
 export function suffixForCollision(name: string, taken: readonly string[]): string {
   if (!taken.includes(name)) return name;
 

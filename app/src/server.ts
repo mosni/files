@@ -12,10 +12,10 @@ import { initAudit } from "./storage/audit.ts";
 import { initFilesStorage } from "./storage/files.ts";
 import { registerGrantableRoles } from "./auth/grantable-roles.ts";
 import { renderNotFoundPage } from "./views/NotFound.tsx";
+import { registerMetaRoutes } from "./routes/meta.ts";
 import { registerUploadRoutes } from "./routes/upload.ts";
 import { registerDeliveryRoutes } from "./routes/delivery.ts";
 import { registerPreviewRoutes } from "./routes/preview.ts";
-import { registerContextRoutes } from "./routes/context.ts";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 // D-48: the SPA is built into the image (web/dist, alongside this built server at app/dist/server.js)
@@ -67,20 +67,22 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
     nameSpace: "fastify-rate-limit-global-",
   });
 
-  // Missing web/dist (e.g. before the SPA has been built) only warns, per @fastify/static - it does not
-  // fail registration, which is what lets this build cleanly in a test that never runs `vite build`.
-  await app.register(fastifyStatic, { root: SPA_ROOT });
-
-  // lib/deploy's healthy() accepts any response < 500; `dl.mosni.dev` is never health-checked (only the
-  // apps.list domain is), so a broken `dl.` vhost will not fail a deploy - check it by hand.
-  app.get("/health", async () => ({ status: "ok" }));
+  // Serve the SPA on the files host ONLY. The host constraint matters: dl.mosni.dev's delivery route is a
+  // catch-all `/*`, and without constraining static to the files host its own `/*` SPA fallback would
+  // collide with delivery's on dl. (and could leak app JS onto the containment origin, D-33). Missing
+  // web/dist (before the SPA is built) only warns, which is what lets this build in a test that never
+  // runs `vite build`.
+  const filesHost = new URL(config.appOrigin).hostname;
+  await app.register(fastifyStatic, { root: SPA_ROOT, constraints: { host: filesHost } });
 
   // E2/E5a. Each registers its own host constraint (files.mosni.dev vs dl.mosni.dev) so the origin split
-  // (D-4) holds even though both hosts are proxied to this same process.
+  // (D-4) holds even though both hosts are proxied to this same process. Delivery is dl-only; preview,
+  // upload and the SPA are files-only; /health is unconstrained (the deploy healthcheck uses Host:
+  // 127.0.0.1).
+  await registerMetaRoutes(app, config);
   await registerUploadRoutes(app, config, redis);
   await registerDeliveryRoutes(app, config);
   await registerPreviewRoutes(app, config);
-  await registerContextRoutes(app, config);
 
   // Renders a real .tsx view through renderToString (technical-baseline.md §1: React SSR via JSX). This
   // is also what makes D-44 verifiable rather than assumed - JSX cannot be type-stripped, so a server

@@ -1,16 +1,9 @@
-// D-49: this app owns its own role helper. The vendored auth verify snippet's `can()` implements only
-// `mosni_owner === true || roles.includes(role)` - it does not implement D-22's implication
-// (`files:admin` => `files:write` + `files:delete`), and auth issues a flat role array. Route code must
-// import `can` from here, never from `auth/verify.ts`.
+// Role checks. Session 007 (preliminary-review, Hannah's call) DROPPED files:admin: an admin is now just
+// a user assigned both lower roles directly in auth, so there is no implication to encode here anymore
+// (this strikes D-22 and D-49's implication design). `mosni_owner` remains the superuser bypass.
 
 export type Claims = { sub: string; roles?: unknown; mosni_owner?: unknown };
-export type FilesRole = "files:write" | "files:delete" | "files:admin";
-
-const IMPLIES: Record<FilesRole, readonly FilesRole[]> = {
-  "files:write": [],
-  "files:delete": [],
-  "files:admin": ["files:write", "files:delete"],
-};
+export type FilesRole = "files:write" | "files:delete";
 
 export function can(claims: Claims | null, role: FilesRole): boolean {
   if (claims === null) return false;
@@ -18,14 +11,11 @@ export function can(claims: Claims | null, role: FilesRole): boolean {
 
   const roles = claims.roles;
   if (!Array.isArray(roles)) return false;
+  return roles.includes(role);
+}
 
-  return roles.some((held) => {
-    if (held === role) return true;
-    // Object.hasOwn, not `in`: `in` walks the prototype chain, so a role literally named "toString" or
-    // "constructor" would resolve to a function and blow up on .includes(). An unknown role must grant
-    // nothing quietly - can() is the app-wide gate and must fail closed by returning false, not by
-    // throwing a 500 out of every route that checks a role.
-    if (typeof held !== "string" || !Object.hasOwn(IMPLIES, held)) return false;
-    return IMPLIES[held as FilesRole].includes(role);
-  });
+// The superuser bypass, used where "can see/act on anyone's files" is needed (e.g. delivering a private
+// file to an operator). With files:admin gone, this is the only cross-owner grant besides an explicit ACL.
+export function isSuperuser(claims: Claims | null): boolean {
+  return claims !== null && claims.mosni_owner === true;
 }

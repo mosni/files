@@ -21,7 +21,14 @@ services:
     volumes:
       # Uploaded bytes live on the host disk, never baked into the image (D-13). This path is also what
       # nginx.conf's dl.mosni.dev vhost reads directly via X-Accel-Redirect (D-5/D-18: not backed up).
-      - /srv/stack/apps/files/storage:/data/storage
+      #
+      # Preliminary-review P3: the host path is DELIBERATELY outside the app's deploy dir
+      # (/srv/stack/apps/files/) so a stack redeploy that rebuilds/cleans the app directory cannot wipe
+      # uploaded files. INFRA CONFIRM NEEDED (flagged for Hannah): verify /srv/stack/data/ is the right
+      # convention for persistent app data on the box and that the deploy ritual never manages/cleans it;
+      # the box must have this directory (mkdir -p) before first up. Keep this path in sync with
+      # nginx.conf's `alias` in the dl.mosni.dev internal-storage location.
+      - /srv/stack/data/files/storage:/data/storage
 networks:
   stack:
     external: true
