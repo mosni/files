@@ -112,6 +112,44 @@ services:
       timeout: 5s
       retries: 20
 
+  # The REAL nginx.conf in front of the real app image, so e2e exercises the deployed topology rather
+  # than talking to the container directly. Nothing tested this file before, which is why two production
+  # bugs escaped in a row: the http:// tus Location (nothing sent X-Forwarded-Proto) and a 413 on every
+  # upload chunk (nginx defaults client_max_body_size to 1m; the tus chunk is 5 MB).
+  #
+  # Only genuinely environment-specific lines are rewritten - the upstream address, the hostnames, and TLS
+  # (no certs exist here, so the 443 blocks become the default :80 and the plain-HTTP redirect blocks are
+  # parked on :8080 where nothing calls them). Everything that carries BEHAVIOUR is used verbatim from the
+  # committed file: location precedence, client_max_body_size, proxy_request_buffering, the X-Forwarded-*
+  # headers, and the internal-only storage location.
+  nginx-e2e:
+    image: nginx:1.28-alpine
+    depends_on:
+      app-e2e:
+        condition: service_healthy
+    volumes:
+      - ./nginx.conf:/seed/nginx.conf:ro
+      - e2e-storage:/srv/stack/data/files/storage:ro
+    command:
+      - sh
+      - -lc
+      - |
+        sed -e 's#proxy_pass http://127.0.0.1:33001;#proxy_pass http://app-e2e:80;#g'             -e 's#server_name files.mosni.dev;#server_name files-e2e.test;#g'             -e '/listen 443 ssl;/d' -e '/ssl_certificate/d'             -e 's#listen 80;#listen 8080;#g'             /seed/nginx.conf > /etc/nginx/conf.d/default.conf
+        nginx -t && exec nginx -g 'daemon off;'
+    networks:
+      default:
+        aliases:
+          - files-e2e.test
+          # dl. resolves to nginx too, so X-Accel-Redirect delivery is exercised for real: nginx serves the
+          # bytes from the internal-only location off the shared storage volume. Nothing had ever tested
+          # that nginx actually serves what the app redirects to - only that the header was set.
+          - dl.mosni.dev
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
   app-e2e:
     build:
       context: .
@@ -177,16 +215,10 @@ services:
     networks:
       default:
         aliases:
-          - files-e2e.test
-          # Shadows the REAL internet dl.mosni.dev within this compose network only (Docker's embedded DNS
-          # checks its own aliases before falling through to external DNS). Without this, e2e/preview.spec.ts's
-          # CSP test was silently reaching the actual production dl.mosni.dev over the internet - its <iframe>
-          # tripped THAT site's own (unrelated, already-deployed) frame-ancestors policy, not anything this
-          # local build could affect. DL_ORIGIN stays the real "https://dl.mosni.dev" (unchanged) so the CSP
-          # directives and generated URLs stay exactly what production uses; only DNS resolution is shadowed.
-          # Nothing here listens on 443, so the iframe's https:// request fails with a network error (expected
-          # and harmless per the test's own comment), never reaching either the real site or a CSP violation.
-          - dl.mosni.dev
+          # files-e2e.test now resolves to nginx-e2e, NOT here - traffic must traverse the real vhost.
+          # This name stays so a spec can still reach the app directly when it needs to simulate what nginx
+          # itself sends (e.g. asserting tus honours X-Forwarded-Proto, which real nginx would overwrite).
+          - app-direct.test
     healthcheck:
       # 127.0.0.1, not localhost: this alpine image's `localhost` resolves ::1 (IPv6) first, and Fastify's
       # `host: "0.0.0.0"` binds IPv4 only - wget would get "connection refused" against the IPv6 attempt.

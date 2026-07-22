@@ -15,8 +15,16 @@ import { expect, test } from "@playwright/test";
 // Runs against the REAL production image (app-e2e, Dockerfile), real MariaDB, real redis.
 
 const IDP = process.env.MOCK_IDP ?? "http://mock-idp:9000";
+// files-e2e.test now resolves to the REAL nginx.conf in front of the app (nginx-e2e in the compose file),
+// so these flows traverse the deployed topology - location precedence, client_max_body_size, buffering,
+// the X-Forwarded-* headers - instead of hitting the container directly. That is what would have caught
+// the two production bugs (http:// Location, and a 413 on every chunk) before they reached the box.
 const FILES_HOST = "files-e2e.test";
 const FILES_ORIGIN = `http://${FILES_HOST}`;
+// app-direct.test reaches the container WITHOUT nginx, for the one assertion that must control the
+// X-Forwarded-* headers itself (the sandbox's nginx has no TLS, so its $scheme is http and it cannot
+// stand in for production's https-terminating proxy).
+const APP_DIRECT_ORIGIN = "http://app-direct.test";
 const STORAGE_ROOT = "/data/storage";
 
 async function mintToken(request: import("@playwright/test").APIRequestContext, sub: string, roles = "files:write") {
@@ -35,32 +43,19 @@ test("a real authorized tus upload lands the bytes, and the returned link serves
   const filename = `upload-${randomUUID().slice(0, 8)}.txt`;
   const body = Buffer.from(`hello from the real upload flow ${randomUUID()}`);
 
-  // --- create -------------------------------------------------------------------------------------
-  // X-Forwarded-Proto/Host are what nginx sends on both vhosts in production. Sending them here is the
-  // whole point of this assertion: it reproduces the bug Hannah hit on the real box, where tus built its
-  // Location from the raw request, handed the browser `http://files.mosni.dev/api/upload/<id>`, and the
-  // https page's CSP blocked the PATCH. It stayed hidden until D-76 removed helmet's
-  // upgrade-insecure-requests, which had been silently rewriting the scheme. This tier talks to the
-  // container directly over plain HTTP, so without these headers http:// is the *correct* answer and the
-  // regression would be untestable here.
+  // --- create (through real nginx) ----------------------------------------------------------------
   const create = await request.post(`${FILES_ORIGIN}/api/upload`, {
     headers: {
       authorization: `Bearer ${token}`,
       "tus-resumable": "1.0.0",
       "upload-length": String(body.length),
       "upload-metadata": `filename ${b64(filename)}`,
-      "x-forwarded-proto": "https",
-      "x-forwarded-host": FILES_HOST,
     },
   });
   expect(create.status(), "authorized create must be accepted").toBe(201);
 
   const location = create.headers()["location"];
   expect(location, "tus must return a Location").toBeTruthy();
-  expect(
-    location,
-    "behind a TLS-terminating proxy the Location must be https:// - an http:// one is blocked by the CSP",
-  ).toMatch(/^https:\/\//);
 
   // --- upload the bytes ---------------------------------------------------------------------------
   const uploadUrl = new URL(location, FILES_ORIGIN);
@@ -93,13 +88,75 @@ test("a real authorized tus upload lands the bytes, and the returned link serves
   expect(preview.status()).toBe(200);
   expect(await preview.text()).toContain(filename);
 
-  // --- the direct link delivers via nginx, with Node never streaming (D-5) ------------------------
-  const direct = await request.get(`${FILES_ORIGIN}/${relPath}`, { headers: { host: "dl.mosni.dev" } });
+  // --- the direct link really delivers the bytes, through nginx's X-Accel-Redirect ----------------
+  // This goes through the REAL dl. vhost (dl.mosni.dev now resolves to nginx-e2e), so it exercises the
+  // whole D-5 path end to end: the app authorizes and returns an empty body with X-Accel-Redirect, and
+  // NGINX serves the actual bytes from the internal-only location. Nothing had ever tested that nginx
+  // serves what the app redirects to - only that the app set the header.
+  const direct = await request.get(`http://dl.mosni.dev/${relPath}`);
   expect(direct.status()).toBe(200);
-  expect(direct.headers()["x-accel-redirect"], "delivery must hand off to nginx").toBeTruthy();
-  expect(await direct.text(), "Node must not stream the bytes itself").toBe("");
+  expect(Buffer.from(await direct.body()).equals(body), "nginx must deliver the exact bytes").toBeTruthy();
   expect(direct.headers()["x-content-type-options"]).toBe("nosniff");
   expect(direct.headers()["referrer-policy"]).toBe("no-referrer");
+});
+
+test("an upload larger than nginx's default body limit succeeds (the 413 regression Hannah hit)", async ({
+  request,
+}) => {
+  // 2 MB in one PATCH - above nginx's DEFAULT client_max_body_size of 1m, below our chunk size, so a real
+  // client sends it as a single body. On the box this 413'd on every chunk until nginx.conf set the limit.
+  // Goes through real nginx precisely so that this assertion means something.
+  const token = await mintToken(request, `user:e2e-${randomUUID()}`);
+  const filename = `big-${randomUUID().slice(0, 8)}.bin`;
+  const body = Buffer.alloc(2 * 1024 * 1024, 0x61);
+
+  const create = await request.post(`${FILES_ORIGIN}/api/upload`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      "tus-resumable": "1.0.0",
+      "upload-length": String(body.length),
+      "upload-metadata": `filename ${b64(filename)}`,
+    },
+  });
+  expect(create.status()).toBe(201);
+
+  const patch = await request.patch(
+    `${FILES_ORIGIN}${new URL(create.headers()["location"], FILES_ORIGIN).pathname}`,
+    {
+      headers: {
+        authorization: `Bearer ${token}`,
+        "tus-resumable": "1.0.0",
+        "upload-offset": "0",
+        "content-type": "application/offset+octet-stream",
+      },
+      data: body,
+    },
+  );
+  expect(patch.status(), "a >1MB chunk must not be rejected by nginx").toBe(200);
+});
+
+test("behind a TLS-terminating proxy tus builds an https:// Location, never http:// (D-76 regression)", async ({
+  request,
+}) => {
+  // The one case that must set the X-Forwarded-* headers itself: the sandbox's nginx has no TLS, so its
+  // $scheme is http and it cannot stand in for production's https-terminating proxy. So hit the app
+  // DIRECTLY and send exactly what production nginx sends. Without respectForwardedHeaders the app builds
+  // the Location from the raw request and returns http://, which an https page's CSP blocks - the bug
+  // masked by helmet's upgrade-insecure-requests until D-76 removed it.
+  const token = await mintToken(request, `user:e2e-${randomUUID()}`);
+  const create = await request.post(`${APP_DIRECT_ORIGIN}/api/upload`, {
+    headers: {
+      host: FILES_HOST,
+      authorization: `Bearer ${token}`,
+      "tus-resumable": "1.0.0",
+      "upload-length": "5",
+      "upload-metadata": `filename ${b64("scheme.txt")}`,
+      "x-forwarded-proto": "https",
+      "x-forwarded-host": FILES_HOST,
+    },
+  });
+  expect(create.status()).toBe(201);
+  expect(create.headers()["location"]).toMatch(/^https:\/\//);
 });
 
 test("an upload without files:write is rejected even with a valid token", async ({ request }) => {
