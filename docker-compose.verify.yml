@@ -89,6 +89,29 @@ services:
 
   # The real, production-built image (Dockerfile), not the dev toolchain - so e2e exercises what actually
   # ships. No published port; verify-e2e reaches it by service name over the compose network.
+  # A real RS256 issuer for the e2e tier only (e2e/mock-idp.mjs). auth.mosni.dev is unreachable from this
+  # sandbox, and without an issuer the suite could never mint a token the app's own verify() accepts - so
+  # every authorized path was tested only by mocking the verifier, and the product invariant had no
+  # end-to-end coverage at all. This closes that. It is never referenced outside this compose file.
+  mock-idp:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM node:24-alpine
+        WORKDIR /repo
+        COPY package.json package-lock.json ./
+        RUN npm ci --omit=optional --ignore-scripts
+        COPY e2e/mock-idp.mjs ./e2e/mock-idp.mjs
+    command: ["node", "e2e/mock-idp.mjs", "9000"]
+    environment:
+      MOCK_ISSUER: http://mock-idp:9000
+      MOCK_AUDIENCE: https://files-e2e.test
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
   app-e2e:
     build:
       context: .
@@ -98,6 +121,8 @@ services:
         condition: service_started
       mariadb:
         condition: service_healthy
+      mock-idp:
+        condition: service_healthy
     environment:
       DB_HOST: mariadb
       DB_PORT: "3306"
@@ -106,7 +131,10 @@ services:
       DB_NAME: files
       REDIS_URL: redis://redis:6379
       BOT_API: http://bot-core:8080
-      AUTH_ISSUER: https://auth.mosni.dev
+      # Points at the throwaway issuer above, NOT the real auth.mosni.dev (unreachable here). This is what
+      # lets the suite mint a token the app's own unmodified verify() accepts, so upload is finally tested
+      # end to end instead of by mocking the verifier.
+      AUTH_ISSUER: http://mock-idp:9000
       # D-70 Wave D: `files-e2e.test`, NOT the real `files.mosni.dev` - `mosni.dev` is on Chromium's
       # baked-in HSTS preload list (confirmed empirically: a headless Chromium hitting a plain
       # `http://files.mosni.dev/...` silently upgrades to `https://` and gets ERR_CONNECTION_REFUSED, since
@@ -181,6 +209,8 @@ services:
       app-e2e:
         condition: service_healthy
       mariadb:
+        condition: service_healthy
+      mock-idp:
         condition: service_healthy
     environment:
       BASE_URL: http://app-e2e

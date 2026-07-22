@@ -12,6 +12,7 @@ import { initAudit } from "./storage/audit.ts";
 import { initFilesStorage } from "./storage/files.ts";
 import { initSpaShell } from "./storage/spaShell.ts";
 import { registerGrantableRoles } from "./auth/grantable-roles.ts";
+import { initVerify } from "./auth/verify.ts";
 import { renderNotFoundPage } from "./views/NotFound.tsx";
 import { registerMetaRoutes } from "./routes/meta.ts";
 import { registerUploadRoutes } from "./routes/upload.ts";
@@ -27,7 +28,11 @@ const SPA_ROOT = path.join(moduleDir, "..", "..", "web", "dist");
 // `redis`/`config` are passed in explicitly rather than reached for as global singletons, so this builds
 // cleanly in a test without running the full non-fatal boot sequence below.
 export async function buildServer(redis: Redis, config: Config): Promise<FastifyInstance> {
-  const app = Fastify({ logger: true });
+  // trustProxy: every request arrives via nginx (D-33's vhosts proxy_pass to this container), so without
+  // it `request.protocol` is always http and `request.ip` is always nginx's address - which meant the
+  // global 100/min rate limit was keyed on ONE address for every user on the box, i.e. a shared budget
+  // rather than a per-client one. nginx already sets X-Forwarded-For/Proto/Host on both vhosts.
+  const app = Fastify({ logger: true, trustProxy: true });
 
   // Security invariants 3/4 (technical-baseline.md §1): `X-Content-Type-Options: nosniff` and
   // `Referrer-Policy: no-referrer` on every response. CSP allows the design system (ui.mosni.dev) and the
@@ -143,6 +148,7 @@ export async function start(): Promise<FastifyInstance> {
   initRedis(config.redisUrl);
   initAudit(config.botApi);
   initFilesStorage(config.storageRoot);
+  initVerify(config.authIssuer);
 
   const app = await buildServer(getRedisClient(), config);
 

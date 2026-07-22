@@ -59,6 +59,15 @@ export function buildTusServer(config: Config): TusServer {
     path: "/api/upload",
     datastore: new FileStore({ directory: config.tusTempDir }),
 
+    // Without this, @tus/server builds the Location header it hands the client from the raw request and
+    // assumes http://, so behind nginx the browser is told to PATCH `http://files.mosni.dev/api/upload/<id>`
+    // from an https:// page - which the CSP blocks (and which is mixed content regardless). It was hidden
+    // until now because helmet's default `upgrade-insecure-requests` silently rewrote the scheme; D-76
+    // removed that directive, having judged it "inert in production", and this is the case that proves it
+    // was not. Honouring X-Forwarded-Proto/Host is the actual fix - the scheme should never have depended
+    // on a CSP directive to be correct.
+    respectForwardedHeaders: true,
+
     // Runs on every tus request (create, each PATCH chunk, head, delete) - there is no anonymous upload.
     onIncomingRequest: async (req) => {
       const token = bearerToken(req);
