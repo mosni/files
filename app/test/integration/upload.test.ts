@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -83,6 +84,61 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
     return `http://127.0.0.1:${address.port}`;
   }
 
+  // The tus routes are host-constrained to config.appOrigin's hostname (D-33: no app surface on the
+  // containment origin), and these tests reach the server over a real socket on 127.0.0.1 - so every
+  // request has to spell out the Host nginx would forward in production.
+  const FILES_HOST = "files.mosni.dev";
+
+  type TestResponse = {
+    status: number;
+    headers: { get(name: string): string | null };
+    json(): Promise<unknown>;
+  };
+
+  // node:http rather than fetch: undici treats `host` as a forbidden header and silently drops it, so
+  // fetch cannot exercise a host-constrained route at all. Real sockets and a real request/response
+  // still matter here - tus is bridged via reply.hijack() onto the raw streams, which app.inject()
+  // does not model.
+  //
+  // The connection ALWAYS goes to this suite's own listener; only the path is taken from `url`. tus
+  // builds its Location header from the request's Host, which is now `files.mosni.dev`, so following it
+  // literally would send the test out to the real internet - exactly the escape the D-70 e2e run hit
+  // with dl.mosni.dev. Splitting "where to connect" from "what Host to claim" is what nginx does in
+  // production anyway.
+  function request(
+    url: string,
+    options: { method: string; headers: Record<string, string>; body?: Buffer },
+  ): Promise<TestResponse> {
+    return new Promise((resolve, reject) => {
+      const target = new URL(url, baseUrl());
+      const local = new URL(baseUrl());
+      const req = http.request(
+        {
+          hostname: local.hostname,
+          port: local.port,
+          path: `${target.pathname}${target.search}`,
+          method: options.method,
+          headers: { ...options.headers, host: FILES_HOST },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            resolve({
+              status: res.statusCode ?? 0,
+              headers: { get: (name) => (res.headers[name.toLowerCase()] as string) ?? null },
+              json: async () => JSON.parse(text) as unknown,
+            });
+          });
+        },
+      );
+      req.on("error", reject);
+      if (options.body !== undefined) req.write(options.body);
+      req.end();
+    });
+  }
+
   function mockAuthorizedAs(sub: string): void {
     verifyMock.mockResolvedValue({ sub, roles: ["files:write"] } as never);
   }
@@ -97,8 +153,8 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
     token: string | null,
     length: number,
     metadata: Record<string, string>,
-  ): Promise<Response> {
-    return fetch(`${baseUrl()}/api/upload`, {
+  ): Promise<TestResponse> {
+    return request(`${baseUrl()}/api/upload`, {
       method: "POST",
       headers: {
         "Tus-Resumable": "1.0.0",
@@ -114,16 +170,17 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
     token: string,
     offset: number,
     chunk: Buffer,
-  ): Promise<Response> {
-    return fetch(uploadUrl, {
+  ): Promise<TestResponse> {
+    return request(uploadUrl, {
       method: "PATCH",
       headers: {
         "Tus-Resumable": "1.0.0",
         "Upload-Offset": String(offset),
         "Content-Type": "application/offset+octet-stream",
+        "Content-Length": String(chunk.length),
         Authorization: `Bearer ${token}`,
       },
-      body: new Uint8Array(chunk),
+      body: chunk,
     });
   }
 
@@ -133,7 +190,10 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
     // through. More than the global 100/min limit, well under the dedicated 600/min one.
     const responses = await Promise.all(
       Array.from({ length: 105 }, () =>
-        fetch(`${baseUrl()}/api/upload`, { method: "OPTIONS", headers: { "Tus-Resumable": "1.0.0" } }),
+        request(`${baseUrl()}/api/upload`, {
+          method: "OPTIONS",
+          headers: { "Tus-Resumable": "1.0.0" },
+        }),
       ),
     );
     expect(responses.every((res) => res.status !== 429)).toBe(true);
@@ -180,7 +240,7 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
 
     // "Resume": a HEAD request confirms the server-side offset before continuing, exactly as a resumed
     // client would after a dropped connection.
-    const headRes = await fetch(uploadUrl, {
+    const headRes = await request(uploadUrl, {
       method: "HEAD",
       headers: { "Tus-Resumable": "1.0.0", Authorization: `Bearer ${uploaderSub}` },
     });

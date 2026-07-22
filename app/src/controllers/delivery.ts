@@ -23,7 +23,14 @@ function contentDispositionHeader(name: string): string {
 }
 
 // `private` requires an authorized session whose sub matches the owner or an ACL row (byte-for-byte,
-// security invariant 6), or files:admin. 401 (no/invalid token) vs 403 (valid token, insufficient rights).
+// security invariant 6), or the `mosni_owner` superuser (D-68 dropped files:admin, so that is the only
+// cross-owner grant left). 401 (no/invalid token) vs 403 (valid token, insufficient rights).
+//
+// KNOWN GAP, flagged for E3 (which is what first lets a file BE private): a browser cannot attach a
+// Bearer to an <img>/<video>/<iframe> subresource request, so the preview page's media element for a
+// private file always 401s here - even for its owner. The metadata renders, the bytes do not. Closing it
+// needs a delivery-side credential the browser sends by itself, which is exactly the session cookie D-75
+// rejected on cost.
 async function authorizePrivate(
   request: FastifyRequest,
   reply: FastifyReply,

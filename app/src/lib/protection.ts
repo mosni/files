@@ -6,7 +6,14 @@
 
 export type Protection = "public" | "unlisted" | "secret" | "private";
 
-/** Is this file included in a listing for this viewer? */
+/**
+ * Is this file included in a listing for this viewer?
+ *
+ * NOT YET CALLED by any production path - nothing lists files until E4's browser. It is kept because it
+ * is the recorded shape of D-59's listing half, but note before using it: `viewer.isAdmin` still encodes
+ * the `files:admin` role that D-68 dropped, so E4 must decide what fills that slot (both lower roles
+ * held, or `mosni_owner`) rather than assuming this signature is current.
+ */
 export function isListedFor(
   protection: Protection,
   viewer: { sub: string | null; isAdmin: boolean },
@@ -15,8 +22,8 @@ export function isListedFor(
   if (protection === "public") return true;
   if (viewer.isAdmin) return true;
   // unlisted/secret/private all share the same listing rule (D-59): hidden from public browsing, but
-  // still visible in the owner's own listing. A file with no owner (D-57 - a bare mkdir) has no owner to
-  // match against, so only the admin branch above can surface it.
+  // still visible in the owner's own listing. A row with a null owner_sub has no owner to match against,
+  // so only the admin branch above can surface it.
   return viewer.sub !== null && ownerSub !== null && viewer.sub === ownerSub;
 }
 

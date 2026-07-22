@@ -161,6 +161,29 @@ describe("routes/preview.ts + controllers/preview.ts (D-70 preview re-architectu
     expect(unknownToken.body).toContain("Not found");
   });
 
+  it("the served document has exactly ONE <title>, and it is the file-specific one (B1c)", async () => {
+    const relPath = `title-${randomUUID()}/report.pdf`;
+    await seed({ relPath, protection: "public" });
+    const res = await get(`/f/${relPath}`);
+
+    // The shell carries its own generic <title> for the drop zone at `/`. Splicing a second one in
+    // ahead of </head> leaves two, and every browser (and any crawler that reads <title> rather than
+    // og:title) honours the FIRST - so the preview page would show the generic site name forever.
+    const titles = [...res.body.matchAll(/<title>([\s\S]*?)<\/title>/g)].map((m) => m[1]);
+    expect(titles).toHaveLength(1);
+    expect(titles[0]).toContain("report.pdf");
+  });
+
+  it("a private document still carries exactly one, deliberately generic, <title>", async () => {
+    const relPath = `title-priv-${randomUUID()}/confidential.txt`;
+    await seed({ relPath, protection: "private", ownerSub: "user:owner" });
+    const res = await get(`/f/${relPath}`);
+
+    const titles = [...res.body.matchAll(/<title>([\s\S]*?)<\/title>/g)].map((m) => m[1]);
+    expect(titles).toHaveLength(1);
+    expect(titles[0]).not.toContain("confidential.txt");
+  });
+
   it("the document body is the SPA shell - its own script tags and #root are present, not hand-rendered chrome", async () => {
     const relPath = `shell-${randomUUID()}/x.txt`;
     await seed({ relPath, protection: "unlisted" });

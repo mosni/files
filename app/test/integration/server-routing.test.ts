@@ -77,6 +77,35 @@ describe("server routing - static vs delivery precedence across hosts", () => {
     expect(res.body).toContain('property="og:image"');
   });
 
+  // The origin split (D-4/D-33) only buys containment if dl. carries NO app surface beyond delivery.
+  // /api/upload is a static route, and find-my-way ranks a static path above delivery's host-constrained
+  // wildcard - so leaving it unconstrained put an authenticated write API on the containment origin,
+  // reachable through nginx's `location /` proxy in production too.
+  it("the upload API is unreachable on the dl host, and answers on the files host (D-33)", async () => {
+    const tusHeaders = { "tus-resumable": "1.0.0", "upload-length": "5" };
+
+    const onDl = await app.inject({
+      method: "POST",
+      url: "/api/upload",
+      headers: { host: "dl.mosni.dev", ...tusHeaders },
+    });
+    expect(onDl.statusCode).toBe(404);
+
+    // 401 rather than 404: the route exists here and rejected the request for want of a bearer token,
+    // which is what proves the 404 above is the host constraint and not a broken registration.
+    const onFiles = await app.inject({
+      method: "POST",
+      url: "/api/upload",
+      headers: { host: "files.mosni.dev", ...tusHeaders },
+    });
+    expect(onFiles.statusCode).toBe(401);
+  });
+
+  it("/api/config is unreachable on the dl host too", async () => {
+    const onDl = await app.inject({ method: "GET", url: "/api/config", headers: { host: "dl.mosni.dev" } });
+    expect(onDl.statusCode).toBe(404);
+  });
+
   it("/health answers on any host (unconstrained, for the deploy healthcheck)", async () => {
     for (const host of ["files.mosni.dev", "dl.mosni.dev", "127.0.0.1"]) {
       const res = await app.inject({ method: "GET", url: "/health", headers: { host } });

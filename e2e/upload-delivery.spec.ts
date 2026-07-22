@@ -13,15 +13,31 @@ import { expect, test } from "@playwright/test";
 // What this DOES verify against the real running app: the parts of the tus/delivery contract that don't
 // require a successful login, which is still real coverage of the production image's actual behaviour.
 
+// app-e2e's APP_ORIGIN in this compose tier (see docker-compose.verify.yml). BASE_URL is `http://app-e2e`,
+// i.e. the container's own name, so any host-constrained route needs this Host header spelled out - the
+// same way the dl. tests below spell out `dl.mosni.dev`.
+const FILES_HOST = "files-e2e.test";
+
 test("tus upload is rejected with no bearer token (real production image, D1)", async ({ request }) => {
   const res = await request.post("/api/upload", {
     headers: {
+      host: FILES_HOST,
       "Tus-Resumable": "1.0.0",
       "Upload-Length": "5",
       "Upload-Metadata": `filename ${Buffer.from("x.txt").toString("base64")}`,
     },
   });
   expect(res.status()).toBe(401);
+});
+
+// The containment origin (D-4/D-33) must carry no app surface but delivery. Guarded in the integration
+// tier too (server-routing.test.ts); asserted here against the real production image as well, because
+// this is the tier that exercises the actual shipped route table.
+test("the upload API is not reachable on the dl host (real production image, D-33)", async ({ request }) => {
+  const res = await request.post("/api/upload", {
+    headers: { host: "dl.mosni.dev", "Tus-Resumable": "1.0.0", "Upload-Length": "5" },
+  });
+  expect(res.status()).toBe(404);
 });
 
 test("plain-path delivery 404s for a path with no row (real production image)", async ({ request }) => {

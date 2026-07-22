@@ -53,6 +53,11 @@ export function PreviewPage() {
   // Read the embedded context exactly once, at first render - a ref (not state) so re-renders never
   // re-parse it, and so the effect below can tell "had one at mount" apart from "state is now ready".
   const embeddedRef = useRef<PreviewContext | null | undefined>(undefined);
+  // The pathname the embedded context describes. The server embedded it for the document it rendered, so
+  // it is only valid for the URL the page arrived at; a client-side navigation to another preview keeps
+  // this component (and this ref) mounted, so without remembering the mount path we would go on painting
+  // the file we arrived with. Beyond that path the API is the only source (B2d step 2).
+  const embeddedPathRef = useRef<string>(location.pathname);
   if (embeddedRef.current === undefined) {
     embeddedRef.current = readEmbeddedContext();
   }
@@ -65,7 +70,7 @@ export function PreviewPage() {
     let cancelled = false;
     const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
     const apiUrl = `/api/preview${location.pathname}`;
-    const hadEmbedded = embeddedRef.current !== null;
+    const hadEmbedded = embeddedRef.current !== null && embeddedPathRef.current === location.pathname;
 
     async function run() {
       if (hadEmbedded) {
@@ -83,7 +88,11 @@ export function PreviewPage() {
         return;
       }
 
-      // No embedded context (private file, or a client-side navigation): fetch is required.
+      // No embedded context for THIS path (private file, or a client-side navigation): fetch is required.
+      // Drop back to the spinner first - on a navigation the state still holds the previous file, and
+      // showing that under the new URL would be worse than showing nothing. A no-op on first mount, where
+      // the state is already `loading`.
+      setState({ status: "loading" });
       try {
         const res = await fetch(apiUrl, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
         if (cancelled) return;

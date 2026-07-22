@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router";
 import { PreviewPage } from "../../src/pages/Preview.tsx";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 
@@ -46,16 +46,47 @@ async function flush() {
   });
 }
 
+function routes() {
+  return (
+    <Routes>
+      <Route path="/f/*" element={<PreviewPage />} />
+      <Route path="/t/:token" element={<PreviewPage />} />
+    </Routes>
+  );
+}
+
 function renderAt(path: string) {
   act(() => {
+    root.render(<MemoryRouter initialEntries={[path]}>{routes()}</MemoryRouter>);
+  });
+}
+
+// A real in-router navigation trigger. Re-rendering MemoryRouter with different `initialEntries` does
+// NOT navigate - it reads them once and keeps its own history thereafter - so the navigation has to go
+// through useNavigate, exactly as an in-app link would.
+function Navigator({ to }: { to: string }) {
+  const navigate = useNavigate();
+  return (
+    <button type="button" data-testid="navigate" onClick={() => navigate(to)}>
+      go
+    </button>
+  );
+}
+
+// Drives the same mounted PreviewPage across a client-side navigation: both paths match the same
+// <Route path="/f/*">, so React keeps the component instance (and its refs) alive - which is exactly the
+// condition under which a mount-time embedded context can go stale.
+function renderNavigating(from: string, to: string) {
+  act(() => {
     root.render(
-      <MemoryRouter initialEntries={[path]}>
-        <Routes>
-          <Route path="/f/*" element={<PreviewPage />} />
-          <Route path="/t/:token" element={<PreviewPage />} />
-        </Routes>
+      <MemoryRouter initialEntries={[from]}>
+        <Navigator to={to} />
+        {routes()}
       </MemoryRouter>,
     );
+  });
+  act(() => {
+    (container.querySelector('[data-testid="navigate"]') as HTMLButtonElement).click();
   });
 }
 
@@ -162,6 +193,35 @@ describe("PreviewPage", () => {
     // Still showing the embedded content, not a blank page or a not-found panel.
     expect(container.textContent).toContain("photo.png");
     expect(container.querySelector("img")).not.toBeNull();
+  });
+
+  // The embedded context describes the file the SERVER rendered the document for - it is only valid for
+  // the pathname the page mounted at. On a client-side navigation to a different preview the page must
+  // fall back to the API (B2d step 2), not keep painting the file it arrived with.
+  it("refetches on a client-side navigation instead of showing the file it mounted with", async () => {
+    embedContext(makeContext({ name: "first.png", previewUrl: "https://files.mosni.dev/f/first.png" }));
+    const second = makeContext({ name: "second.png", previewUrl: "https://files.mosni.dev/f/second.png" });
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(second) });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderNavigating("/f/first.png", "/f/second.png");
+    await flush();
+
+    expect(fetchSpy).toHaveBeenCalledWith("/api/preview/f/second.png", undefined);
+    expect(container.textContent).toContain("second.png");
+    expect(container.textContent).not.toContain("first.png");
+  });
+
+  it("does not refetch when re-rendered at the pathname it mounted at", async () => {
+    embedContext(makeContext());
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderNavigating("/f/photo.png", "/f/photo.png");
+    await flush();
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("photo.png");
   });
 
   it("shows the owner indicator only when isOwner is true", () => {

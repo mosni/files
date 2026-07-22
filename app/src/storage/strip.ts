@@ -1,6 +1,8 @@
 // D-60: the ONLY module that rewrites bytes on disk. Strips metadata in place, inspecting first so it
-// costs nothing on an already-clean file - that idempotence matters because D-56 makes reconciliation
-// (and therefore a re-strip check) something that can happen to the same file repeatedly.
+// costs nothing on an already-clean file. That idempotence was originally motivated by reconciliation
+// re-stripping the same file repeatedly; D-66 removed reconciliation, so stripping now happens exactly
+// once per upload - the inspect-first behaviour is kept anyway, because it is what guarantees a file
+// takes at most one generation loss no matter how often this is called.
 
 import { execFile } from "node:child_process";
 import { rename, unlink } from "node:fs/promises";

@@ -19,6 +19,9 @@ export function generateLinkToken(): string {
   return token;
 }
 
+// NOT YET CALLED by any production path: it existed to tell a token apart from a path segment, and D-65's
+// `/t/<token>` route prefix made that distinction structural instead. Kept as the shape's single
+// definition (and as the guard any future non-prefixed token lookup should use) rather than deleted.
 export function isLinkTokenShaped(value: string): boolean {
   return TOKEN_SHAPE.test(value);
 }

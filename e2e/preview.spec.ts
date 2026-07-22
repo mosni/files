@@ -95,10 +95,16 @@ test("no CSP violation is raised loading a PDF preview (guards Wave C5's frame-s
   const relPath = `e2e-pdf-${randomUUID()}/doc.pdf`;
   await seed({ relPath });
 
-  // Scoped to frame-src/frame-ancestors specifically (Wave C5's fix and its frame-ancestors reciprocal),
-  // not "any CSP notice on the page" - mosnicat.js (the design-system chrome, loaded unconditionally and
-  // out of this pass's scope) separately tries to load a favicon-ish image from the bare mosni.dev domain
-  // and gets blocked by img-src, which is real but unrelated pre-existing noise this test must not trip on.
+  // Scoped to framing violations specifically, not "any CSP notice on the page" - mosnicat.js (the
+  // design-system chrome, loaded unconditionally and out of this pass's scope) separately tries to load a
+  // favicon-ish image from the bare mosni.dev domain and gets blocked by img-src, which is real but
+  // unrelated pre-existing noise this test must not trip on.
+  //
+  // SCOPE, stated plainly so nobody trusts this further than it goes: this guards `frame-src` only, which
+  // the PARENT document enforces at request time. It canNOT guard `frame-ancestors`, which only the CHILD
+  // response can violate - and the child here is dl.mosni.dev, which has no TLS listener on this network,
+  // so the iframe never loads and no frame-ancestors violation could ever fire. The frame-ancestors half
+  // of the fix is covered only by the header assertion in app/test/integration/security-headers.test.ts.
   const cspViolations: string[] = [];
   page.on("console", (msg) => {
     if (

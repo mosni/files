@@ -96,6 +96,11 @@ export function buildTusServer(config: Config): TusServer {
 
       const folderDir = path.join(config.storageRoot, folder);
       await mkdir(folderDir, { recursive: true });
+      // KNOWN RACE, accepted for the current small trusted user base: readdir -> suffix -> rename is not
+      // atomic, so two uploads of the same name finishing together can both pick the same free name, and
+      // the second rename() overwrites the first's bytes. The second INSERT then fails on the `path`
+      // primary key, so the row and the bytes disagree. Closing it properly means claiming the name in the
+      // DB before the rename (insert-then-move) - worth doing when E3 makes renames a normal operation.
       const existingEntries = await readdir(folderDir).catch(() => []);
       const taken = existingEntries.filter((entry) => !isIgnoredEntry(entry));
       const finalName = suffixForCollision(safeName, taken);

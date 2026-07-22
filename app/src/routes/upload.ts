@@ -15,6 +15,13 @@ import { UPLOAD_CHUNK_SIZE } from "../lib/uploadConfig.ts";
 
 export async function registerUploadRoutes(app: FastifyInstance, config: Config, redis: Redis): Promise<void> {
   const tusServer = buildTusServer(config);
+  // Host-constrained to the files host (D-4/D-33). This is NOT decorative: /api/upload is a *static*
+  // route, and find-my-way ranks a static path above delivery's host-constrained wildcard, so an
+  // unconstrained registration answers on dl.mosni.dev too - and nginx proxies `location /` on that vhost
+  // straight to this container, so it was reachable from the internet. The containment origin must carry
+  // no app surface beyond X-Accel-Redirect delivery; an authenticated write API on it erodes exactly what
+  // the origin split buys. Guarded by server-routing.test.ts.
+  const filesHost = new URL(config.appOrigin).hostname;
 
   await app.register(async (scoped) => {
     // Dedicated rate limiter: a 5 GB upload at UPLOAD_CHUNK_SIZE (lib/uploadConfig.ts) chunks is ~1000
@@ -44,7 +51,7 @@ export async function registerUploadRoutes(app: FastifyInstance, config: Config,
       reply.hijack();
       await tusServer.handle(request.raw, reply.raw);
     };
-    scoped.all("/api/upload", handleTus);
-    scoped.all("/api/upload/*", handleTus);
+    scoped.all("/api/upload", { constraints: { host: filesHost } }, handleTus);
+    scoped.all("/api/upload/*", { constraints: { host: filesHost } }, handleTus);
   });
 }

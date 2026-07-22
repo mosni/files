@@ -55,8 +55,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dlOrigin: env.DL_ORIGIN!,
     storageRoot: env.STORAGE_ROOT!,
     // Derived, not a separate env var. Must live inside STORAGE_ROOT so the tus-finish -> final-path
-    // rename() is same-filesystem (atomic), and dot-prefixed so isIgnoredEntry() skips it during
-    // reconciliation (D-57).
+    // rename() is same-filesystem (atomic), and dot-prefixed so isIgnoredEntry() skips it when the
+    // upload commit scans the destination directory for name collisions.
     tusTempDir: path.join(env.STORAGE_ROOT!, ".tus"),
     port: Number(env.PORT),
   };
