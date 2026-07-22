@@ -21,7 +21,12 @@ x-node-build: &node-build
   context: .
   dockerfile_inline: |
     FROM node:24-alpine
-    RUN apk add --no-cache ffmpeg
+    # vips + vips-dev so sharp builds from source against the SYSTEM libvips here too, exactly as the
+    # production Dockerfile does. This is D-45's own argument applied to a second axis: the box is an
+    # Atom N2800 that cannot execute the SSE4.1 in sharp's prebuilt libvips, so a gate running the
+    # prebuilt would be testing a different image library (and a different libvips version) than the one
+    # that ships - which is not a gate. Costs one cached layer.
+    RUN apk add --no-cache ffmpeg vips vips-dev build-base pkgconfig python3
     WORKDIR /repo
     COPY package.json package-lock.json ./
     RUN npm ci
