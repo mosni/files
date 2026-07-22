@@ -10,6 +10,7 @@ import { applySchema, initDb } from "./storage/db.ts";
 import { getRedisClient, initRedis } from "./storage/redis.ts";
 import { initAudit } from "./storage/audit.ts";
 import { initFilesStorage } from "./storage/files.ts";
+import { initSpaShell } from "./storage/spaShell.ts";
 import { registerGrantableRoles } from "./auth/grantable-roles.ts";
 import { renderNotFoundPage } from "./views/NotFound.tsx";
 import { registerMetaRoutes } from "./routes/meta.ts";
@@ -43,12 +44,34 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
         // frame-src: auth's SDK does its silent-refresh in a hidden iframe pointing at
         // https://auth.mosni.dev/authorize. With no frame-src directive, helmet's CSP fell back to
         // default-src 'self' and silently blocked it - sessions would die at token expiry instead of
-        // renewing (session 006 finding, Wave A5).
-        frameSrc: ["'self'", "https://auth.mosni.dev"],
+        // renewing (session 006 finding, Wave A5). dl.mosni.dev is here too (D-70/Wave C5 bug fix): the
+        // preview page embeds a pdf/txt in an <iframe src="https://dl.mosni.dev/...">, which this
+        // directive was blocking under our own CSP until now. Never add dl. to scriptSrc - that would
+        // undo D-4's containment.
+        frameSrc: ["'self'", "https://auth.mosni.dev", "https://dl.mosni.dev"],
+        // The reciprocal half of the frame-src fix above, found only by actually executing a preview page
+        // with a real browser (D-70 Wave D e2e run): frame-src on the PARENT document controls what it may
+        // point an <iframe> at, but whether the framing succeeds ALSO depends on the CHILD response's own
+        // frame-ancestors header - and helmet is registered once, globally, so dl.'s delivery responses
+        // carry the exact same directives as files.'s pages, including the default-merged
+        // `frame-ancestors 'self'`. That silently blocked every dl. iframe in production too, not just
+        // here - Wave C5's frame-src fix alone was never sufficient. Explicitly allowing files.mosni.dev is
+        // the minimal permission this app ever needs (files. embeds dl. content; nothing else must).
+        frameAncestors: ["'self'", "https://files.mosni.dev"],
         // data:/blob: let the drop zone show a local thumbnail before the upload completes (F1).
         imgSrc: ["'self'", "https://dl.mosni.dev", "data:", "blob:"],
         mediaSrc: ["'self'", "https://dl.mosni.dev"],
         connectSrc: ["'self'", "https://auth.mosni.dev"],
+        // helmet's `useDefaults` (on by default, never explicitly chosen here) merges in
+        // `upgrade-insecure-requests`, which silently rewrites every same-origin http: subresource URL
+        // (the SPA's own relative /assets/*.js script tag included) to https: before the browser even
+        // attempts the connection. D-70 Wave D found this: it makes a real-browser e2e test of the SPA
+        // mounting impossible on any plain-HTTP box, sandboxed or not - not just this one. Explicitly
+        // nulling it out removes it from helmet's merged defaults. Safe to drop: it is not one of
+        // technical-baseline.md §1's named invariants, and it is a no-op in production regardless, since
+        // D-33's committed nginx vhosts are TLS-only - nothing ever serves this app over plain HTTP for it
+        // to "upgrade" away from. Flagged for Hannah's sign-off (a security header, even though inert here).
+        upgradeInsecureRequests: null,
       },
     },
   });
@@ -75,6 +98,9 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
   // there. Missing web/dist (before the SPA is built) only warns, which lets this build in a test that
   // never runs `vite build`.
   await app.register(fastifyStatic, { root: SPA_ROOT });
+  // D-70: reads web/dist/index.html once at boot - controllers/preview.ts splices the server-rendered
+  // <head> into it. Same missing-web/dist tolerance as fastifyStatic above (falls back to a minimal shell).
+  initSpaShell(SPA_ROOT);
 
   // E2/E5a. Each registers its own host constraint (files.mosni.dev vs dl.mosni.dev) so the origin split
   // (D-4) holds even though both hosts are proxied to this same process. Delivery is dl-only; preview,

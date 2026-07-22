@@ -25,7 +25,8 @@
     "@tus/server": "^1.0.0",
     "@tus/file-store": "^1.0.0",
     "sharp": "^0.34.0",
-    "tus-js-client": "^4.0.0"
+    "tus-js-client": "^4.0.0",
+    "react-router": "8.2.0"
   },
   "devDependencies": {
     "typescript": "^5.8.0",

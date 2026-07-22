@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS files (
   link_token VARCHAR(16) NOT NULL,
   owner_sub VARCHAR(255) NULL,
   uploader_sub VARCHAR(255) NULL,
+  width INT UNSIGNED NULL,
+  height INT UNSIGNED NULL,
+  duration_seconds DECIMAL(10,3) NULL,
+  text_preview VARCHAR(400) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (path),
   UNIQUE KEY uniq_link_token (link_token)

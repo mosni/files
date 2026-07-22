@@ -33,6 +33,19 @@ describe("schema self-healing (storage/db.ts)", () => {
     await expect(applySchema()).resolves.toBeUndefined();
   });
 
+  it("the files table carries the D-74 media-dimension columns", async () => {
+    const c = await conn();
+    try {
+      const [rows] = await c.execute("DESCRIBE files");
+      const columns = (rows as { Field: string }[]).map((row) => row.Field);
+      expect(columns).toEqual(
+        expect.arrayContaining(["width", "height", "duration_seconds", "text_preview"]),
+      );
+    } finally {
+      await c.end();
+    }
+  });
+
   it("re-applying is a no-op - a row inserted after the first apply survives the second", async () => {
     await applySchema();
     const c = await conn();

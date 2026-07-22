@@ -62,6 +62,27 @@ describe("security headers", () => {
     expect(csp).toMatch(/frame-src[^;]*https:\/\/auth\.mosni\.dev/);
   });
 
+  it("CSP allows dl.mosni.dev as a frame-src (D-70 Wave C5 bug fix) but still forbids it as script-src", async () => {
+    const res = await app.inject({ method: "GET", url: "/health" });
+    const csp = res.headers["content-security-policy"] as string;
+    const frameSrc = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("frame-src"));
+    const scriptSrc = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("script-src"));
+
+    expect(frameSrc).toContain("https://dl.mosni.dev");
+    expect(scriptSrc).not.toContain("dl.mosni.dev");
+  });
+
+  it("CSP allows files.mosni.dev as a frame-ancestor (D-70 e2e finding), so dl.'s own response can be framed by a preview page", async () => {
+    // helmet is registered once, globally - dl.'s delivery responses carry the exact same CSP as files.'s
+    // pages, including frame-ancestors. Wave C5's frame-src fix alone was never sufficient: frame-src
+    // governs what the PARENT may embed, frame-ancestors governs whether the CHILD allows being embedded -
+    // both must permit it, or a dl. iframe embedded from a preview page is blocked in production too.
+    const res = await app.inject({ method: "GET", url: "/health" });
+    const csp = res.headers["content-security-policy"] as string;
+    const frameAncestors = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("frame-ancestors"));
+    expect(frameAncestors).toContain("https://files.mosni.dev");
+  });
+
   it("CSP allows data:/blob: as img-src, for the drop zone's local thumbnail preview (F1)", async () => {
     const res = await app.inject({ method: "GET", url: "/health" });
     const csp = res.headers["content-security-policy"] as string;

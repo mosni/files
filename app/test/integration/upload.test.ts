@@ -17,7 +17,7 @@ import { verify } from "../../src/auth/verify.ts";
 import { registerUploadRoutes } from "../../src/routes/upload.ts";
 import type { Config } from "../../src/config.ts";
 import { applySchema, closeDb, getPool, initDb } from "../../src/storage/db.ts";
-import { initFilesStorage } from "../../src/storage/files.ts";
+import { initFilesStorage, resolveByPath } from "../../src/storage/files.ts";
 
 const verifyMock = vi.mocked(verify);
 
@@ -249,5 +249,26 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
     const writtenPath = path.join(root, uploaderSub, "photo.jpg");
     const after = await sharp(writtenPath).metadata();
     expect(after.exif).toBeUndefined();
+  });
+
+  it("an uploaded PNG lands with captured width/height (D-74)", async () => {
+    const uploaderSub = `user:${randomUUID()}`;
+    createdFolders.push(uploaderSub);
+    mockAuthorizedAs(uploaderSub);
+
+    const pngBytes = await sharp({
+      create: { width: 40, height: 30, channels: 3, background: { r: 5, g: 6, b: 7 } },
+    })
+      .png()
+      .toBuffer();
+
+    const createRes = await createUpload(uploaderSub, pngBytes.length, { filename: "photo.png" });
+    const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
+    const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, pngBytes);
+    expect(patchRes.status).toBe(200);
+
+    const record = await resolveByPath(`${uploaderSub}/photo.png`);
+    expect(record?.width).toBe(40);
+    expect(record?.height).toBe(30);
   });
 });

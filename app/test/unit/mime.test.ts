@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contentDisposition, INLINE_ALLOWLIST, isInlineAllowed } from "../../src/lib/mime.ts";
+import { contentDisposition, INLINE_ALLOWLIST, isInlineAllowed, mimeTypeFor } from "../../src/lib/mime.ts";
 
 describe("INLINE_ALLOWLIST", () => {
   it("is exactly the nine documented types", () => {
@@ -49,5 +49,31 @@ describe("isInlineAllowed() / contentDisposition() - mandatory, never-delete (se
     expect(contentDisposition("")).toBe("attachment");
     expect(() => contentDisposition("..")).not.toThrow();
     expect(contentDisposition("..")).toBe("attachment");
+  });
+});
+
+describe("mimeTypeFor() (D-74)", () => {
+  it.each([
+    ["mp4", "video/mp4"],
+    ["webm", "video/webm"],
+    ["jpg", "image/jpeg"],
+    ["jpeg", "image/jpeg"],
+    ["png", "image/png"],
+    ["gif", "image/gif"],
+    ["webp", "image/webp"],
+    ["pdf", "application/pdf"],
+    ["txt", "text/plain"],
+  ])("maps .%s to %s", (ext, mime) => {
+    expect(mimeTypeFor(`file.${ext}`)).toBe(mime);
+  });
+
+  it("matching is case-insensitive", () => {
+    expect(mimeTypeFor("photo.PNG")).toBe("image/png");
+  });
+
+  it("falls back to application/octet-stream for unknown or missing extensions", () => {
+    expect(mimeTypeFor("archive.zip")).toBe("application/octet-stream");
+    expect(mimeTypeFor("README")).toBe("application/octet-stream");
+    expect(mimeTypeFor("")).toBe("application/octet-stream");
   });
 });

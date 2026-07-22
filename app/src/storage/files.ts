@@ -19,6 +19,11 @@ export type FileRecord = {
   linkToken: string;
   ownerSub: string | null;
   uploaderSub: string | null;
+  createdAt: string; // ISO 8601
+  width: number | null; // D-74: image or video pixel width, captured at ingest
+  height: number | null;
+  durationSeconds: number | null; // video only
+  textPreview: string | null; // .txt only
 };
 
 let storageRoot: string | undefined;
@@ -46,6 +51,11 @@ interface FileRow extends RowDataPacket {
   link_token: string;
   owner_sub: string | null;
   uploader_sub: string | null;
+  created_at: Date;
+  width: number | null;
+  height: number | null;
+  duration_seconds: string | null; // mysql2 returns DECIMAL as a string
+  text_preview: string | null;
 }
 
 function rowToRecord(row: FileRow, bytes: number): FileRecord {
@@ -57,6 +67,11 @@ function rowToRecord(row: FileRow, bytes: number): FileRecord {
     linkToken: row.link_token,
     ownerSub: row.owner_sub,
     uploaderSub: row.uploader_sub,
+    createdAt: row.created_at.toISOString(),
+    width: row.width,
+    height: row.height,
+    durationSeconds: row.duration_seconds === null ? null : Number(row.duration_seconds),
+    textPreview: row.text_preview,
   };
 }
 
@@ -75,7 +90,7 @@ export async function resolveByPath(relPath: string): Promise<FileRecord | null>
   if (safe === null) return null;
 
   const [rows] = await getPool().query<FileRow[]>(
-    "SELECT path, bytes, protection, link_token, owner_sub, uploader_sub FROM files WHERE path = ?",
+    "SELECT path, bytes, protection, link_token, owner_sub, uploader_sub, created_at, width, height, duration_seconds, text_preview FROM files WHERE path = ?",
     [safe],
   );
   const row = rows[0];
@@ -93,7 +108,7 @@ export async function resolveByPath(relPath: string): Promise<FileRecord | null>
 export async function resolveByToken(token: string): Promise<FileRecord | null> {
   const root = getStorageRoot();
   const [rows] = await getPool().query<FileRow[]>(
-    "SELECT path, bytes, protection, link_token, owner_sub, uploader_sub FROM files WHERE link_token = ?",
+    "SELECT path, bytes, protection, link_token, owner_sub, uploader_sub, created_at, width, height, duration_seconds, text_preview FROM files WHERE link_token = ?",
     [token],
   );
   const row = rows[0];
@@ -136,14 +151,35 @@ export async function insertUploadedFile(params: {
   protection: Protection;
   ownerSub: string;
   uploaderSub: string;
+  width: number | null;
+  height: number | null;
+  durationSeconds: number | null;
+  textPreview: string | null;
 }): Promise<FileRecord> {
   const pool = getPool();
   for (let attempt = 0; attempt < 5; attempt++) {
     const linkToken = generateLinkToken();
+    // Set explicitly (rather than relying on the column's DEFAULT CURRENT_TIMESTAMP) so the returned
+    // FileRecord's createdAt is exactly what was stored, with no re-query round trip.
+    const createdAt = new Date();
     try {
       await pool.query(
-        "INSERT INTO files (path, bytes, protection, link_token, owner_sub, uploader_sub) VALUES (?, ?, ?, ?, ?, ?)",
-        [params.path, params.bytes, params.protection, linkToken, params.ownerSub, params.uploaderSub],
+        `INSERT INTO files
+          (path, bytes, protection, link_token, owner_sub, uploader_sub, width, height, duration_seconds, text_preview, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          params.path,
+          params.bytes,
+          params.protection,
+          linkToken,
+          params.ownerSub,
+          params.uploaderSub,
+          params.width,
+          params.height,
+          params.durationSeconds,
+          params.textPreview,
+          createdAt,
+        ],
       );
       return {
         path: params.path,
@@ -153,6 +189,11 @@ export async function insertUploadedFile(params: {
         linkToken,
         ownerSub: params.ownerSub,
         uploaderSub: params.uploaderSub,
+        createdAt: createdAt.toISOString(),
+        width: params.width,
+        height: params.height,
+        durationSeconds: params.durationSeconds,
+        textPreview: params.textPreview,
       };
     } catch (err) {
       if (isLinkTokenDuplicate(err)) continue; // regenerate the token and retry

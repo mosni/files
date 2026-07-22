@@ -126,11 +126,39 @@ describe("storage/files.ts - no reconciliation, path-keyed (P6/P7)", () => {
       protection: "unlisted",
       ownerSub: "user:owner",
       uploaderSub: "user:owner",
+      width: null,
+      height: null,
+      durationSeconds: null,
+      textPreview: null,
     });
     expect(record.uploaderSub).toBe("user:owner");
     expect(record.linkToken).toMatch(/^[A-Za-z0-9]{5}$/);
+    expect(record.createdAt).toEqual(expect.any(String));
     expect((await resolveByPath(relPath))?.ownerSub).toBe("user:owner");
     expect((await resolveByToken(record.linkToken))?.path).toBe(relPath);
+  });
+
+  it("insertUploadedFile stores captured media dimensions (D-74)", async () => {
+    const relPath = `up-${randomUUID()}/photo.png`;
+    createdPaths.push(relPath);
+    await mkdir(path.join(root, path.dirname(relPath)), { recursive: true });
+    await writeFile(path.join(root, ...relPath.split("/")), "hello");
+
+    await insertUploadedFile({
+      path: relPath,
+      bytes: 5,
+      protection: "unlisted",
+      ownerSub: "user:owner",
+      uploaderSub: "user:owner",
+      width: 640,
+      height: 480,
+      durationSeconds: 12.5,
+      textPreview: null,
+    });
+    const record = await resolveByPath(relPath);
+    expect(record?.width).toBe(640);
+    expect(record?.height).toBe(480);
+    expect(record?.durationSeconds).toBe(12.5);
   });
 
   describe("hasAclGrant (security invariant 6 - byte-for-byte, never parsed)", () => {

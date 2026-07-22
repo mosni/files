@@ -14,6 +14,7 @@ import { isIgnoredEntry, resolveRelPath, safeSegment, suffixForCollision } from 
 import { buildFileUrls } from "../lib/fileUrls.ts";
 import { insertUploadedFile } from "../storage/files.ts";
 import { stripInPlace } from "../storage/strip.ts";
+import { probeMedia } from "../storage/probe.ts";
 import { emitAuditEvent } from "../storage/audit.ts";
 
 // auth's token carries an optional `name` claim, used as the upload folder name - not part of
@@ -119,12 +120,20 @@ export function buildTusServer(config: Config): TusServer {
       }
 
       const { size } = await stat(finalPath);
+      // Probing after stripping is deliberate (D-74): the stripped file is the one that will be served,
+      // so its dimensions are the true ones. A probe failure never fails the upload - probeMedia() never
+      // throws.
+      const probe = await probeMedia(finalPath);
       const record = await insertUploadedFile({
         path: relPath,
         bytes: size,
         protection: "unlisted", // D-59 default
         ownerSub: claims.sub,
         uploaderSub: claims.sub,
+        width: probe.width,
+        height: probe.height,
+        durationSeconds: probe.durationSeconds,
+        textPreview: probe.textPreview,
       });
 
       // Fire-and-forget (D-43) - never awaited, a dead bot must not break or delay the upload response.

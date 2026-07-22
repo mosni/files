@@ -70,12 +70,16 @@ services:
       DL_ORIGIN: https://dl.mosni.dev
       STORAGE_ROOT: /tmp/storage
       PORT: "3000"
+    # D-70: `vite build` must run BEFORE the tests, not after - the preview shell-splice reads the built
+    # web/dist/index.html, and running tests first would let every integration test silently exercise only
+    # the fallback shell (a missing web/dist just warns, per server.ts's fastifyStatic comment). Do not
+    # "tidy" this order back.
     command:
       - sh
       - -lc
       - >-
-        npx vitest run --coverage &&
         npx vite build &&
+        npx vitest run --coverage &&
         npx vite build --config vite.ssr.config.ts
 
   # The real, production-built image (Dockerfile), not the dev toolchain - so e2e exercises what actually
@@ -98,14 +102,62 @@ services:
       REDIS_URL: redis://redis:6379
       BOT_API: http://bot-core:8080
       AUTH_ISSUER: https://auth.mosni.dev
-      APP_ORIGIN: https://files.mosni.dev
+      # D-70 Wave D: `files-e2e.test`, NOT the real `files.mosni.dev` - `mosni.dev` is on Chromium's
+      # baked-in HSTS preload list (confirmed empirically: a headless Chromium hitting a plain
+      # `http://files.mosni.dev/...` silently upgrades to `https://` and gets ERR_CONNECTION_REFUSED, since
+      # nothing in this sandbox listens on 443 - reproduced with an identical `--add-host`-mapped
+      # non-mosni.dev hostname working fine over plain HTTP on the same IP, isolating the hostname string
+      # itself as the cause, not networking). This is a browser-binary-level policy, not fixable via
+      # config; `.test` is IANA-reserved for testing (RFC 2606) and can never be preload-listed.
+      # e2e-tier-only: production's real config lives in the deploy manifest, not here.
+      # DL_ORIGIN stays the REAL `https://dl.mosni.dev`, deliberately NOT given the same `-e2e.test`
+      # treatment: server.ts's CSP frame-src/img-src/media-src directives hardcode the literal string
+      # "https://dl.mosni.dev" (not derived from config.dlOrigin), so a preview's <iframe>/<img> pointing
+      # anywhere else would trip a REAL CSP violation. `dl.` is only ever a subresource load inside an
+      # already-loaded document, never a top-level navigation, so it never hits the HSTS-preload problem
+      # that affects `files.` above - the request is expected to fail to connect (nothing here has a TLS
+      # listener for it), which is fine and unrelated to what e2e/preview.spec.ts's CSP test checks for.
+      APP_ORIGIN: https://files-e2e.test
       DL_ORIGIN: https://dl.mosni.dev
       STORAGE_ROOT: /data/storage
-      PORT: "3000"
+      # D-70 Wave D: 80, not 3000, here specifically (production's own port; nothing else in the app
+      # depends on the number 3000). Fastify's `constraints: { host }` does an EXACT string match against
+      # the raw incoming Host header (find-my-way's accept-host strategy - confirmed by reading it), which
+      # is registered as the bare hostname above (no port). A browser always includes the port in its Host
+      # header for a non-default port, so hitting this container on :3000 would send a Host header with
+      # ":3000" appended and never match any host-constrained route. Port 80 is HTTP's default, so the
+      # browser omits it - exactly mirroring how production omits 443 for HTTPS. Spoofing the Host header
+      # instead was tried and rejected: Chromium throws net::ERR_INVALID_ARGUMENT from
+      # browser.newContext's extraHTTPHeaders, and page.route()'s CDP-level header rewrite is silently
+      # dropped for the main-frame navigation request specifically.
+      PORT: "80"
+    # D-70 Wave D: shared with verify-e2e below, so e2e/preview.spec.ts can seed a fixture file at the
+    # exact path app-e2e will stat() - there is no live IdP in this sandbox to drive a real upload (same
+    # limitation upload-delivery.spec.ts documents), so seeding writes bytes directly into this volume and
+    # inserts the matching row straight into mariadb.
+    volumes:
+      - e2e-storage:/data/storage
+    # D-70 Wave D: real DNS aliases on the compose network, so e2e/preview.spec.ts's browser-driven tests
+    # can navigate a genuine host-constrained route (`/f/*` etc. require a matching Host header) - this
+    # mirrors what nginx's proxy_pass does in production: a real Host header naming the app, routed to
+    # this container's real address.
+    networks:
+      default:
+        aliases:
+          - files-e2e.test
+          # Shadows the REAL internet dl.mosni.dev within this compose network only (Docker's embedded DNS
+          # checks its own aliases before falling through to external DNS). Without this, e2e/preview.spec.ts's
+          # CSP test was silently reaching the actual production dl.mosni.dev over the internet - its <iframe>
+          # tripped THAT site's own (unrelated, already-deployed) frame-ancestors policy, not anything this
+          # local build could affect. DL_ORIGIN stays the real "https://dl.mosni.dev" (unchanged) so the CSP
+          # directives and generated URLs stay exactly what production uses; only DNS resolution is shadowed.
+          # Nothing here listens on 443, so the iframe's https:// request fails with a network error (expected
+          # and harmless per the test's own comment), never reaching either the real site or a CSP violation.
+          - dl.mosni.dev
     healthcheck:
       # 127.0.0.1, not localhost: this alpine image's `localhost` resolves ::1 (IPv6) first, and Fastify's
       # `host: "0.0.0.0"` binds IPv4 only - wget would get "connection refused" against the IPv6 attempt.
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
       interval: 2s
       timeout: 5s
       retries: 20
@@ -123,6 +175,18 @@ services:
     depends_on:
       app-e2e:
         condition: service_healthy
+      mariadb:
+        condition: service_healthy
     environment:
-      BASE_URL: http://app-e2e:3000
+      BASE_URL: http://app-e2e
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_USER: files
+      DB_PASS: filespass
+      DB_NAME: files
+    volumes:
+      - e2e-storage:/data/storage
     command: ["npx", "playwright", "test"]
+
+volumes:
+  e2e-storage: {}
