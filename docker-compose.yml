@@ -8,6 +8,16 @@ services:
     environment:
       BOT_API: http://bot-core:8080
       PORT: "3000"
+      # First real deploy crash (2026-07-22): the container restart-looped with exit 132 (SIGILL/"invalid
+      # opcode") inside libvips-cpp.so, sharp's native image library - confirmed via the box's kernel log
+      # (`traps: MainThread[...] trap invalid opcode ... in libvips-cpp.so.8.17.3`). libvips' prebuilt
+      # binary uses vectorized (SIMD) code paths this box's CPU doesn't support; this had never actually run
+      # on real hardware before this deploy. VIPS_NOVECTOR=1 is libvips' own documented escape hatch -
+      # disables the vectorized code paths at runtime (a small performance cost, not a correctness one; D-60
+      # stripping and D-74 probing still run, just without SIMD acceleration). No rebuild needed, no code
+      # change - confirm this resolves it before considering any alternative (pinning an older sharp/libvips,
+      # or building from source with a narrower CPU baseline).
+      VIPS_NOVECTOR: "1"
     # Host port is allocated from the stack range (stack.env PORT_BASE..PORT_MAX) on the box at deploy.
     # PORT NOTE (infra/port-allocation): 33001 is a placeholder so the file stays valid - auth already
     # occupies 33000. At deploy, confirm the next-free port on the box (scan apps/ for 127.0.0.1:<port>)
