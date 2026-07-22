@@ -9,10 +9,37 @@ import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 import { readEmbeddedContext } from "../lib/previewContext.ts";
 import { CopyLink } from "../components/CopyLink.tsx";
 
+
 type PageState =
   | { status: "loading" }
   | { status: "ready"; context: PreviewContext }
   | { status: "not-found" };
+
+// Media has to be told to fit: an <img>/<video> renders at intrinsic size and an <iframe> falls back to
+// the browser default 300x150, which is unreadable. These are sizing rules, not theming, so they stay
+// inline rather than becoming class names this repo has no stylesheet to back.
+const FIT: React.CSSProperties = { maxWidth: "100%", height: "auto", display: "block" };
+const FRAME: React.CSSProperties = { width: "100%", height: "min(70vh, 640px)", border: 0, display: "block" };
+
+// Wrapper glue for <mosni-code> (the friction D-8 predicted for React + custom elements). The element's
+// render() reads this.textContent and then WIPES its own children to rebuild them - so it must already
+// contain its text at the moment it enters the document. React inserts an element and appends children
+// after, which means a JSX <mosni-code><pre>…</pre></mosni-code> upgrades while empty and renders an
+// empty block. Creating it imperatively with textContent already set fixes both halves: the content is
+// there on connect, and React never owns children the element intends to destroy.
+function CodeBlock({ text, language }: { text: string; language?: string }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const host = hostRef.current;
+    if (host === null) return;
+    const el = document.createElement("mosni-code");
+    if (language !== undefined) el.setAttribute("language", language);
+    el.textContent = text;
+    host.replaceChildren(el);
+    return () => host.replaceChildren();
+  }, [text, language]);
+  return <div ref={hostRef} />;
+}
 
 function renderMedia(ctx: PreviewContext) {
   // "other", or an explicitly non-inline type (e.g. a disallowed extension): the download card.
@@ -35,14 +62,24 @@ function renderMedia(ctx: PreviewContext) {
           alt={ctx.name}
           width={ctx.width ?? undefined}
           height={ctx.height ?? undefined}
+          style={FIT}
         />
       );
     case "video":
       // Plain <video controls> - not Vidstack, that's E5's (out of scope here).
-      return <video src={ctx.directUrl} controls />;
+      return <video src={ctx.directUrl} controls style={FIT} />;
     case "pdf":
+      return <iframe src={ctx.directUrl} title={ctx.name} style={FRAME} />;
     case "text":
-      return <iframe src={ctx.directUrl} title={ctx.name} />;
+      // The design system's own code block, not an iframe to dl. (Hannah, session 010). This renders the
+      // snippet already captured at ingest into the context (D-74's text_preview), so it costs no extra
+      // request and no byte-streaming through Node. Rendering the FULL file - with syntax highlighting and
+      // scrolling - remains E5's "text/code preview"; this is the first 400 characters.
+      return ctx.textPreview ? (
+        <CodeBlock text={ctx.textPreview} />
+      ) : (
+        <iframe src={ctx.directUrl} title={ctx.name} style={FRAME} />
+      );
     default:
       return null;
   }
@@ -127,8 +164,18 @@ export function PreviewPage() {
 
   const ctx = state.context;
   return (
-    <div>
-      <h1>{ctx.name}</h1>
+    // Vertical rhythm for the page's own sections; the shell supplies the outer container and padding.
+    // `minmax(0, 1fr)` rather than a bare 1fr is load-bearing: grid items get an automatic minimum size
+    // of their content, so an <img width="1200"> would otherwise force this column - and the whole page -
+    // wider than the viewport, which is exactly the horizontal overflow the first pass shipped.
+    <div style={{ display: "grid", gap: "1.25rem", gridTemplateColumns: "minmax(0, 1fr)" }}>
+      <div>
+        <h1 style={{ margin: 0 }}>{ctx.name}</h1>
+        <p className="little-link" style={{ margin: "0.25rem 0 0" }}>
+          {ctx.sizeLabel}
+          {ctx.width !== null && ctx.height !== null ? ` · ${ctx.width}×${ctx.height}` : ""}
+        </p>
+      </div>
       {ctx.isOwner && (
         <div className="panel">
           <p>You own this file ({ctx.protection}).</p>

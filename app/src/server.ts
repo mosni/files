@@ -59,7 +59,13 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
         // the minimal permission this app ever needs (files. embeds dl. content; nothing else must).
         frameAncestors: ["'self'", "https://files.mosni.dev"],
         // data:/blob: let the drop zone show a local thumbnail before the upload completes (F1).
-        imgSrc: ["'self'", "https://dl.mosni.dev", "data:", "blob:"],
+        // ui.mosni.dev is here because <mosni-logo> (shipped inside <mosni-header>) loads
+        // `${assetBase}mosni.svg` from wherever mosnicat.js was served - i.e. the design system's own
+        // origin. Without it the site logo is a broken image on EVERY page, in production too. Found by
+        // D-79's visual check; session 009 had seen the console warning and written it off as "unrelated
+        // pre-existing noise", which it was not - it is the same shape as D-77's frame-ancestors bug:
+        // our own CSP blocking our own chrome.
+        imgSrc: ["'self'", "https://ui.mosni.dev", "https://dl.mosni.dev", "data:", "blob:"],
         mediaSrc: ["'self'", "https://dl.mosni.dev"],
         connectSrc: ["'self'", "https://auth.mosni.dev"],
         // helmet's `useDefaults` (on by default, never explicitly chosen here) merges in

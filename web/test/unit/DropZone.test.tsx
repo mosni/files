@@ -104,7 +104,9 @@ describe("DropZone", () => {
       root.render(<DropZone />);
     });
 
-    expect(container.textContent).toContain("You do not have upload access.");
+    // Copy reworded in session 010 (the branch now renders a titled .panel rather than a bare <p>);
+    // the assertion that matters is unchanged - no login button and no drop zone in this branch.
+    expect(container.textContent).toContain("No upload access");
     expect(container.querySelector("mosni-login-button")).toBeNull();
     expect(container.querySelector('input[type="file"]')).toBeNull();
   });

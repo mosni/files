@@ -93,6 +93,17 @@ describe("security headers", () => {
     expect(imgSrc).toContain("blob:");
   });
 
+  // Regression guard: <mosni-logo> inside <mosni-header> loads mosni.svg from the design system's own
+  // origin, so omitting it here makes the site logo a broken image on every page (found by D-79's
+  // visual check, after session 009 mistook the console warning for unrelated noise).
+  it("CSP allows ui.mosni.dev as an img-src, so the chrome's own logo is not blocked", async () => {
+    const res = await app.inject({ method: "GET", url: "/health" });
+    const csp = res.headers["content-security-policy"] as string;
+    const imgSrc = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("img-src"));
+
+    expect(imgSrc).toContain("https://ui.mosni.dev");
+  });
+
   it("GET /api/config returns the server-authoritative upload chunk size (P10)", async () => {
     const res = await app.inject({
       method: "GET",

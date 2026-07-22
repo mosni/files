@@ -5,6 +5,19 @@
 
 import { renderToString } from "react-dom/server";
 
+declare module "react" {
+  namespace JSX {
+    interface IntrinsicElements {
+      "mosni-layout": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
+      "mosni-header": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement> & {
+        slot?: string;
+        brand?: string;
+        accent?: string;
+      };
+    }
+  }
+}
+
 function NotFound() {
   return (
     <html lang="en">
@@ -15,7 +28,11 @@ function NotFound() {
         <script src="https://ui.mosni.dev/mosnicat.js"></script>
       </head>
       <body>
-        <main>
+        {/* Same chrome shell as the SPA's index.html (header + centred main, no mosni-layout sidebar),
+            so a mistyped share link doesn't land on a page that looks like a different product. This
+            document loads mosnicat.js above, so the element upgrades here too. */}
+        <mosni-header brand="HANNAH'S" accent="FILE DROP"></mosni-header>
+        <main style={{ maxWidth: "1100px", margin: "0 auto", padding: "1.75rem 1.25rem" }}>
           <div className="panel">
             <h1>Not found</h1>
             <p>There is nothing at this address. The link may be wrong, or the file may have been deleted.</p>

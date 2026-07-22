@@ -147,16 +147,29 @@ export function DropZone() {
     return <span className="spinner" role="status" aria-label="Loading" />;
   }
 
+  // Signed out this is the WHOLE page (E4 adds the browser), so it needs to say what the app is rather
+  // than stranding a lone button in the corner - which is exactly how it read before session 010.
   if (user === null) {
-    return <mosni-login-button />;
+    return (
+      <div className="panel">
+        <h1 style={{ marginTop: 0 }}>Send a file</h1>
+        <p>Drop a file, get a link. Sign in to upload.</p>
+        <mosni-login-button />
+      </div>
+    );
   }
 
   if (!can(user, "files:write")) {
-    return <p>You do not have upload access.</p>;
+    return (
+      <div className="panel">
+        <h1 style={{ marginTop: 0 }}>No upload access</h1>
+        <p>Your account does not have permission to upload files.</p>
+      </div>
+    );
   }
 
   return (
-    <div>
+    <div style={{ display: "grid", gap: "1rem", gridTemplateColumns: "minmax(0, 1fr)" }}>
       <div
         className="panel"
         role="button"
@@ -193,8 +206,8 @@ export function DropZone() {
       </div>
 
       {uploads.map((upload) => (
-        <div key={upload.id}>
-          <p>{upload.name}</p>
+        <div className="panel" key={upload.id}>
+          <p style={{ marginTop: 0 }}>{upload.name}</p>
           {upload.state.status === "uploading" && (
             <div
               className="progress"

@@ -11,7 +11,20 @@
     <script src="https://ui.mosni.dev/mosnicat.js"></script>
   </head>
   <body>
-    <div id="root"></div>
+    <!-- mosni-chrome's own header, NOT <mosni-layout>: that component's grid hard-codes a sidebar column
+         (`grid-template-columns: $sidebar-width 1fr`) whether or not a menu is slotted, so with no
+         navigation to put there it renders a large empty rail and pushes the page past the viewport.
+         This app has no nav until E4's file browser; switch to <mosni-layout> then.
+         It lives HERE, in the static shell, rather than inside React on purpose - the element reparents
+         its own children on connect (takeSlot/takeDefault), and letting it move nodes React is
+         reconciling is exactly the custom-element glue friction D-8 warned about. mosnicat.js is a
+         synchronous <script> in <head>, so it upgrades before main.tsx's deferred module runs and React
+         only ever owns the inside of #root. The preview <head> is spliced into this same shell (D-72),
+         so preview documents get the chrome for free. -->
+    <mosni-header brand="HANNAH'S" accent="FILE DROP"></mosni-header>
+    <main style="max-width: 1100px; margin: 0 auto; padding: 1.75rem 1.25rem">
+      <div id="root"></div>
+    </main>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
