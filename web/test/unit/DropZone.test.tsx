@@ -43,6 +43,37 @@ vi.mock("tus-js-client", () => {
 });
 
 import { DropZone } from "../../src/components/DropZone.tsx";
+import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
+
+function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
+  return {
+    name: "hello.txt",
+    path: "hello.txt",
+    bytes: 5,
+    sizeLabel: "5 B",
+    protection: "public",
+    createdAt: "2026-07-21T00:00:00.000Z",
+    previewUrl: "https://files.mosni.dev/abc",
+    directUrl: "https://dl.mosni.dev/abc",
+    kind: "image",
+    mimeType: "image/png",
+    inline: true,
+    width: null,
+    height: null,
+    durationSeconds: null,
+    textPreview: null,
+    isOwner: false,
+    ...overrides,
+  };
+}
+
+// Flushes every pending microtask (fetch → res.json() → setState is two awaits deep) by yielding to a
+// real macrotask - more robust than a fixed number of `await Promise.resolve()` hops.
+async function flush() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
 
 type MockClaims = { sub: string; roles?: string[]; mosni_owner?: boolean } | null;
 
@@ -129,7 +160,7 @@ describe("DropZone", () => {
     expect(uploadInstances[0].options.chunkSize).toBe(5 * 1024 * 1024);
   });
 
-  it("reflects a simulated onProgress event as the row's --progress custom property (F2)", () => {
+  it("reflects a simulated onProgress event as the row's --progress custom property and MB/% readout (F2)", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
@@ -146,10 +177,37 @@ describe("DropZone", () => {
     const progressEl = container.querySelector(".progress") as HTMLElement;
     expect(progressEl).not.toBeNull();
     expect(progressEl.style.getPropertyValue("--progress")).toBe("50%");
+    expect(container.textContent).toContain("50%");
+    expect(container.textContent).toContain("50 B / 100 B");
   });
 
-  it("hands off to CopyLink once an upload completes, using previewUrl as primary (F1/F4)", () => {
+  it("rejects a dropped folder (0-byte File) - no upload starts, and an error toast fires", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
+
+    act(() => {
+      root.render(<DropZone />);
+    });
+
+    const dropArea = container.querySelector('[role="button"]') as HTMLElement;
+    const folder = new File([], "testfolder");
+    const dropEvent = new Event("drop", { bubbles: true, cancelable: true }) as Event & {
+      dataTransfer: { files: File[] };
+    };
+    dropEvent.dataTransfer = { files: [folder] };
+
+    act(() => {
+      dropArea.dispatchEvent(dropEvent);
+    });
+
+    expect(uploadInstances).toHaveLength(0);
+    const mosni = (window as unknown as { mosni: { toast: ReturnType<typeof vi.fn> } }).mosni;
+    expect(mosni.toast).toHaveBeenCalledWith(expect.stringContaining("testfolder"), { variant: "error" });
+  });
+
+  it("hands off to CopyLink immediately, then upgrades to a compact preview card once /api/preview resolves (F1/F4, finding 6)", async () => {
+    installMockMosni({ sub: "user:1", roles: ["files:write"] });
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(makeContext()) });
+    vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
       root.render(<DropZone />);
@@ -171,8 +229,47 @@ describe("DropZone", () => {
     });
 
     expect(container.querySelector(".progress")).toBeNull();
-    const copyButton = container.querySelector("button.btn");
-    expect(copyButton).not.toBeNull();
+    expect(container.querySelector("button.copy-field-btn-primary")).not.toBeNull();
+
+    await flush();
+
+    expect(fetchSpy).toHaveBeenCalledWith("/api/preview/abc", { headers: { Authorization: "Bearer test-token" } });
+    expect(container.querySelector("img")).not.toBeNull();
+    expect(container.querySelector("button.copy-field-btn-primary")).not.toBeNull();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("falls back to bare CopyLink when /api/preview fails after completion (finding 6 fallback)", async () => {
+    installMockMosni({ sub: "user:1", roles: ["files:write"] });
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: false });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    act(() => {
+      root.render(<DropZone />);
+    });
+
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
+
+    act(() => {
+      uploadInstances[0].options.onSuccess?.({
+        lastResponse: {
+          getBody: () =>
+            JSON.stringify({
+              previewUrl: "https://files.mosni.dev/abc",
+              directUrl: "https://dl.mosni.dev/abc",
+            }),
+        },
+      });
+    });
+
+    await flush();
+
+    expect(container.querySelector("button.copy-field-btn-primary")).not.toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+
+    vi.unstubAllGlobals();
   });
 
   it("shows an error state for a file whose upload fails, without affecting other files (F1)", () => {

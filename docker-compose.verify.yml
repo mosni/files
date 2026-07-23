@@ -244,6 +244,12 @@ services:
         condition: service_healthy
       mock-idp:
         condition: service_healthy
+      # Without this, `docker compose run verify-e2e` never starts nginx-e2e on its own (it's outside
+      # verify-e2e's dependency graph) - files-e2e.test and dl.mosni.dev then simply don't resolve, and
+      # every spec that navigates through the real vhost fails with ERR_NAME_NOT_RESOLVED. Only ever
+      # worked before this fix if nginx-e2e happened to already be running from an earlier `up`/`run`.
+      nginx-e2e:
+        condition: service_healthy
     environment:
       BASE_URL: http://app-e2e
       DB_HOST: mariadb

@@ -108,6 +108,28 @@ const signedInAs = (claims) => `
 const WRITER = { sub: "user:visual-check", name: "Hannah", roles: ["files:write"] };
 const NO_ROLE = { sub: "user:visual-check", name: "Hannah", roles: [] };
 
+// A real, verify()-acceptable token, for the one state that needs an actual completed upload rather than
+// a seeded row: the compact preview card (finding 6). Same issuer the e2e tier uses (mock-idp), reachable
+// from this container the same way (docker-compose.verify.yml).
+async function mintToken(sub, roles = "files:write") {
+  const idp = process.env.MOCK_IDP ?? "http://mock-idp:9000";
+  const res = await fetch(`${idp}/token?sub=${encodeURIComponent(sub)}&roles=${encodeURIComponent(roles)}`);
+  if (!res.ok) throw new Error(`mock-idp mint failed: ${res.status}`);
+  return (await res.json()).token;
+}
+
+const signedInAsReal = (claims, token) => `
+  window.mosni = Object.assign(window.mosni ?? {}, {
+    user: () => (${JSON.stringify(claims)}),
+    token: () => ${JSON.stringify(token)},
+    onChange: (cb) => cb(${JSON.stringify(claims)}),
+    login: () => {}, logout: () => {},
+    toast: (m) => { window.__lastToast = m; },
+  });
+`;
+
+const uploadToken = await mintToken(WRITER.sub);
+
 const PAGES = [
   { id: "landing", label: "Landing - signed out", url: "/", note: "The whole page when signed out (F5)" },
   {
@@ -133,6 +155,50 @@ const PAGES = [
   { id: "preview-private-anon", label: "Preview - private, signed out", url: `/f/${priv.relPath}`, note: "Must reveal nothing: shared not-found panel (D-72/D-75)" },
   { id: "notfound-secret-path", label: "404 - secret at its readable path", url: `/f/${secret.relPath}`, note: "Must 404, never 403 (D-59, never-delete)" },
   { id: "notfound-missing", label: "404 - nonexistent path", url: `/f/vis-${run}/does-not-exist.png`, note: "Styled NotFound view (P1)" },
+  {
+    id: "landing-completed-upload",
+    label: "Landing - signed in, upload just completed (compact preview card)",
+    url: "/",
+    note: "E2-UPLOAD-FIXES finding 6: the compact PreviewCard replaces bare links on completion. A real " +
+      "upload through mock-idp, not a seeded row. The image's dl.mosni.dev subresource is expected to fail " +
+      "in this sandbox (no live dl. origin) - that is a sandbox artifact, not a defect; layout, the " +
+      "progress-free completed state and the copy control are what this validates.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.locator('input[type="file"]').setInputFiles({
+        name: `vis-${run}-drop.png`,
+        mimeType: "image/png",
+        buffer: PNG_1PX,
+      });
+      await p.locator(".copy-field-primary input").first().waitFor({ state: "visible", timeout: 30_000 });
+      // The share field appears as soon as the upload completes; the compact card is a second, best-effort
+      // fetch to /api/preview on top of that - give it a moment to land before the screenshot.
+      await p.waitForTimeout(1000);
+    },
+  },
+  {
+    id: "landing-drag-over",
+    label: "Landing - signed in, dragging a file over the page (drag-over affordance)",
+    url: "/",
+    note: "E2-UPLOAD-FIXES finding 2: page-level + zone-level drag-over affordance. Neither may intercept " +
+      "the actual drop (the overlay is pointer-events:none).",
+    init: signedInAs(WRITER),
+    interact: async (p) => {
+      await p.waitForSelector('[role="button"]');
+      await p.evaluate(() => {
+        function fireDrag(target, type) {
+          const event = new DragEvent(type, { bubbles: true, cancelable: true });
+          Object.defineProperty(event, "dataTransfer", { value: { types: ["Files"], files: [] } });
+          target.dispatchEvent(event);
+        }
+        fireDrag(window, "dragenter");
+        const zone = document.querySelector('[role="button"]');
+        fireDrag(zone, "dragenter");
+        fireDrag(zone, "dragover");
+      });
+      await p.waitForTimeout(100);
+    },
+  },
 ];
 
 const browser = await chromium.launch();
@@ -161,6 +227,7 @@ try {
         // The SPA paints from the embedded context on the first frame; a private/missing file has none
         // and must round-trip to the API first, so give the client state machine a moment to settle.
         await p.waitForTimeout(700);
+        if (page.interact) await page.interact(p);
         title = await p.title();
         // A page that scrolls sideways is broken, and it is easy to miss in a screenshot because the
         // capture silently widens to fit. Measure it instead of trusting the eye - the first pass of

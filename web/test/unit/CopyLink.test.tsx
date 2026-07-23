@@ -39,7 +39,7 @@ describe("CopyLink (P9: read-only inputs with a copy icon)", () => {
     expect(previewInput.readOnly).toBe(true);
     expect(previewInput.value).toBe("https://files.mosni.dev/f/abc");
 
-    const primaryCopy = container.querySelector(".copy-field-primary button.btn") as HTMLButtonElement;
+    const primaryCopy = container.querySelector(".copy-field-primary button.copy-field-btn-primary") as HTMLButtonElement;
     await act(async () => {
       primaryCopy.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await Promise.resolve();
@@ -64,7 +64,7 @@ describe("CopyLink (P9: read-only inputs with a copy icon)", () => {
     expect(writeText).toHaveBeenCalledWith("https://files.mosni.dev/f/abc");
   });
 
-  it("renders the direct link as a secondary read-only input whose copy button is not the primary .btn", () => {
+  it("renders the direct link as a secondary read-only input whose copy button is not the primary variant", () => {
     act(() => {
       root.render(<CopyLink previewUrl="https://files.mosni.dev/f/abc" directUrl="https://dl.mosni.dev/abc" />);
     });
@@ -72,7 +72,8 @@ describe("CopyLink (P9: read-only inputs with a copy icon)", () => {
     const secondaryInput = container.querySelector(".copy-field-secondary input") as HTMLInputElement;
     expect(secondaryInput.value).toBe("https://dl.mosni.dev/abc");
     const secondaryButton = container.querySelector(".copy-field-secondary button") as HTMLButtonElement;
-    expect(secondaryButton.className).not.toContain("btn");
+    expect(secondaryButton.className).not.toContain("copy-field-btn-primary");
+    expect(secondaryButton.className).toContain("copy-field-btn");
   });
 
   it("renders no secondary field when directUrl is not provided", () => {

@@ -208,6 +208,11 @@ test("the three-action path in a real browser: drop a file, get a link", async (
   const shareUrl = await shareInput.inputValue();
   expect(shareUrl).toContain(filename);
 
+  // E2-UPLOAD-FIXES finding 6: the row upgrades from bare links to a compact preview card once the
+  // client's own /api/preview fetch resolves - assert the card's own heading, which the bare CopyLink
+  // fallback never renders (only its <p> row label does, before the card lands).
+  await expect(page.locator("h1", { hasText: filename })).toBeVisible({ timeout: 10_000 });
+
   // And the link it just handed the user actually resolves.
   const preview = await request.get(`${FILES_ORIGIN}${new URL(shareUrl).pathname}`, {
     headers: { host: FILES_HOST },

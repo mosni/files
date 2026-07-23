@@ -23,46 +23,56 @@ function CopyField({ value, label, primary }: { value: string; label: string; pr
     }
   }
 
-  // The class names stay as behavioural hooks (tests and e2e bind to them), but the LOOK comes entirely
-  // from mosni-chrome: `.panel` styles the inputs it contains (see the design system's panel-input
-  // example) and `.btn` styles the button. Session 007 invented `.copy-field*` and styled none of it -
-  // and since this repo ships no stylesheet at all, the field rendered as a raw browser input with the
-  // URL clipped. Reuse the system rather than adding a first stylesheet here (D-31's spirit).
+  // The class names stay as behavioural hooks (tests and e2e bind to them). Session 011 found the
+  // `.panel`-wrapped field read as unstyled and detached (padding:2rem; margin:2rem auto meant for a
+  // whole panel, not an inline field) - so this is now one bordered input+button unit, built from
+  // mosni-chrome tokens rather than `.panel`/`.btn` (this repo ships no stylesheet - D-31's spirit).
   return (
     <div className={primary ? "copy-field copy-field-primary" : "copy-field copy-field-secondary"}>
-      <label>{label}</label>
-      <div className="panel copy-field-row" style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+      <label style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.35rem", color: "var(--mosni-text-muted)" }}>
+        {label}
+      </label>
+      <div
+        className="copy-field-row"
+        style={{
+          display: "flex",
+          alignItems: "stretch",
+          border: `1px solid ${primary ? "var(--mosni-purple)" : "var(--mosni-border-muted)"}`,
+          borderRadius: "6px",
+          background: "var(--mosni-surface-input)",
+          overflow: "hidden",
+        }}
+      >
         <input
           ref={inputRef}
           type="text"
           readOnly
           value={value}
-          style={{ flex: 1, minWidth: 0 }}
+          style={{ flex: 1, minWidth: 0, border: "none", background: "transparent", color: "var(--mosni-white)", padding: "0.55rem 0.65rem", font: "inherit" }}
           onFocus={(event) => event.currentTarget.select()}
         />
         {/* D-1: the preview link is the ONE prominent action; the direct link stays deliberately
-            quieter, so only the primary gets `.btn` (mosni-chrome ships no secondary variant). The
-            secondary still gets enough inline styling not to read as an unstyled browser default. */}
+            quieter - both share the same control shape, primary just gets the accent border/fill and
+            a "Copy" label. */}
         <button
           type="button"
-          className={primary ? "btn" : undefined}
+          className={primary ? "copy-field-btn copy-field-btn-primary" : "copy-field-btn"}
           aria-label={`Copy ${label.toLowerCase()}`}
           onClick={() => void copy()}
-          style={
-            primary
-              ? undefined
-              : {
-                  background: "transparent",
-                  border: "1px solid currentColor",
-                  borderRadius: "0.4rem",
-                  color: "inherit",
-                  opacity: 0.7,
-                  padding: "0.4rem 0.6rem",
-                  cursor: "pointer",
-                }
-          }
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.35rem",
+            border: "none",
+            borderLeft: `1px solid ${primary ? "var(--mosni-purple)" : "var(--mosni-border-muted)"}`,
+            background: primary ? "var(--mosni-purple)" : "transparent",
+            color: primary ? "var(--mosni-white)" : "inherit",
+            padding: "0 0.75rem",
+            cursor: "pointer",
+          }}
         >
           <CopyIcon />
+          {primary && <span style={{ fontSize: "0.85rem" }}>Copy</span>}
         </button>
       </div>
     </div>
