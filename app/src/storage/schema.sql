@@ -1,3 +1,13 @@
+-- Create the app's database and select it before anything else. storage/db.ts runs this file over a
+-- bootstrap connection with NO database preselected, because the runtime pool connects with the database
+-- already selected and cannot even connect if it does not exist yet - so CREATE DATABASE has to happen
+-- here, on a connection that does not require it. The USE makes every statement below land in this
+-- database on that single connection. (CREATE DATABASE is best-effort: an app user granted only ON
+-- files.* cannot create databases, so db.ts tolerates a failure here and lets the USE surface a genuinely
+-- missing, uncreatable database.)
+CREATE DATABASE IF NOT EXISTS files;
+USE files;
+
 -- Split on `;` at the call site (storage/db.ts), so this file must never put `--` or `;` inside a string
 -- literal.
 --
