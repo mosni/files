@@ -104,6 +104,17 @@ describe("security headers", () => {
     expect(imgSrc).toContain("https://ui.mosni.dev");
   });
 
+  // mosnicat.js hard-codes a favicon <link rel="icon" href="https://mosni.dev/images/icon.png"> on every
+  // page; favicons are governed by img-src, so omitting the apex 404s the favicon under our own CSP.
+  // Reported from the deployed app.
+  it("CSP allows the mosni.dev apex as an img-src, so the chrome's favicon is not blocked", async () => {
+    const res = await app.inject({ method: "GET", url: "/health" });
+    const csp = res.headers["content-security-policy"] as string;
+    const imgSrc = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("img-src"));
+
+    expect(imgSrc).toContain("https://mosni.dev");
+  });
+
   it("GET /api/config returns the server-authoritative upload chunk size (P10)", async () => {
     const res = await app.inject({
       method: "GET",
