@@ -5,6 +5,17 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     env_file: [.env]
+    # auth.mosni.dev is hosted on THIS box, so it resolves to the box's own public IP - and a container
+    # reaching its host's public IP needs hairpin/loopback NAT, which the box does not do. Result: the
+    # container reaches the open internet fine but not auth.mosni.dev specifically, so the JWKS fetch inside
+    # verify() times out and every real token is rejected with "invalid token" (a 401 on POST /api/upload).
+    # Confirmed by elimination: the token verifies with the app's exact logic against auth's public JWKS
+    # from outside the box, so only the container->auth hop was left. host-gateway points auth.mosni.dev at
+    # the docker host, whose nginx serves that vhost (real cert, SNI auth.mosni.dev) - the same nginx an
+    # external client would hit, just without the public round-trip. This is only needed because auth lives
+    # on the same box; a cross-box IdP would resolve normally.
+    extra_hosts:
+      - "auth.mosni.dev:host-gateway"
     environment:
       BOT_API: http://bot-core:8080
       PORT: "3000"

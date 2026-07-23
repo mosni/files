@@ -76,7 +76,19 @@ export function buildTusServer(config: Config): TusServer {
       let claims: VerifiedClaims;
       try {
         claims = (await verify(token, config.appOrigin)) as unknown as VerifiedClaims;
-      } catch {
+      } catch (err) {
+        // Log the REAL reason server-side (never to the client - the 401 body stays generic so it leaks
+        // nothing to an attacker). "invalid token" alone is undiagnosable: a JWKS-fetch failure (the
+        // container cannot reach auth.mosni.dev), a rotated/absent signing key, an expired token, and a
+        // wrong audience all look identical to the caller. jose attaches a `.code` and, for claim failures,
+        // `.claim`/`.reason`; a fetch failure surfaces as its message. This is what turns the next auth
+        // problem into a one-line `docker logs` read instead of a token-decoding session.
+        const e = err as { code?: string; claim?: string; reason?: string; message?: string };
+        console.error(
+          "upload: token verification failed -",
+          e.code ?? e.message ?? "unknown",
+          e.claim ? `(claim=${e.claim} reason=${e.reason})` : "",
+        );
         tusError(401, "invalid token");
       }
       if (!can(claims, "files:write")) tusError(403, "files:write required");
