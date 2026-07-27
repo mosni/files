@@ -288,7 +288,11 @@ export function DropZone() {
             border: "3px dashed var(--mosni-purple)",
           }}
         >
-          <span style={{ fontSize: "1.5rem", color: "var(--mosni-white)" }}>Drop to upload</span>
+          {/* The zone is still the only drop target (the hand-off scoped whole-page drop out, and E6 owns
+              it). A viewport-wide "Drop to upload" therefore promised something a drop on the header or
+              the margins does not honour - it silently does nothing. The copy points at the zone instead,
+              which the overlay's own translucency leaves highlighted underneath. */}
+          <span style={{ fontSize: "1.5rem", color: "var(--mosni-white)" }}>Drop on the box below to upload</span>
         </div>
       )}
       <div
@@ -350,9 +354,14 @@ export function DropZone() {
         />
       </div>
 
-      {uploads.map((upload) => (
+      {uploads.map((upload) => {
+        // The compact card renders the filename itself, as its own <h1>. Keeping the row label as well
+        // printed every completed upload's name twice (review session 013, visible in production) - so
+        // the label only stands in while there is no card: uploading, error, and the CopyLink fallback.
+        const cardShown = upload.state.status === "done" && upload.state.context !== null;
+        return (
         <div className="panel" key={upload.id}>
-          <p style={{ marginTop: 0 }}>{upload.name}</p>
+          {!cardShown && <p style={{ marginTop: 0 }}>{upload.name}</p>}
           {upload.state.status === "uploading" && (
             <>
               <div className="progress-label">
@@ -375,7 +384,8 @@ export function DropZone() {
             ))}
           {upload.state.status === "error" && <p role="alert">Upload failed: {upload.state.message}</p>}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

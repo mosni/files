@@ -115,6 +115,10 @@ describe("DropZone", () => {
     container.remove();
     delete (window as unknown as { mosni?: unknown }).mosni;
     vi.restoreAllMocks();
+    // restoreAllMocks does NOT undo vi.stubGlobal, and vitest.config.ts doesn't set `unstubGlobals` -
+    // so without this a failing assertion in a fetch-stubbing test leaks that stub into every test
+    // after it (review session 013).
+    vi.unstubAllGlobals();
   });
 
   it("renders the login button when signed out (F5)", () => {
@@ -236,8 +240,10 @@ describe("DropZone", () => {
     expect(fetchSpy).toHaveBeenCalledWith("/api/preview/abc", { headers: { Authorization: "Bearer test-token" } });
     expect(container.querySelector("img")).not.toBeNull();
     expect(container.querySelector("button.copy-field-btn-primary")).not.toBeNull();
-
-    vi.unstubAllGlobals();
+    // The card renders the filename as its own <h1>; the row label must not print it a second time
+    // (review session 013 - this shipped as a visible duplicate on every completed upload).
+    expect(container.textContent?.match(/hello\.txt/g) ?? []).toHaveLength(1);
+    expect(container.querySelector("h1")?.textContent).toBe("hello.txt");
   });
 
   it("falls back to bare CopyLink when /api/preview fails after completion (finding 6 fallback)", async () => {
@@ -268,8 +274,34 @@ describe("DropZone", () => {
 
     expect(container.querySelector("button.copy-field-btn-primary")).not.toBeNull();
     expect(container.querySelector("img")).toBeNull();
+    // No card, so the row label is what names the file - it must still be there in the fallback.
+    expect(container.textContent).toContain("hello.txt");
+  });
 
-    vi.unstubAllGlobals();
+  // A2's guard (hand-off acceptance criterion 2) shipped in session 012 with no test at all. The failure
+  // it exists for is real: the file is already stored server-side and the audit notification already
+  // sent, so a row stuck on `uploading` forever is a lie about state that the user cannot clear. An
+  // nginx 502 page or any non-JSON body reaches this path.
+  it("puts the row in error when the completion body is unreadable, never a permanent uploading (A2)", () => {
+    installMockMosni({ sub: "user:1", roles: ["files:write"] });
+
+    act(() => {
+      root.render(<DropZone />);
+    });
+
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
+
+    act(() => {
+      uploadInstances[0].options.onSuccess?.({
+        lastResponse: { getBody: () => "<html><body>502 Bad Gateway</body></html>" },
+      });
+    });
+
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(container.textContent).toContain("Upload failed");
+    expect(container.querySelector(".progress")).toBeNull();
+    expect(container.querySelector("button.copy-field-btn-primary")).toBeNull();
   });
 
   it("shows an error state for a file whose upload fails, without affecting other files (F1)", () => {
