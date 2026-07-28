@@ -11,8 +11,9 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
-import { can, isSuperuser, type Claims } from "../lib/roles.ts";
+import { can, isSuperuser, type Claims, type VerifiedClaims } from "../lib/roles.ts";
 import type { Protection } from "../lib/protection.ts";
+import { actorLabel } from "../lib/audit.ts";
 import { emitAuditEvent } from "../storage/audit.ts";
 import {
   canUploadTo,
@@ -32,7 +33,11 @@ function isProtection(value: unknown): value is Protection {
   return typeof value === "string" && (PROTECTION_LEVELS as readonly string[]).includes(value);
 }
 
-async function requireClaims(request: FastifyRequest, reply: FastifyReply, config: Config): Promise<Claims | null> {
+async function requireClaims(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  config: Config,
+): Promise<VerifiedClaims | null> {
   const claims = await claimsFromBearer(request, config.appOrigin);
   if (claims === null) {
     reply.code(401).send();
@@ -140,7 +145,7 @@ export async function updateCollectionHandler(
       }
       throw err;
     }
-    emitAuditEvent({ action: "rename", actor: claims.sub, target: body.name });
+    emitAuditEvent({ action: "rename", actor: actorLabel(claims), target: body.name });
   }
   if (body.defaultProtection !== undefined) {
     if (!isProtection(body.defaultProtection)) {
@@ -150,7 +155,7 @@ export async function updateCollectionHandler(
     await setCollectionDefaultProtection(id, body.defaultProtection);
     emitAuditEvent({
       action: "protection-change",
-      actor: claims.sub,
+      actor: actorLabel(claims),
       target: body.name ?? collection.name,
       protection: body.defaultProtection,
     });
@@ -178,9 +183,9 @@ export async function deleteCollectionHandler(
   const { deletedFileIds } = await deleteCollectionRecursive(id);
   // D-46/C4: one audit line per deleted file, plus one for the collection itself.
   for (const fileId of deletedFileIds) {
-    emitAuditEvent({ action: "delete", actor: claims.sub, target: fileId });
+    emitAuditEvent({ action: "delete", actor: actorLabel(claims), target: fileId });
   }
-  emitAuditEvent({ action: "delete", actor: claims.sub, target: collection.name });
+  emitAuditEvent({ action: "delete", actor: actorLabel(claims), target: collection.name });
 
   reply.code(204).send();
 }
@@ -221,7 +226,7 @@ export async function updateFileHandler(
       }
       throw err;
     }
-    emitAuditEvent({ action: "rename", actor: claims.sub, target: body.name });
+    emitAuditEvent({ action: "rename", actor: actorLabel(claims), target: body.name });
   }
   if (body.protection !== undefined) {
     if (!isProtection(body.protection)) {
@@ -231,7 +236,7 @@ export async function updateFileHandler(
     await setFileProtection(id, body.protection);
     emitAuditEvent({
       action: "protection-change",
-      actor: claims.sub,
+      actor: actorLabel(claims),
       target: body.name ?? record.name,
       protection: body.protection,
     });
@@ -263,6 +268,6 @@ export async function deleteFileHandler(
   }
 
   await deleteFile(id);
-  emitAuditEvent({ action: "delete", actor: claims.sub, target: record.name, protection: record.protection });
+  emitAuditEvent({ action: "delete", actor: actorLabel(claims), target: record.name, protection: record.protection });
   reply.code(204).send();
 }

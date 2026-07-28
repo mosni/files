@@ -3,6 +3,7 @@
 // perform I/O.
 
 import type { Protection } from "./protection.ts";
+import type { VerifiedClaims } from "./roles.ts";
 
 export type WriteAction =
   | "upload"
@@ -43,6 +44,14 @@ function formatBytes(bytes: number): string {
     unitIndex++;
   }
   return unitIndex === 0 ? `${value} ${units[unitIndex]}` : `${value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+// The audit channel is an internal ops Discord channel (storage/audit.ts posts to "server-notifications"),
+// not public - so unlike the default collection name (controllers/upload.ts), a sub fallback here is not a
+// privacy leak, just less readable than a name. Prefer the token's `name` claim; fall back to the sub only
+// when no name claim is present.
+export function actorLabel(claims: VerifiedClaims): string {
+  return typeof claims.name === "string" && claims.name.trim().length > 0 ? claims.name : claims.sub;
 }
 
 export function formatAuditLine(event: AuditEvent): string {

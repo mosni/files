@@ -5,6 +5,11 @@
 export type Claims = { sub: string; roles?: unknown; mosni_owner?: unknown };
 export type FilesRole = "files:write" | "files:delete";
 
+// auth's token also carries an optional `name` claim, not modeled on Claims above (which stays minimal to
+// what can()/isSuperuser need). Shared wherever a human-readable display name is wanted in place of the
+// raw sub - default collection naming (controllers/upload.ts) and audit actor labels (lib/audit.ts).
+export type VerifiedClaims = Claims & { name?: unknown };
+
 export function can(claims: Claims | null, role: FilesRole): boolean {
   if (claims === null) return false;
   if (claims.mosni_owner === true) return true;

@@ -19,7 +19,7 @@ import { registerUploadRoutes } from "../../src/routes/upload.ts";
 import type { Config } from "../../src/config.ts";
 import { applyMigrations, closeDb, getPool, initDb } from "../../src/storage/db.ts";
 import { diskRelPath, initFilesStorage, resolveByNames } from "../../src/storage/files.ts";
-import { createCollection, resolveCollectionByNames } from "../../src/storage/collections.ts";
+import { createCollection, listCollectionsFor, type CollectionRecord } from "../../src/storage/collections.ts";
 
 const verifyMock = vi.mocked(verify);
 
@@ -146,6 +146,15 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     verifyMock.mockResolvedValue({ sub, roles: ["files:write"], ...extra } as never);
   }
 
+  // Session 016: the default collection's name is no longer derived from `sub` (a privacy leak), so tests
+  // can no longer guess it - look it up by owner instead. Each test below uses a fresh randomUUID() sub
+  // with no other root-level collection of its own, so there is exactly one to find.
+  async function defaultCollectionFor(sub: string): Promise<CollectionRecord> {
+    const collection = (await listCollectionsFor(sub)).find((c) => c.parentId === "");
+    if (collection === undefined) throw new Error(`defaultCollectionFor: no root collection found for ${sub}`);
+    return collection;
+  }
+
   function encodeMetadata(fields: Record<string, string>): string {
     return Object.entries(fields)
       .map(([key, value]) => `${key} ${Buffer.from(value).toString("base64")}`)
@@ -255,12 +264,15 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     // plain dl path, not a token.
     expect(body.previewUrl).toContain("files.mosni.dev/f/");
     expect(body.directUrl).toContain("dl.mosni.dev/");
-    expect(body.previewUrl).toContain(encodeURIComponent(uploaderSub));
     expect(body.previewUrl).toContain("greeting.txt");
 
-    const collection = await resolveCollectionByNames([uploaderSub]);
-    expect(collection).not.toBeNull();
-    const record = await resolveByNames([uploaderSub, "greeting.txt"]);
+    const collection = await defaultCollectionFor(uploaderSub);
+    // The sub must never appear in the (public) default collection name or preview URL - session 016's fix
+    // for the sub-leak (a raw sub like "google:138543663" would otherwise identify the provider account).
+    expect(collection.name).not.toContain(uploaderSub);
+    expect(body.previewUrl).not.toContain(encodeURIComponent(uploaderSub));
+    expect(body.previewUrl).toContain(encodeURIComponent(collection.name));
+    const record = await resolveByNames([collection.name, "greeting.txt"]);
     expect(record).not.toBeNull();
     expect(record?.protection).toBe("unlisted");
 
@@ -288,7 +300,7 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     expect(patchRes.status).toBe(400);
 
     // No collection was ever created either - the filename is rejected before any destination resolves.
-    expect(await resolveCollectionByNames([uploaderSub])).toBeNull();
+    expect(await listCollectionsFor(uploaderSub)).toEqual([]);
   });
 
   it("uploads into the caller's default collection unless a valid destinationCollectionId is given", async () => {
@@ -332,7 +344,8 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     expect(patchRes.status).toBe(200);
 
     expect(await resolveByNames([strangerCollection.name, "fallback.txt"])).toBeNull();
-    expect(await resolveByNames([uploaderSub, "fallback.txt"])).not.toBeNull();
+    const defaultCollection = await defaultCollectionFor(uploaderSub);
+    expect(await resolveByNames([defaultCollection.name, "fallback.txt"])).not.toBeNull();
   });
 
   it("protection at ingest comes from the destination collection's default_protection (D-86)", async () => {
@@ -376,8 +389,9 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     await uploadOnce("first");
     await uploadOnce("second");
 
-    const first = await resolveByNames([uploaderSub, "dup.txt"]);
-    const second = await resolveByNames([uploaderSub, "dup(2).txt"]);
+    const defaultCollection = await defaultCollectionFor(uploaderSub);
+    const first = await resolveByNames([defaultCollection.name, "dup.txt"]);
+    const second = await resolveByNames([defaultCollection.name, "dup(2).txt"]);
     expect(first).not.toBeNull();
     expect(second).not.toBeNull();
     expect(first!.id).not.toBe(second!.id);
@@ -405,7 +419,8 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, jpegBytes);
     expect(patchRes.status).toBe(200);
 
-    const record = await resolveByNames([uploaderSub, "photo.jpg"]);
+    const defaultCollection = await defaultCollectionFor(uploaderSub);
+    const record = await resolveByNames([defaultCollection.name, "photo.jpg"]);
     const after = await sharp(path.join(root, diskRelPath(record!))).metadata();
     expect(after.exif).toBeUndefined();
   });
@@ -426,7 +441,8 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, pngBytes);
     expect(patchRes.status).toBe(200);
 
-    const record = await resolveByNames([uploaderSub, "photo.png"]);
+    const defaultCollection = await defaultCollectionFor(uploaderSub);
+    const record = await resolveByNames([defaultCollection.name, "photo.png"]);
     expect(record?.width).toBe(40);
     expect(record?.height).toBe(30);
   });
@@ -444,9 +460,9 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, garbage);
     expect(patchRes.status).toBe(422);
 
-    expect(await resolveByNames([uploaderSub, "bad.png"])).toBeNull();
-    const collection = await resolveCollectionByNames([uploaderSub]);
-    const [rows] = await getPool().query("SELECT COUNT(*) AS n FROM files WHERE collection_id = ?", [collection!.id]);
+    const collection = await defaultCollectionFor(uploaderSub);
+    expect(await resolveByNames([collection.name, "bad.png"])).toBeNull();
+    const [rows] = await getPool().query("SELECT COUNT(*) AS n FROM files WHERE collection_id = ?", [collection.id]);
     expect((rows as { n: number }[])[0]?.n).toBe(0);
   });
 });

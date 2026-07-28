@@ -10,16 +10,18 @@
 // insert-failure together).
 
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { mkdir, rename, stat, unlink } from "node:fs/promises";
 import type http from "node:http";
 import { Server as TusServer } from "@tus/server";
 import { FileStore } from "@tus/file-store";
 import type { Config } from "../config.ts";
 import { verify } from "../auth/verify.ts";
-import { can, type Claims } from "../lib/roles.ts";
+import { can, type VerifiedClaims } from "../lib/roles.ts";
 import { resolveRelPath, safeSegment, suffixForCollision } from "../lib/paths.ts";
 import { buildFileUrls } from "../lib/fileUrls.ts";
-import { generateId } from "../lib/ids.ts";
+import { generateId, ID_LENGTH } from "../lib/ids.ts";
+import { actorLabel } from "../lib/audit.ts";
 import {
   abandonFileRow,
   claimFileRow,
@@ -38,10 +40,6 @@ import {
 import { stripInPlace } from "../storage/strip.ts";
 import { probeMedia } from "../storage/probe.ts";
 import { emitAuditEvent } from "../storage/audit.ts";
-
-// auth's token carries an optional `name` claim, used to derive the uploader's default collection name -
-// not part of lib/roles.ts's Claims (which models only what can() needs).
-type VerifiedClaims = Claims & { name?: unknown };
 
 interface RequestWithClaims extends http.IncomingMessage {
   filesClaims?: VerifiedClaims;
@@ -65,15 +63,26 @@ function bearerToken(req: http.IncomingMessage): string | null {
   return typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : null;
 }
 
-// The uploader's default collection name: their `name` claim if safe, else a segment derived from their
-// `sub`. NOTE (carried from session 007, flagged for E4): ensureDefaultCollection (D-80) now gives two
-// different owners distinct collections even if they both derive the same requested name here, closing
-// the old co-mingled-folder gap - see storage/collections.ts.
+// The uploader's default collection name: their `name` claim if safe, else a stable opaque fallback.
+// NOTE (carried from session 007, flagged for E4): ensureDefaultCollection (D-80) now gives two different
+// owners distinct collections even if they both derive the same requested name here, closing the old
+// co-mingled-folder gap - see storage/collections.ts.
 function deriveDefaultCollectionName(claims: VerifiedClaims): string | null {
   const fromName = typeof claims.name === "string" ? safeSegment(claims.name) : null;
-  const name = fromName ?? safeSegment(claims.sub);
+  const name = fromName ?? opaqueNameForSub(claims.sub);
   if (name === null) return null;
   return RESERVED_ROOTS.has(name) ? `${name}-files` : name;
+}
+
+// Session 016 (Hannah's report, 2026-07-28): the raw `sub` must never be the fallback here - subs look
+// like "google:138543663" or "eve:<character id>", and a default collection's name is public (it appears
+// in unlisted/public delivery links), so the old `safeSegment(claims.sub)` fallback leaked the provider and
+// internal account id to anyone holding a link. A sha256 of the sub is deterministic (so repeat calls for
+// the same user with no `name` claim still resolve to the same collection via ensureDefaultCollection's
+// name-keyed lookup) but reveals nothing about the identity behind it.
+function opaqueNameForSub(sub: string): string | null {
+  const digest = createHash("sha256").update(sub, "utf8").digest("hex").slice(0, ID_LENGTH);
+  return safeSegment(digest);
 }
 
 async function resolveDestinationCollection(
@@ -226,7 +235,7 @@ export function buildTusServer(config: Config): TusServer {
         // Fire-and-forget (D-43) - never awaited, a dead bot must not break or delay the upload response.
         emitAuditEvent({
           action: "upload",
-          actor: claims.sub,
+          actor: actorLabel(claims),
           target: finalName,
           protection: record.protection,
           bytes: size,
