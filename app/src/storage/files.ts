@@ -9,11 +9,11 @@
 import { stat, unlink } from "node:fs/promises";
 import type { RowDataPacket } from "mysql2/promise";
 import { resolveRelPath, suffixForCollision } from "../lib/paths.ts";
-import type { Protection } from "../lib/protection.ts";
-import { generateLinkToken } from "../lib/tokens.ts";
+import { mostRestrictive, type Protection } from "../lib/protection.ts";
+import { mintUniqueToken } from "../lib/tokens.ts";
 import { generateId } from "../lib/ids.ts";
-import { resolveCollectionByNames } from "./collections.ts";
-import { getPool } from "./db.ts";
+import { protectionChain, resolveCollectionByNames } from "./collections.ts";
+import { getPool, isLinkTokenTaken } from "./db.ts";
 
 export type FileRecord = {
   id: string;
@@ -157,6 +157,58 @@ export async function resolveById(id: string): Promise<FileRecord | null> {
   return row === undefined ? null : await materialize(row);
 }
 
+// D-96: a FileRecord plus its resolved EFFECTIVE protection - the most restrictive level along its
+// collection's ancestor chain, then the file's own stored level. This is the landmine
+// (technical-baseline.md §3): `record.protection` alone is never safe to read on any read path, because
+// D-97 deliberately leaves it looser than an ancestor collection after that collection is raised. Every
+// read path (delivery, preview, fileUrls callers, the browse API) must resolve this and act on
+// `effectiveProtection`, never `protection` directly.
+export type ResolvedFile = FileRecord & { effectiveProtection: Protection };
+
+export async function resolveEffective(record: FileRecord): Promise<ResolvedFile> {
+  const chain = await protectionChain(record.collectionId);
+  const effectiveProtection = mostRestrictive([...chain, record.protection]);
+  return { ...record, effectiveProtection };
+}
+
+// --- Browse listing queries (§1.4 of the E4 waves hand-off) - one per scope, newest-first ------------
+//
+// Each returns committed files directly inside `collectionId`. `state='committed'` excludes D-85 pending
+// rows exactly like every other lookup in this module - a listing must not surface an upload still in
+// flight. None of these resolve EFFECTIVE protection or stat() the filesystem; controllers/browse.ts
+// folds each row's own protection with the parent chain it already verified, and a listing is not the
+// place to pay for a stat() per row (D-16's vanished-bytes prune already happens lazily on individual
+// lookups). The public-scope query is the security-critical one - see storage/collections.ts's matching
+// comment for why filtering by protection = 'public' here is sufficient given the caller's prior check.
+
+function rowToListedRecord(row: FileRow): FileRecord {
+  return rowToRecord(row, row.bytes);
+}
+
+export async function listOwnedFilesIn(collectionId: string, ownerSub: string): Promise<FileRecord[]> {
+  const [rows] = await getPool().query<FileRow[]>(
+    `SELECT ${SELECT_COLUMNS} FROM files WHERE collection_id = ? AND owner_sub = ? AND state = 'committed' ORDER BY created_at DESC`,
+    [collectionId, ownerSub],
+  );
+  return rows.map(rowToListedRecord);
+}
+
+export async function listPublicFilesIn(collectionId: string): Promise<FileRecord[]> {
+  const [rows] = await getPool().query<FileRow[]>(
+    `SELECT ${SELECT_COLUMNS} FROM files WHERE collection_id = ? AND protection = 'public' AND state = 'committed' ORDER BY created_at DESC`,
+    [collectionId],
+  );
+  return rows.map(rowToListedRecord);
+}
+
+export async function listAllFilesIn(collectionId: string): Promise<FileRecord[]> {
+  const [rows] = await getPool().query<FileRow[]>(
+    `SELECT ${SELECT_COLUMNS} FROM files WHERE collection_id = ? AND state = 'committed' ORDER BY created_at DESC`,
+    [collectionId],
+  );
+  return rows.map(rowToListedRecord);
+}
+
 // Security invariant 6: sub is matched byte-for-byte, never parsed - a plain equality WHERE clause is
 // exactly that. Used by the delivery/preview controllers to authorize `private` access for a
 // non-owner/non-superuser.
@@ -207,7 +259,10 @@ export async function claimFileRow(params: {
   // conflict is stored exactly as asked for.
   let name = params.name;
   for (let attempt = 0; attempt < 10; attempt++) {
-    const linkToken = generateLinkToken();
+    // D-98: the token namespace is shared with collections, which has its own independent unique index -
+    // a files-table collision alone can no longer be trusted to catch every clash, so check both tables
+    // up front rather than relying solely on the reactive catch below.
+    const linkToken = await mintUniqueToken((candidate) => isLinkTokenTaken(pool, candidate));
     const createdAt = new Date();
     try {
       await pool.query(

@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import mysql from "mysql2/promise";
 import type { Pool, RowDataPacket } from "mysql2/promise";
+import { mintUniqueToken } from "../lib/tokens.ts";
 
 export interface DbConnectionParams {
   host: string;
@@ -60,6 +61,41 @@ function loadMigrationFiles(): MigrationFile[] {
       return { version: Number(match[1]), path: path.join(dir, name) };
     })
     .sort((a, b) => a.version - b.version);
+}
+
+// D-98: the token namespace is shared between collections and files, but each lives in its own table
+// with its own unique index - so "is this token free" must check both. Used both by the migration 003
+// backfill below and exported for storage/collections.ts's createCollection to reuse.
+export async function isLinkTokenTaken(conn: mysql.Connection | Pool, token: string): Promise<boolean> {
+  const [collectionRows] = await conn.query<RowDataPacket[]>(
+    "SELECT 1 FROM collections WHERE link_token = ? LIMIT 1",
+    [token],
+  );
+  if (collectionRows.length > 0) return true;
+  const [fileRows] = await conn.query<RowDataPacket[]>("SELECT 1 FROM files WHERE link_token = ? LIMIT 1", [
+    token,
+  ]);
+  return fileRows.length > 0;
+}
+
+// Migration 003 (§1.1 of the E4 waves hand-off) adds `link_token VARCHAR(16) NOT NULL DEFAULT ''` to
+// `collections`, but a unique index can't be created over a column where every existing row shares the
+// same default value. Each pre-existing collection needs a freshly minted, cross-table-unique token
+// FIRST - which needs mintUniqueToken()'s collision-retry, not expressible in the plain SQL migration
+// file - and only then can the index go on. Runs on the same bootstrap connection the migration itself
+// uses, so it sees the ADD COLUMN that just ran immediately before it.
+export async function backfillCollectionLinkTokens(conn: mysql.Connection): Promise<void> {
+  const [rows] = await conn.query<(RowDataPacket & { id: string })[]>(
+    "SELECT id FROM collections WHERE link_token = ''",
+  );
+  for (const row of rows) {
+    const token = await mintUniqueToken((candidate) => isLinkTokenTaken(conn, candidate));
+    await conn.query("UPDATE collections SET link_token = ? WHERE id = ?", [token, row.id]);
+  }
+  // IF NOT EXISTS (MariaDB 10.5+) so this stays safe to call more than once - the real boot sequence only
+  // ever calls it the one time schema_version gates migration 3 to, but the test suite's shared MariaDB
+  // means a test can legitimately re-run the backfill directly against already-migrated rows.
+  await conn.query("CREATE UNIQUE INDEX IF NOT EXISTS uniq_collection_link_token ON collections (link_token)");
 }
 
 async function runStatement(conn: mysql.Connection, statement: string): Promise<void> {
@@ -141,6 +177,9 @@ export async function applyMigrations(): Promise<void> {
         const statements = splitStatements(readFileSync(migration.path, "utf8"));
         for (const statement of statements) {
           await runStatement(conn, statement);
+        }
+        if (migration.version === 3) {
+          await backfillCollectionLinkTokens(conn);
         }
         await conn.query("INSERT INTO schema_version (version) VALUES (?)", [migration.version]);
       }

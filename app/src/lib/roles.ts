@@ -24,3 +24,10 @@ export function can(claims: Claims | null, role: FilesRole): boolean {
 export function isSuperuser(claims: Claims | null): boolean {
   return claims !== null && claims.mosni_owner === true;
 }
+
+// D-101: the E4 browse `scope=all` gate (and E8's admin panel, later) - an admin is simply a user holding
+// BOTH lower roles. No separate mosni_owner branch: can() already returns true for a superuser on any
+// role asked, so holding "both" falls out of that for free.
+export function isFilesAdmin(claims: Claims | null): boolean {
+  return can(claims, "files:write") && can(claims, "files:delete");
+}

@@ -12,7 +12,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
 import { can, isSuperuser, type Claims, type VerifiedClaims } from "../lib/roles.ts";
-import type { Protection } from "../lib/protection.ts";
+import { mostRestrictive, PROTECTION_ORDER, type Protection } from "../lib/protection.ts";
 import { isReservedRootName, safeSegment } from "../lib/paths.ts";
 import { actorLabel } from "../lib/audit.ts";
 import { ownerContextFor } from "./preview.ts";
@@ -22,9 +22,11 @@ import {
   createCollection,
   deleteCollectionRecursive,
   listCollectionsFor,
+  protectionChain,
   renameCollection,
   resolveCollectionById,
   setCollectionDefaultProtection,
+  setCollectionProtection,
   type CollectionRecord,
 } from "../storage/collections.ts";
 import { deleteFile, renameFile, resolveById, setFileProtection, type FileRecord } from "../storage/files.ts";
@@ -33,6 +35,17 @@ const PROTECTION_LEVELS: readonly Protection[] = ["public", "unlisted", "secret"
 
 function isProtection(value: unknown): value is Protection {
   return typeof value === "string" && (PROTECTION_LEVELS as readonly string[]).includes(value);
+}
+
+// D-97: the write-time floor. `parentChain` is the set of already-effective levels the requested value
+// must not be looser than - the collection's own chain (self-inclusive) for a file's protection or a
+// collection's default_protection, or the PARENT's chain for a collection's own protection. An empty
+// chain (nothing above a root collection) means there is no floor to check. Raising a parent is always
+// allowed and is exactly what makes a previously-valid child value fail this check later - the check
+// itself never rewrites anything, only gates what may be WRITTEN going forward (D-97).
+function meetsParentFloor(requested: Protection, parentChain: readonly Protection[]): boolean {
+  if (parentChain.length === 0) return true;
+  return PROTECTION_ORDER[requested] >= PROTECTION_ORDER[mostRestrictive(parentChain)];
 }
 
 async function requireClaims(
@@ -80,6 +93,7 @@ function collectionResponse(record: CollectionRecord) {
     parentId: record.parentId,
     name: record.name,
     ownerSub: record.ownerSub,
+    protection: record.protection,
     defaultProtection: record.defaultProtection,
   };
 }
@@ -111,16 +125,20 @@ export async function createCollectionHandler(
     return;
   }
 
+  // D-105: a new collection inherits its parent's EFFECTIVE protection (not just the parent's own stored
+  // value - a grandparent above it may be stricter), `unlisted` at root, matching the column default.
+  let protection: Protection = "unlisted";
   if (parentId !== "") {
     const parent = await resolveCollectionById(parentId);
     if (parent === null || !(await canUploadTo(parent, claims))) {
       reply.code(404).send();
       return;
     }
+    protection = mostRestrictive(await protectionChain(parentId));
   }
 
   try {
-    const created = await createCollection({ parentId, name, ownerSub: claims.sub });
+    const created = await createCollection({ parentId, name, ownerSub: claims.sub, protection });
     reply.code(201).send(collectionResponse(created));
   } catch (err) {
     if (isDuplicateNameError(err, "uniq_sibling_name")) {
@@ -156,7 +174,7 @@ export async function updateCollectionHandler(
     return;
   }
 
-  const body = request.body as { name?: string; defaultProtection?: string };
+  const body = request.body as { name?: string; protection?: string; defaultProtection?: string };
   if (body.name !== undefined && body.name !== collection.name) {
     const name = validatedName(body.name, { rootLevel: collection.parentId === "" });
     if (name === null) {
@@ -174,9 +192,39 @@ export async function updateCollectionHandler(
     }
     emitAuditEvent({ action: "rename", actor: actorLabel(claims), target: body.name });
   }
+  if (body.protection !== undefined) {
+    if (!isProtection(body.protection)) {
+      reply.code(400).send({ error: "invalid_protection" });
+      return;
+    }
+    // D-97: floored by the PARENT's effective chain - raising this collection's own level is always
+    // allowed and rewrites nothing beneath it; lowering below the parent is what the floor rejects.
+    const parentChain = collection.parentId === "" ? [] : await protectionChain(collection.parentId);
+    if (!meetsParentFloor(body.protection, parentChain)) {
+      reply.code(400).send({ error: "below_parent_protection" });
+      return;
+    }
+    await setCollectionProtection(id, body.protection);
+    emitAuditEvent({
+      action: "protection-change",
+      actor: actorLabel(claims),
+      target: body.name ?? collection.name,
+      protection: body.protection,
+    });
+  }
   if (body.defaultProtection !== undefined) {
     if (!isProtection(body.defaultProtection)) {
       reply.code(400).send({ error: "invalid_protection" });
+      return;
+    }
+    // D-97: floored by the collection's OWN effective chain (self-inclusive) - default_protection is
+    // what new uploads inherit, and a value looser than the collection's own effective level would be
+    // silently overridden at read time anyway (D-96), so the floor keeps the setting from lying about
+    // what new uploads will actually be. Read fresh so a `protection` change earlier in this same
+    // request is reflected.
+    const ownChain = await protectionChain(id);
+    if (!meetsParentFloor(body.defaultProtection, ownChain)) {
+      reply.code(400).send({ error: "below_parent_protection" });
       return;
     }
     await setCollectionDefaultProtection(id, body.defaultProtection);
@@ -263,6 +311,13 @@ export async function updateFileHandler(
   if (body.protection !== undefined) {
     if (!isProtection(body.protection)) {
       reply.code(400).send({ error: "invalid_protection" });
+      return;
+    }
+    // D-97: floored by the owning collection's effective chain (self-inclusive) - raising the collection
+    // later is what may make a currently-valid file value fail this check, and that is by design.
+    const chain = await protectionChain(record.collectionId);
+    if (!meetsParentFloor(body.protection, chain)) {
+      reply.code(400).send({ error: "below_parent_protection" });
       return;
     }
     await setFileProtection(id, body.protection);

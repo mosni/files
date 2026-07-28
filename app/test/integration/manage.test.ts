@@ -195,6 +195,31 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       });
       expect(res.statusCode).toBe(201);
     });
+
+    it("a root-level collection defaults to unlisted protection (D-105)", async () => {
+      asUser("user:creator");
+      const res = await req("POST", "/api/collections", { token: "t", body: { name: `root-prot-${randomUUID()}` } });
+      expect(res.json()).toMatchObject({ protection: "unlisted" });
+    });
+
+    it("a nested collection inherits its parent's EFFECTIVE protection, not just the parent's own value (D-105)", async () => {
+      asUser("user:nester2");
+      const grandparent = await seedCollection("user:nester2");
+      await getPool().query("UPDATE collections SET protection = 'private' WHERE id = ?", [grandparent.id]);
+      const parentRes = await req("POST", "/api/collections", {
+        token: "t",
+        body: { parentId: grandparent.id, name: "parent" },
+      });
+      // The parent itself was created with no explicit level, so it also inherited 'private' from the
+      // grandparent - confirming the inheritance is EFFECTIVE, not just one level shallow.
+      expect(parentRes.json()).toMatchObject({ protection: "private" });
+
+      const childRes = await req("POST", "/api/collections", {
+        token: "t",
+        body: { parentId: (parentRes.json() as { id: string }).id, name: "child" },
+      });
+      expect(childRes.json()).toMatchObject({ protection: "private" });
+    });
   });
 
   describe("PATCH /api/collections/:id", () => {
@@ -235,6 +260,113 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       });
       expect(res.statusCode).toBe(200);
       expect((await resolveCollectionById(collection.id))?.defaultProtection).toBe("private");
+    });
+
+    it("changes the collection's OWN protection (D-95, distinct from defaultProtection)", async () => {
+      const collection = await seedCollection("user:owner");
+      asUser("user:owner");
+      const res = await req("PATCH", `/api/collections/${collection.id}`, {
+        token: "t",
+        body: { protection: "secret" },
+      });
+      expect(res.statusCode).toBe(200);
+      const updated = await resolveCollectionById(collection.id);
+      expect(updated?.protection).toBe("secret");
+      expect(updated?.defaultProtection).toBe("unlisted"); // untouched - the two columns are distinct
+    });
+
+    describe("write-time floor (D-97)", () => {
+      it("rejects setting a collection's OWN protection below its PARENT's effective level", async () => {
+        const parent = await seedCollection("user:floor");
+        await getPool().query("UPDATE collections SET protection = 'private' WHERE id = ?", [parent.id]);
+        const child = await createCollection({ parentId: parent.id, name: "child", ownerSub: "user:floor", protection: "private" });
+        createdCollectionIds.push(child.id);
+
+        asUser("user:floor");
+        const res = await req("PATCH", `/api/collections/${child.id}`, { token: "t", body: { protection: "public" } });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({ error: "below_parent_protection" });
+        expect((await resolveCollectionById(child.id))?.protection).toBe("private"); // unchanged
+      });
+
+      it("allows raising a collection's OWN protection above its parent's", async () => {
+        const parent = await seedCollection("user:floor2");
+        const child = await createCollection({ parentId: parent.id, name: "child", ownerSub: "user:floor2" });
+        createdCollectionIds.push(child.id);
+
+        asUser("user:floor2");
+        const res = await req("PATCH", `/api/collections/${child.id}`, { token: "t", body: { protection: "private" } });
+        expect(res.statusCode).toBe(200);
+      });
+
+      it("a ROOT collection has no parent floor - any level is accepted", async () => {
+        const root = await seedCollection("user:floor3");
+        asUser("user:floor3");
+        const res = await req("PATCH", `/api/collections/${root.id}`, { token: "t", body: { protection: "public" } });
+        expect(res.statusCode).toBe(200);
+      });
+
+      it("rejects setting defaultProtection below the collection's OWN effective level", async () => {
+        const collection = await seedCollection("user:floor4");
+        await getPool().query("UPDATE collections SET protection = 'secret' WHERE id = ?", [collection.id]);
+
+        asUser("user:floor4");
+        const res = await req("PATCH", `/api/collections/${collection.id}`, {
+          token: "t",
+          body: { defaultProtection: "public" },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({ error: "below_parent_protection" });
+      });
+
+      it("a protection change and a defaultProtection change in the SAME request compose correctly", async () => {
+        const collection = await seedCollection("user:floor5");
+        asUser("user:floor5");
+        // Raising protection to 'secret' in this request, then setting defaultProtection to 'secret' too
+        // (exactly at the just-raised floor) must succeed - defaultProtection's floor check must see the
+        // NEW protection value, not the one from before this request.
+        const res = await req("PATCH", `/api/collections/${collection.id}`, {
+          token: "t",
+          body: { protection: "secret", defaultProtection: "secret" },
+        });
+        expect(res.statusCode).toBe(200);
+      });
+
+      it("raising a collection's protection leaves a descendant FILE's stored protection untouched, only its EFFECTIVE level changes", async () => {
+        const collection = await seedCollection("user:floor6");
+        const claimed = await claimFileRow({
+          collectionId: collection.id,
+          name: "floor-file.txt",
+          diskDir: "2026/07",
+          diskName: `${randomUUID()}-floor-file.txt`,
+          ownerSub: "user:floor6",
+          uploaderSub: "user:floor6",
+          protection: "unlisted",
+        });
+        const abs = path.join(root, ...diskRelPath(claimed).split("/"));
+        await mkdir(path.dirname(abs), { recursive: true });
+        await writeFile(abs, "x");
+        await commitFileRow(claimed.id, { bytes: 1, width: null, height: null, durationSeconds: null, textPreview: null });
+
+        asUser("user:floor6");
+        const raise = await req("PATCH", `/api/collections/${collection.id}`, {
+          token: "t",
+          body: { protection: "private" },
+        });
+        expect(raise.statusCode).toBe(200);
+
+        const raisedFile = await resolveById(claimed.id);
+        expect(raisedFile?.protection).toBe("unlisted"); // D-97: the row itself is untouched
+
+        // Lowering the collection again restores the file's previous per-file behaviour exactly - which
+        // only makes sense because its stored level was never rewritten.
+        const lower = await req("PATCH", `/api/collections/${collection.id}`, {
+          token: "t",
+          body: { protection: "unlisted" },
+        });
+        expect(lower.statusCode).toBe(200);
+        expect((await resolveById(claimed.id))?.protection).toBe("unlisted");
+      });
     });
 
     it("rejects a rename to an unsafe segment with 400", async () => {
@@ -306,6 +438,29 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { protection: "private" } });
       expect(res.statusCode).toBe(200);
       expect((await resolveById(file.id))?.protection).toBe("private");
+    });
+
+    describe("write-time floor (D-97)", () => {
+      it("rejects setting a file's protection below its collection's effective level", async () => {
+        const collection = await seedCollection("user:file-floor");
+        await getPool().query("UPDATE collections SET protection = 'private' WHERE id = ?", [collection.id]);
+        const file = await seedFile({ collectionId: collection.id, ownerSub: "user:file-floor", protection: "private" });
+
+        asUser("user:file-floor");
+        const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { protection: "public" } });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({ error: "below_parent_protection" });
+        expect((await resolveById(file.id))?.protection).toBe("private"); // unchanged
+      });
+
+      it("allows raising a file's protection above its collection's", async () => {
+        const collection = await seedCollection("user:file-floor2");
+        const file = await seedFile({ collectionId: collection.id, ownerSub: "user:file-floor2", protection: "unlisted" });
+
+        asUser("user:file-floor2");
+        const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { protection: "private" } });
+        expect(res.statusCode).toBe(200);
+      });
     });
 
     it("409s on a rename that collides with a sibling in the same collection", async () => {

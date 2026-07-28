@@ -10,9 +10,13 @@ import {
   createCollection,
   deleteCollectionRecursive,
   ensureDefaultCollection,
+  hasAclGrantOnChain,
   listCollectionsFor,
+  protectionChain,
   renameCollection,
+  resolveCollectionById,
   resolveCollectionByNames,
+  setCollectionProtection,
 } from "../../src/storage/collections.ts";
 import { claimFileRow, commitFileRow, diskRelPath, initFilesStorage, resolveById } from "../../src/storage/files.ts";
 
@@ -96,6 +100,101 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
 
     expect(await collectionPath(deep.id)).toEqual([top.name, "mid", "deep"]);
     expect(await collectionPath(top.id)).toEqual([top.name]);
+  });
+
+  it("createCollection defaults to unlisted protection with a well-shaped, unique link_token (D-95/D-98/D-105)", async () => {
+    const collection = await createCollection({ parentId: "", name: `prot-${randomUUID()}`, ownerSub: "user:a" });
+    createdCollectionIds.push(collection.id);
+    expect(collection.protection).toBe("unlisted");
+    expect(collection.linkToken).toMatch(/^[A-Za-z0-9]{5}$/);
+  });
+
+  it("createCollection accepts an explicit protection (D-105: the caller resolves the parent's level)", async () => {
+    const collection = await createCollection({
+      parentId: "",
+      name: `prot-explicit-${randomUUID()}`,
+      ownerSub: "user:a",
+      protection: "private",
+    });
+    createdCollectionIds.push(collection.id);
+    expect(collection.protection).toBe("private");
+  });
+
+  it("setCollectionProtection changes only protection, leaving default_protection untouched", async () => {
+    const collection = await createCollection({ parentId: "", name: `setprot-${randomUUID()}`, ownerSub: "user:a" });
+    createdCollectionIds.push(collection.id);
+    await setCollectionProtection(collection.id, "secret");
+    const updated = await resolveCollectionById(collection.id);
+    expect(updated?.protection).toBe("secret");
+    expect(updated?.defaultProtection).toBe("unlisted");
+  });
+
+  describe("protectionChain (D-96) - root-first, including the collection's own level", () => {
+    it("a root collection's chain is just its own level", async () => {
+      const top = await createCollection({
+        parentId: "",
+        name: `chain-root-${randomUUID()}`,
+        ownerSub: "user:a",
+        protection: "secret",
+      });
+      createdCollectionIds.push(top.id);
+      expect(await protectionChain(top.id)).toEqual(["secret"]);
+    });
+
+    it("a nested collection's chain walks root-first down to itself", async () => {
+      const top = await createCollection({
+        parentId: "",
+        name: `chain-top-${randomUUID()}`,
+        ownerSub: "user:a",
+        protection: "public",
+      });
+      createdCollectionIds.push(top.id);
+      const mid = await createCollection({
+        parentId: top.id,
+        name: "mid",
+        ownerSub: "user:a",
+        protection: "unlisted",
+      });
+      createdCollectionIds.push(mid.id);
+      const deep = await createCollection({
+        parentId: mid.id,
+        name: "deep",
+        ownerSub: "user:a",
+        protection: "private",
+      });
+      createdCollectionIds.push(deep.id);
+
+      expect(await protectionChain(deep.id)).toEqual(["public", "unlisted", "private"]);
+    });
+
+    it("raising an ancestor's protection is reflected immediately, with no rewrite of the descendant's own stored level", async () => {
+      const top = await createCollection({
+        parentId: "",
+        name: `chain-raise-${randomUUID()}`,
+        ownerSub: "user:a",
+        protection: "public",
+      });
+      createdCollectionIds.push(top.id);
+      const child = await createCollection({ parentId: top.id, name: "child", ownerSub: "user:a", protection: "unlisted" });
+      createdCollectionIds.push(child.id);
+
+      await setCollectionProtection(top.id, "private");
+      expect(await protectionChain(child.id)).toEqual(["private", "unlisted"]);
+      // D-97: the child's OWN stored level is untouched by raising the parent.
+      expect((await resolveCollectionById(child.id))?.protection).toBe("unlisted");
+    });
+
+    it("throws rather than hangs if the depth bound is exceeded (cycle guard)", async () => {
+      let parentId = "";
+      let leafId = "";
+      for (let i = 0; i < 34; i++) {
+        const c = await createCollection({ parentId, name: `pc${i}`, ownerSub: "user:a" });
+        createdCollectionIds.push(c.id);
+        parentId = c.id;
+        leafId = c.id;
+      }
+      await expect(protectionChain(leafId)).rejects.toThrow(/max depth/);
+    });
   });
 
   it("collectionPath throws rather than hangs if the depth bound is exceeded (cycle guard)", async () => {
@@ -213,6 +312,41 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
       const { deletedFileIds } = await deleteCollectionRecursive(collection.id);
       expect(deletedFileIds).toEqual([]);
       expect(await resolveCollectionByNames([collection.name])).toBeNull();
+    });
+  });
+
+  describe("hasAclGrantOnChain (D-99 - a grant on ANY ancestor collection pierces down to what it contains)", () => {
+    it("a grant directly on the collection is honoured", async () => {
+      const collection = await createCollection({ parentId: "", name: `acl-direct-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+        collection.id,
+        "user:granted",
+      ]);
+      expect(await hasAclGrantOnChain(collection.id, "user:granted")).toBe(true);
+    });
+
+    it("a grant on an ANCESTOR collection is honoured for a deeply nested descendant", async () => {
+      const top = await createCollection({ parentId: "", name: `acl-top-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(top.id);
+      const mid = await createCollection({ parentId: top.id, name: "mid", ownerSub: "user:a" });
+      createdCollectionIds.push(mid.id);
+      const deep = await createCollection({ parentId: mid.id, name: "deep", ownerSub: "user:a" });
+      createdCollectionIds.push(deep.id);
+
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+        top.id,
+        "user:granted",
+      ]);
+      expect(await hasAclGrantOnChain(deep.id, "user:granted")).toBe(true);
+    });
+
+    it("a stranger with no grant anywhere in the chain gets false", async () => {
+      const top = await createCollection({ parentId: "", name: `acl-none-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(top.id);
+      const child = await createCollection({ parentId: top.id, name: "child", ownerSub: "user:a" });
+      createdCollectionIds.push(child.id);
+      expect(await hasAclGrantOnChain(child.id, "user:stranger")).toBe(false);
     });
   });
 

@@ -13,6 +13,18 @@ export function generateLinkToken(): string {
   return randomBase62(LINK_TOKEN_LENGTH);
 }
 
+// D-98: collections and files now share one token namespace, but each lives in its own table with its
+// own independent unique index - so minting a token for EITHER one must check both before it can be
+// trusted unique. This stays I/O-free (technical-baseline.md §2): the existence check is injected, and
+// the storage layer supplies one that actually queries both tables.
+export async function mintUniqueToken(exists: (token: string) => Promise<boolean>): Promise<string> {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const token = generateLinkToken();
+    if (!(await exists(token))) return token;
+  }
+  throw new Error("lib/tokens: could not mint a unique token after 10 attempts");
+}
+
 // NOT YET CALLED by any production path: it existed to tell a token apart from a path segment, and D-65's
 // `/t/<token>` route prefix made that distinction structural instead. Kept as the shape's single
 // definition (and as the guard any future non-prefixed token lookup should use) rather than deleted.

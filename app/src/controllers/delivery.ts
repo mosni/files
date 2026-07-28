@@ -10,13 +10,16 @@ import { contentDisposition, mimeTypeFor } from "../lib/mime.ts";
 import { safeSegments } from "../lib/paths.ts";
 import { readablePathResolves } from "../lib/protection.ts";
 import { verifyDelivery } from "../lib/deliverySignature.ts";
+import { hasAclGrantOnChain } from "../storage/collections.ts";
 import {
   diskRelPath,
   hasAclGrant,
   resolveById,
   resolveByNames,
   resolveByToken,
+  resolveEffective,
   type FileRecord,
+  type ResolvedFile,
 } from "../storage/files.ts";
 
 function encodeRelPath(relPath: string): string {
@@ -31,15 +34,16 @@ function contentDispositionHeader(name: string): string {
   return `${disposition}; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
-// `private` requires an authorized session whose sub matches the owner or an ACL row (byte-for-byte,
-// security invariant 6), or the `mosni_owner` superuser (D-68 dropped files:admin, so that is the only
+// `private` requires an authorized session whose sub matches the owner, an ACL row on the file itself, an
+// ACL row on any ANCESTOR COLLECTION (D-99 - a grant pierces a restrictive collection without becoming an
+// exception to it), or the `mosni_owner` superuser (D-68 dropped files:admin, so that is the only
 // cross-owner grant left, besides the D-84 signed-URL route below). 401 (no/invalid token) vs 403 (valid
 // token, insufficient rights).
 async function authorizePrivate(
   request: FastifyRequest,
   reply: FastifyReply,
   config: Config,
-  record: FileRecord,
+  record: ResolvedFile,
 ): Promise<boolean> {
   const claims = await claimsFromBearer(request, config.appOrigin);
   if (claims === null) {
@@ -47,7 +51,11 @@ async function authorizePrivate(
     return false;
   }
   const isOwner = record.ownerSub !== null && claims.sub === record.ownerSub;
-  const granted = isOwner || isSuperuser(claims) || (await hasAclGrant(record.id, claims.sub));
+  const granted =
+    isOwner ||
+    isSuperuser(claims) ||
+    (await hasAclGrant(record.id, claims.sub)) ||
+    (await hasAclGrantOnChain(record.collectionId, claims.sub));
   if (!granted) {
     reply.code(403).send();
     return false;
@@ -74,13 +82,15 @@ async function deliver(
   request: FastifyRequest,
   reply: FastifyReply,
   config: Config,
-  record: FileRecord | null,
+  record: ResolvedFile | null,
 ): Promise<void> {
   if (record === null) {
     reply.code(404).send();
     return;
   }
-  if (record.protection === "private" && !(await authorizePrivate(request, reply, config, record))) {
+  // D-96: the EFFECTIVE level, never the stored column - a row stored looser than its collection must
+  // still trigger the private-authorization branch.
+  if (record.effectiveProtection === "private" && !(await authorizePrivate(request, reply, config, record))) {
     return; // authorizePrivate already sent the 401/403
   }
   sendBytes(reply, record);
@@ -94,9 +104,11 @@ export async function deliverByPath(
 ): Promise<void> {
   const segments = safeSegments(relPath);
   const record = segments === null ? null : await resolveByNames(segments);
+  const resolved = record === null ? null : await resolveEffective(record);
   // `secret` must 404 at its readable path, not 403 - a 403 confirms existence, which is the one thing
-  // this level exists to hide (D-59).
-  const gated = record !== null && !readablePathResolves(record.protection) ? null : record;
+  // this level exists to hide (D-59). Gated on the EFFECTIVE level (D-96/D-100): a file whose own stored
+  // level would resolve here must still 404 if its collection's effective level does not.
+  const gated = resolved !== null && !readablePathResolves(resolved.effectiveProtection) ? null : resolved;
   await deliver(request, reply, config, gated);
 }
 
@@ -108,7 +120,8 @@ export async function deliverByToken(
 ): Promise<void> {
   // The token path serves regardless of readablePathResolves - it is exactly how a `secret` file (whose
   // readable path 404s) is reached.
-  await deliver(request, reply, config, await resolveByToken(token));
+  const record = await resolveByToken(token);
+  await deliver(request, reply, config, record === null ? null : await resolveEffective(record));
 }
 
 // D-84: a `private` file's bytes, reachable via a short-lived signed URL - dl.mosni.dev/s/<id>?exp=&sig=.

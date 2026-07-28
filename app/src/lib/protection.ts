@@ -6,25 +6,49 @@
 
 export type Protection = "public" | "unlisted" | "secret" | "private";
 
+// D-96: restrictiveness order, most permissive first. Used to fold an ancestor chain (plus a row's own
+// level) down to the single EFFECTIVE level a read path must honour - never the stored column alone.
+export const PROTECTION_ORDER: Record<Protection, number> = {
+  public: 0,
+  unlisted: 1,
+  secret: 2,
+  private: 3,
+};
+
 /**
- * Is this file included in a listing for this viewer?
+ * The most restrictive level among a chain of levels (an ancestor collection chain, plus a file's own
+ * stored level). Pure and I/O-free (D-96, technical-baseline.md §2) - the caller (storage) has already
+ * fetched every level in the chain; this just folds them.
+ */
+export function mostRestrictive(levels: readonly Protection[]): Protection {
+  if (levels.length === 0) {
+    throw new Error("lib/protection: mostRestrictive() requires at least one level");
+  }
+  return levels.reduce((worst, level) => (PROTECTION_ORDER[level] > PROTECTION_ORDER[worst] ? level : worst));
+}
+
+export type VisibilityReason = "own" | "admin" | "granted" | "public";
+
+/**
+ * Is this row included in a listing for this viewer, and if so, why (D-103's "why can I see this")?
  *
- * NOT YET CALLED by any production path - nothing lists files until E4's browser. It is kept because it
- * is the recorded shape of D-59's listing half, but note before using it: `viewer.isAdmin` still encodes
- * the `files:admin` role that D-68 dropped, so E4 must decide what fills that slot (both lower roles
- * held, or `mosni_owner`) rather than assuming this signature is current.
+ * `protection` MUST be the row's EFFECTIVE level (D-96) - resolved in storage from the ancestor chain,
+ * never the stored column read directly. `granted` is an ACL grant on the row or any ancestor collection
+ * (D-99); like the protection chain, that is DB I/O, so it is resolved by the caller and handed in as a
+ * value - this function stays pure. Precedence (D-103): own, then granted, then admin, then public - an
+ * owner who also happens to hold a grant reads as "own", not "granted".
  */
 export function isListedFor(
   protection: Protection,
   viewer: { sub: string | null; isAdmin: boolean },
   ownerSub: string | null,
-): boolean {
-  if (protection === "public") return true;
-  if (viewer.isAdmin) return true;
-  // unlisted/secret/private all share the same listing rule (D-59): hidden from public browsing, but
-  // still visible in the owner's own listing. A row with a null owner_sub has no owner to match against,
-  // so only the admin branch above can surface it.
-  return viewer.sub !== null && ownerSub !== null && viewer.sub === ownerSub;
+  granted: boolean,
+): VisibilityReason | null {
+  if (viewer.sub !== null && ownerSub !== null && viewer.sub === ownerSub) return "own";
+  if (granted) return "granted";
+  if (viewer.isAdmin) return "admin";
+  if (protection === "public") return "public";
+  return null;
 }
 
 /** Does the readable mirrored path resolve for this protection level? `secret` must NOT. */

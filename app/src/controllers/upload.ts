@@ -28,6 +28,7 @@ import {
   commitFileRow,
   currentDiskDir,
   diskRelPath,
+  resolveEffective,
 } from "../storage/files.ts";
 import {
   canUploadTo,
@@ -237,7 +238,17 @@ export function buildTusServer(config: Config): TusServer {
           collection: collectionSegments.join("/"),
         });
 
-        const urls = buildFileUrls(config, record.protection, [...collectionSegments, record.name], record.linkToken);
+        // D-96/D-100: the collection may be more restrictive than the upload's own inherited level
+        // (D-86's default_protection is a different thing from the collection's OWN protection, D-95) -
+        // the URLs handed back right after upload must reflect the EFFECTIVE level, or a file gated only
+        // by its collection would be offered a dead /f/ link on its very first response.
+        const resolved = await resolveEffective(record);
+        const urls = buildFileUrls(
+          config,
+          resolved.effectiveProtection,
+          [...collectionSegments, record.name],
+          record.linkToken,
+        );
         return {
           res,
           // The tus PATCH response is 204, and Node's http.ServerResponse drops any body on a 204 at the

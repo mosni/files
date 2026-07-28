@@ -50,6 +50,10 @@ async function seed(opts: {
   const diskDir = "2026/07";
   const diskName = `${fileId}-${name}`;
   const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
+  // D-98: collections now carry their own link_token too, sharing one unique-per-table namespace with
+  // files - each fixture needs its own distinct one, or the second seed() call in a run collides on the
+  // column's shared DEFAULT ''.
+  const collectionLinkToken = randomUUID().replace(/-/g, "").slice(0, 5);
 
   const abs = path.join(STORAGE_ROOT, diskDir, diskName);
   await mkdir(path.dirname(abs), { recursive: true });
@@ -64,8 +68,8 @@ async function seed(opts: {
   });
   try {
     await conn.execute(
-      "INSERT INTO collections (id, parent_id, name, owner_sub, default_protection) VALUES (?, '', ?, 'user:e2e-fixture', 'unlisted')",
-      [collectionId, collectionName],
+      "INSERT INTO collections (id, parent_id, name, owner_sub, default_protection, link_token) VALUES (?, '', ?, 'user:e2e-fixture', 'unlisted', ?)",
+      [collectionId, collectionName, collectionLinkToken],
     );
     await conn.execute(
       `INSERT INTO files

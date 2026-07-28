@@ -56,14 +56,22 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
   async function seed(opts: {
     name?: string;
     protection: Protection;
+    collectionProtection?: Protection;
     ownerSub?: string | null;
     content?: string;
-  }): Promise<{ collectionName: string; name: string; linkToken: string; fileId: string }> {
+  }): Promise<{
+    collectionId: string;
+    collectionName: string;
+    name: string;
+    linkToken: string;
+    fileId: string;
+  }> {
     const name = opts.name ?? `file-${randomUUID()}.txt`;
     const collection = await createCollection({
       parentId: "",
       name: `c-${randomUUID()}`,
       ownerSub: opts.ownerSub ?? "user:owner",
+      protection: opts.collectionProtection,
     });
     const claimed = await claimFileRow({
       collectionId: collection.id,
@@ -85,7 +93,13 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
       durationSeconds: null,
       textPreview: null,
     });
-    return { collectionName: collection.name, name, linkToken: claimed.linkToken, fileId: claimed.id };
+    return {
+      collectionId: collection.id,
+      collectionName: collection.name,
+      name,
+      linkToken: claimed.linkToken,
+      fileId: claimed.id,
+    };
   }
 
   const get = (url: string, headers: Record<string, string> = {}) =>
@@ -189,6 +203,107 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
 
       verifyMock.mockResolvedValue({ sub: grantedSub.slice(0, -1), roles: [] } as never);
       expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(403);
+    });
+  });
+
+  // D-96: the landmine. A row's STORED protection can legitimately be looser than its collection's - every
+  // read path must act on the EFFECTIVE level, never the column.
+  describe("effective protection (D-96) - a collection's protection gates its files too", () => {
+    it("a public file inside a secret collection 404s unconditionally at its readable dl. path, but its own /t/<token> still delivers with no auth needed", async () => {
+      // secret is the one level that 404s at a readable path REGARDLESS of identity (D-59/D-99) - private
+      // still resolves there, gated on auth (covered separately below).
+      const { collectionName, name, linkToken } = await seed({
+        protection: "public",
+        collectionProtection: "secret",
+      });
+      expect((await get(`/${collectionName}/${name}`)).statusCode).toBe(404);
+
+      const tokenRes = await get(`/t/${linkToken}`);
+      expect(tokenRes.statusCode).toBe(200);
+      expect(tokenRes.headers["x-accel-redirect"]).toMatch(/^\/internal-storage\//);
+    });
+
+    it("a public file inside a private collection resolves at its readable path but requires auth (401 anonymous, 200 owner)", async () => {
+      // D-99: private still resolves in principle at the readable path; it is gated by identity, not
+      // hidden outright like secret is.
+      const { collectionName, name } = await seed({
+        protection: "public",
+        collectionProtection: "private",
+        ownerSub: "user:owner",
+      });
+      expect((await get(`/${collectionName}/${name}`)).statusCode).toBe(401);
+
+      verifyMock.mockResolvedValue({ sub: "user:owner", roles: [] } as never);
+      expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(200);
+    });
+
+    it("an unlisted file inside a public collection stays gated at unlisted (own level is the floor, not the ceiling)", async () => {
+      // D-97's floor only stops a LOOSER value from being SET; a file already stored looser than its
+      // collection is untouched, and the effective level is still the file's own here since 'unlisted' is
+      // MORE restrictive than the collection's 'public'.
+      const { collectionName, name } = await seed({ protection: "unlisted", collectionProtection: "public" });
+      const res = await get(`/${collectionName}/${name}`);
+      expect(res.statusCode).toBe(200); // unlisted still resolves at its readable path (only secret doesn't)
+    });
+
+    it("a private file's own private branch is triggered by the EFFECTIVE level, not just its own stored column", async () => {
+      // The file itself is stored 'unlisted'; its collection is 'private' - the private-authorization
+      // branch must still fire, or a collection-gated file would leak with no auth check at all.
+      const { collectionName, name } = await seed({
+        protection: "unlisted",
+        collectionProtection: "private",
+        ownerSub: "user:owner",
+      });
+      expect((await get(`/${collectionName}/${name}`)).statusCode).toBe(401);
+
+      verifyMock.mockResolvedValue({ sub: "user:owner", roles: [] } as never);
+      expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(200);
+    });
+  });
+
+  // D-99: authorized identity for `private` includes a grant on ANY ancestor collection, not only the
+  // file's own file_acl row.
+  describe("authorization identity (D-99) - a grant on an ancestor collection reaches into it", () => {
+    it("a grantee on the collection reaches a private file inside a private collection", async () => {
+      const { collectionId, collectionName, name } = await seed({
+        protection: "private",
+        collectionProtection: "private",
+        ownerSub: "user:owner",
+      });
+      const grantedSub = `user:${randomUUID()}`;
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+        collectionId,
+        grantedSub,
+      ]);
+
+      verifyMock.mockResolvedValue({ sub: grantedSub, roles: [] } as never);
+      expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(200);
+    });
+
+    it("a non-grantee gets 401 with no token, then 403 once authenticated", async () => {
+      const { collectionName, name } = await seed({
+        protection: "private",
+        collectionProtection: "private",
+        ownerSub: "user:owner",
+      });
+      expect((await get(`/${collectionName}/${name}`)).statusCode).toBe(401);
+
+      verifyMock.mockResolvedValue({ sub: `user:${randomUUID()}`, roles: [] } as never);
+      expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(403);
+    });
+
+    it("a grantee still 404s on a secret file's readable path - secret never consults identity", async () => {
+      const { collectionId, collectionName, name } = await seed({
+        protection: "secret",
+        ownerSub: "user:owner",
+      });
+      const grantedSub = `user:${randomUUID()}`;
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+        collectionId,
+        grantedSub,
+      ]);
+      verifyMock.mockResolvedValue({ sub: grantedSub, roles: [] } as never);
+      expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(404);
     });
   });
 

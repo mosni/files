@@ -14,8 +14,15 @@ import { readablePathResolves } from "../lib/protection.ts";
 import { buildPreviewContext, previewKindFor, type PreviewContext } from "../lib/previewContext.ts";
 import { signDelivery } from "../lib/deliverySignature.ts";
 import { injectHead } from "../lib/shellHtml.ts";
-import { hasAclGrant, resolveByNames, resolveByToken, type FileRecord } from "../storage/files.ts";
-import { collectionPath } from "../storage/collections.ts";
+import {
+  hasAclGrant,
+  resolveByNames,
+  resolveByToken,
+  resolveEffective,
+  type FileRecord,
+  type ResolvedFile,
+} from "../storage/files.ts";
+import { collectionPath, hasAclGrantOnChain } from "../storage/collections.ts";
 import { getSpaShell } from "../storage/spaShell.ts";
 import { renderEmbeddedContext, renderPreviewHead } from "../views/PreviewHead.tsx";
 import { renderNotFoundPage } from "../views/NotFound.tsx";
@@ -26,29 +33,40 @@ function send404(reply: FastifyReply): void {
 
 // `secret` must 404 at its readable path, not 403 (D-59) - a 403 confirms existence, which is the one
 // thing the level exists to hide. The token path bypasses this gate entirely (it is exactly how a
-// `secret` file is reached).
-async function resolveDocumentByNames(segments: readonly string[]): Promise<FileRecord | null> {
+// `secret` file is reached). Gated on the EFFECTIVE level (D-96/D-100): a file whose own stored level
+// would resolve here must still 404 if its collection's effective level does not.
+async function resolveDocumentByNames(segments: readonly string[]): Promise<ResolvedFile | null> {
   const record = await resolveByNames(segments);
-  if (record !== null && !readablePathResolves(record.protection)) return null;
-  return record;
+  if (record === null) return null;
+  const resolved = await resolveEffective(record);
+  if (!readablePathResolves(resolved.effectiveProtection)) return null;
+  return resolved;
 }
 
 // The display path (collection names + file's own display name) - what buildFileUrls and PreviewContext
 // need. Recomputed from the current DB state on every read, never stored (D-82: a rename is a pure DB
 // operation and must be reflected immediately).
-async function displayPathFor(record: FileRecord): Promise<string[]> {
+//
+// D-100: when the file's EFFECTIVE protection does not resolve at a readable path (secret itself, or
+// gated only by an ancestor collection), the collection segments are exactly what would leak - this
+// falls back to just the file's own name, mirroring what buildFileUrls already does for the URLs. Every
+// PreviewContext (document, API, oEmbed) goes through this one function, so the redaction cannot be
+// forgotten by a second call site reading collectionPath() directly.
+async function displayPathFor(record: ResolvedFile): Promise<string[]> {
+  if (!readablePathResolves(record.effectiveProtection)) return [record.name];
   const collectionSegments = await collectionPath(record.collectionId);
   return [...collectionSegments, record.name];
 }
 
-async function sendDocument(reply: FastifyReply, config: Config, record: FileRecord): Promise<void> {
+async function sendDocument(reply: FastifyReply, config: Config, record: ResolvedFile): Promise<void> {
   const segments = await displayPathFor(record);
-  const urls = buildFileUrls(config, record.protection, segments, record.linkToken);
+  const urls = buildFileUrls(config, record.effectiveProtection, segments, record.linkToken);
   const ctx = buildPreviewContext(record, segments.join("/"), urls);
   // D-72/D-75: a private file's document reveals nothing to an anonymous requester - no OG, no embedded
-  // context, not even the filename. Only the API (given a Bearer) may describe it.
+  // context, not even the filename. Only the API (given a Bearer) may describe it. Gated on the
+  // EFFECTIVE level (D-96): a file gated only by its collection must reveal just as little.
   const head =
-    record.protection === "private"
+    record.effectiveProtection === "private"
       ? renderPreviewHead(null, config.appOrigin)
       : renderPreviewHead(ctx, config.appOrigin) + renderEmbeddedContext(ctx);
   reply.type("text/html; charset=utf-8").send(injectHead(getSpaShell(), head));
@@ -80,28 +98,35 @@ export async function previewByToken(
     send404(reply);
     return;
   }
-  await sendDocument(reply, config, record);
+  await sendDocument(reply, config, await resolveEffective(record));
 }
 
-// Same grant rule controllers/delivery.ts's authorizePrivate uses (owner, superuser, or an explicit ACL
-// row, matched byte-for-byte - security invariant 6) - but this app never distinguishes 401 from 403 for
-// a preview: an unauthorized request just gets the same 404 a nonexistent file would (D-72's whole point
-// is that neither the document nor the API becomes an existence oracle for `private`).
+// Same grant rule controllers/delivery.ts's authorizePrivate uses (owner, superuser, an explicit ACL row
+// on the file, or an ACL row on any ANCESTOR COLLECTION - D-99, matched byte-for-byte for the sub,
+// security invariant 6) - but this app never distinguishes 401 from 403 for a preview: an unauthorized
+// request just gets the same 404 a nonexistent file would (D-72's whole point is that neither the
+// document nor the API becomes an existence oracle for `private`).
 async function hasElevatedAccess(
   request: FastifyRequest,
   config: Config,
-  record: FileRecord,
+  record: ResolvedFile,
 ): Promise<boolean> {
   const claims = await claimsFromBearer(request, config.appOrigin);
   if (claims === null) return false;
   const isOwner = record.ownerSub !== null && claims.sub === record.ownerSub;
-  return isOwner || isSuperuser(claims) || (await hasAclGrant(record.id, claims.sub));
+  return (
+    isOwner ||
+    isSuperuser(claims) ||
+    (await hasAclGrant(record.id, claims.sub)) ||
+    (await hasAclGrantOnChain(record.collectionId, claims.sub))
+  );
 }
 
 // D-84: only an authenticated, authorized request for a `private` file gets a signed directUrl - never
-// the anonymous embedded document (D-75 stands: it reveals nothing).
-function withSignedDirectUrl(ctx: PreviewContext, config: Config, record: FileRecord): PreviewContext {
-  if (record.protection !== "private") return ctx;
+// the anonymous embedded document (D-75 stands: it reveals nothing). Gated on the EFFECTIVE level (D-96):
+// a file gated only by its collection needs the same signed-URL treatment as one stored private itself.
+function withSignedDirectUrl(ctx: PreviewContext, config: Config, record: ResolvedFile): PreviewContext {
+  if (record.effectiveProtection !== "private") return ctx;
   const expiresAt = Math.floor(Date.now() / 1000) + config.deliveryUrlTtlSeconds;
   const sig = signDelivery(config.deliverySigningSecret, record.id, expiresAt);
   return { ...ctx, directUrl: `${config.dlOrigin}/s/${record.id}?exp=${expiresAt}&sig=${sig}` };
@@ -117,27 +142,28 @@ function withSignedDirectUrl(ctx: PreviewContext, config: Config, record: FileRe
 // offering the URL the mutation just retired. Sharing this builder is what keeps the two answers
 // identical; a second copy in manage.ts would be one refactor away from disagreeing.
 export async function ownerContextFor(config: Config, record: FileRecord): Promise<PreviewContext> {
-  const segments = await displayPathFor(record);
-  const urls = buildFileUrls(config, record.protection, segments, record.linkToken);
+  const resolved = await resolveEffective(record);
+  const segments = await displayPathFor(resolved);
+  const urls = buildFileUrls(config, resolved.effectiveProtection, segments, record.linkToken);
   const ctx: PreviewContext = {
     ...buildPreviewContext(record, segments.join("/"), urls),
     isOwner: true,
   };
-  return withSignedDirectUrl(ctx, config, record);
+  return withSignedDirectUrl(ctx, config, resolved);
 }
 
 async function sendContext(
   request: FastifyRequest,
   reply: FastifyReply,
   config: Config,
-  record: FileRecord | null,
+  record: ResolvedFile | null,
 ): Promise<void> {
   if (record === null) {
     reply.code(404).send();
     return;
   }
 
-  if (record.protection === "private") {
+  if (record.effectiveProtection === "private") {
     const granted = await hasElevatedAccess(request, config, record);
     if (!granted) {
       reply.code(404).send();
@@ -148,7 +174,7 @@ async function sendContext(
   }
 
   const segments = await displayPathFor(record);
-  const urls = buildFileUrls(config, record.protection, segments, record.linkToken);
+  const urls = buildFileUrls(config, record.effectiveProtection, segments, record.linkToken);
   const displayPath = segments.join("/");
 
   const ctx = buildPreviewContext(record, displayPath, urls);
@@ -174,7 +200,7 @@ export async function previewContextByToken(
   token: string,
 ): Promise<void> {
   const record = await resolveByToken(token);
-  await sendContext(request, reply, config, record);
+  await sendContext(request, reply, config, record === null ? null : await resolveEffective(record));
 }
 
 function relPathFromPreviewUrl(url: string, appOrigin: string): string | null {
@@ -219,19 +245,20 @@ export async function oembedForUrl(
   }
 
   const segments = relPath === null ? null : safeSegments(relPath);
-  const record =
-    relPath !== null
-      ? segments === null
-        ? null
-        : await resolveDocumentByNames(segments)
-      : await resolveByToken(token!);
-  if (record === null || record.protection === "private") {
+  let record: ResolvedFile | null;
+  if (relPath !== null) {
+    record = segments === null ? null : await resolveDocumentByNames(segments);
+  } else {
+    const byToken = await resolveByToken(token!);
+    record = byToken === null ? null : await resolveEffective(byToken);
+  }
+  if (record === null || record.effectiveProtection === "private") {
     reply.code(404).send();
     return;
   }
 
   const displaySegments = await displayPathFor(record);
-  const urls = buildFileUrls(config, record.protection, displaySegments, record.linkToken);
+  const urls = buildFileUrls(config, record.effectiveProtection, displaySegments, record.linkToken);
   const ctx = buildPreviewContext(record, displaySegments.join("/"), urls);
   const isPhoto = previewKindFor(record.name) === "image" && ctx.width !== null && ctx.height !== null;
 

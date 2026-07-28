@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildFileUrls } from "../../src/lib/fileUrls.ts";
+import { buildCollectionPreviewUrl, buildFileUrls } from "../../src/lib/fileUrls.ts";
 
 const origins = { appOrigin: "https://files.mosni.dev", dlOrigin: "https://dl.mosni.dev" };
 
@@ -24,5 +24,27 @@ describe("buildFileUrls (D-81/D-82: display-name segments, not an on-disk path)"
     const after = buildFileUrls(origins, "public", ["hannah", "new.png"], "ABCDE");
     expect(before.previewUrl).toBe("https://files.mosni.dev/f/hannah/old.png");
     expect(after.previewUrl).toBe("https://files.mosni.dev/f/hannah/new.png");
+  });
+});
+
+// D-98: a collection's own share link - same shape as a file's previewUrl, on the /f/ or /t/ host it
+// shares with files.mosni.dev (collections have no bytes of their own, so there is no directUrl).
+describe("buildCollectionPreviewUrl", () => {
+  it.each(["public", "unlisted", "private"] as const)("%s uses the /f/ path", (protection) => {
+    expect(buildCollectionPreviewUrl(origins, protection, ["hannah", "photos"], "ZZZZZ")).toBe(
+      "https://files.mosni.dev/f/hannah/photos",
+    );
+  });
+
+  it("secret uses the unguessable token URL - the readable path 404s", () => {
+    expect(buildCollectionPreviewUrl(origins, "secret", ["hannah", "photos"], "ZZZZZ")).toBe(
+      "https://files.mosni.dev/t/ZZZZZ",
+    );
+  });
+
+  it("encodes each segment but keeps slashes", () => {
+    expect(buildCollectionPreviewUrl(origins, "public", ["a b", "c/d"], "ZZZZZ")).toBe(
+      "https://files.mosni.dev/f/a%20b/c%2Fd",
+    );
   });
 });

@@ -33,6 +33,7 @@ const updateCollectionSchema = {
     type: "object",
     properties: {
       name: { type: "string", minLength: 1, maxLength: 255 },
+      protection: { type: "string", enum: PROTECTION_ENUM },
       defaultProtection: { type: "string", enum: PROTECTION_ENUM },
     },
     additionalProperties: false,

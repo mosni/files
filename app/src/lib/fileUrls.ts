@@ -37,3 +37,18 @@ export function buildFileUrls(
     directUrl: `${origins.dlOrigin}/t/${linkToken}`,
   };
 }
+
+// D-98: a collection's own share link, same shape as a file's previewUrl - collections have no bytes of
+// their own, so there is no equivalent of directUrl. Used by the browse API (controllers/browse.ts) for
+// each listed collection row.
+export function buildCollectionPreviewUrl(
+  origins: { appOrigin: string },
+  protection: Protection,
+  pathSegments: readonly string[],
+  linkToken: string,
+): string {
+  if (readablePathResolves(protection)) {
+    return `${origins.appOrigin}/f/${encodeSegments(pathSegments)}`;
+  }
+  return `${origins.appOrigin}/t/${linkToken}`;
+}

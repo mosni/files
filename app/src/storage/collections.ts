@@ -8,15 +8,20 @@ import type { Claims } from "../lib/roles.ts";
 import { isSuperuser } from "../lib/roles.ts";
 import { generateId } from "../lib/ids.ts";
 import type { Protection } from "../lib/protection.ts";
+import { mintUniqueToken } from "../lib/tokens.ts";
 import { deleteFile } from "./files.ts";
-import { getPool } from "./db.ts";
+import { getPool, isLinkTokenTaken } from "./db.ts";
 
 export type CollectionRecord = {
   id: string;
   parentId: string;
   name: string;
   ownerSub: string;
+  // D-95: the collection's OWN visibility - a distinct thing from defaultProtection below (D-86: what new
+  // uploads into it inherit). Never blur the two.
+  protection: Protection;
   defaultProtection: Protection;
+  linkToken: string;
   createdAt: string;
 };
 
@@ -25,7 +30,9 @@ interface CollectionRow extends RowDataPacket {
   parent_id: string;
   name: string;
   owner_sub: string;
+  protection: Protection;
   default_protection: Protection;
+  link_token: string;
   created_at: Date;
 }
 
@@ -35,13 +42,15 @@ function rowToRecord(row: CollectionRow): CollectionRecord {
     parentId: row.parent_id,
     name: row.name,
     ownerSub: row.owner_sub,
+    protection: row.protection,
     defaultProtection: row.default_protection,
+    linkToken: row.link_token,
     createdAt: row.created_at.toISOString(),
   };
 }
 
 const SELECT_COLUMNS =
-  "id, parent_id, name, owner_sub, default_protection, created_at";
+  "id, parent_id, name, owner_sub, protection, default_protection, link_token, created_at";
 
 // A cycle should never exist (parent_id only ever points at a real ancestor created before it), but this
 // is app-generated data feeding a loop, so a future bug elsewhere must not be able to hang a request.
@@ -76,27 +85,82 @@ export async function resolveCollectionById(id: string): Promise<CollectionRecor
   return row === undefined ? null : rowToRecord(row);
 }
 
-// Root-first name segments from root down to (and including) this collection - the inverse walk of
-// resolveCollectionByNames, used to build display URLs and audit "collection" labels.
-export async function collectionPath(id: string): Promise<string[]> {
-  const names: string[] = [];
+// The shared ancestor walk: root-first CollectionRecord[] from root down to (and including) this
+// collection. collectionPath, protectionChain and collectionBreadcrumb below are each just a different
+// projection of the same records.
+async function ancestorChainRecords(id: string): Promise<CollectionRecord[]> {
+  const records: CollectionRecord[] = [];
   let currentId = id;
   for (let depth = 0; depth < MAX_COLLECTION_DEPTH; depth++) {
     const record = await resolveCollectionById(currentId);
     if (record === null) {
-      throw new Error(`storage/collections: collectionPath - dangling parent_id "${currentId}"`);
+      throw new Error(`storage/collections: ancestorChainRecords - dangling parent_id "${currentId}"`);
     }
-    names.unshift(record.name);
-    if (record.parentId === "") return names;
+    records.unshift(record);
+    if (record.parentId === "") return records;
     currentId = record.parentId;
   }
-  throw new Error(`storage/collections: collectionPath exceeded max depth (${MAX_COLLECTION_DEPTH})`);
+  throw new Error(`storage/collections: ancestorChainRecords exceeded max depth (${MAX_COLLECTION_DEPTH})`);
+}
+
+// Root-first name segments from root down to (and including) this collection - the inverse walk of
+// resolveCollectionByNames, used to build display URLs and audit "collection" labels.
+export async function collectionPath(id: string): Promise<string[]> {
+  return (await ancestorChainRecords(id)).map((record) => record.name);
+}
+
+// D-96: root-first OWN protection levels from root down to (and including) this collection.
+// `resolveEffective` (storage/files.ts) folds this together with a file's own stored level via
+// lib/protection.ts's mostRestrictive() to get the file's EFFECTIVE protection - the only level any read
+// path may act on.
+export async function protectionChain(id: string): Promise<Protection[]> {
+  return (await ancestorChainRecords(id)).map((record) => record.protection);
+}
+
+// D-102/§1.4 of the E4 waves hand-off: root-first {id, name} pairs for the browse API's breadcrumb, empty
+// at root. Unlike collectionPath, the browser needs each ancestor's id too, to link a breadcrumb segment
+// back to a navigable collectionId.
+export async function collectionBreadcrumb(id: string): Promise<{ id: string; name: string }[]> {
+  return (await ancestorChainRecords(id)).map((record) => ({ id: record.id, name: record.name }));
 }
 
 export async function listCollectionsFor(sub: string): Promise<CollectionRecord[]> {
   const [rows] = await getPool().query<CollectionRow[]>(
     `SELECT ${SELECT_COLUMNS} FROM collections WHERE owner_sub = ? ORDER BY created_at ASC`,
     [sub],
+  );
+  return rows.map(rowToRecord);
+}
+
+// --- Browse listing queries (§1.4 of the E4 waves hand-off) - one per scope, newest-first ------------
+//
+// Each returns the direct children of `parentId` ('' for root). None of these resolve EFFECTIVE
+// protection - that is controllers/browse.ts's job (it already has each row's OWN protection to fold
+// with the parent chain the caller separately verified). The public-scope query is the security-critical
+// one: it is a single WHERE clause that structurally cannot return a non-public row, never a broader
+// select filtered in JavaScript afterward - see controllers/browse.ts for why checking each row's own
+// `protection` here is sufficient (the caller has already verified the parent chain is itself public).
+
+export async function listOwnedChildCollections(parentId: string, ownerSub: string): Promise<CollectionRecord[]> {
+  const [rows] = await getPool().query<CollectionRow[]>(
+    `SELECT ${SELECT_COLUMNS} FROM collections WHERE parent_id = ? AND owner_sub = ? ORDER BY created_at DESC`,
+    [parentId, ownerSub],
+  );
+  return rows.map(rowToRecord);
+}
+
+export async function listPublicChildCollections(parentId: string): Promise<CollectionRecord[]> {
+  const [rows] = await getPool().query<CollectionRow[]>(
+    `SELECT ${SELECT_COLUMNS} FROM collections WHERE parent_id = ? AND protection = 'public' ORDER BY created_at DESC`,
+    [parentId],
+  );
+  return rows.map(rowToRecord);
+}
+
+export async function listAllChildCollections(parentId: string): Promise<CollectionRecord[]> {
+  const [rows] = await getPool().query<CollectionRow[]>(
+    `SELECT ${SELECT_COLUMNS} FROM collections WHERE parent_id = ? ORDER BY created_at DESC`,
+    [parentId],
   );
   return rows.map(rowToRecord);
 }
@@ -110,15 +174,21 @@ function isSiblingNameDuplicate(err: unknown): boolean {
   );
 }
 
+// D-105: a new collection inherits its parent's protection (`unlisted` at root, matching the column
+// default) - the caller (controllers/manage.ts) resolves the parent's own `protection` and passes it
+// through; this function does not walk the parent chain itself.
 export async function createCollection(params: {
   parentId: string;
   name: string;
   ownerSub: string;
+  protection?: Protection;
 }): Promise<CollectionRecord> {
   const id = generateId();
+  const protection = params.protection ?? "unlisted";
+  const linkToken = await mintUniqueToken((candidate) => isLinkTokenTaken(getPool(), candidate));
   await getPool().query(
-    "INSERT INTO collections (id, parent_id, name, owner_sub, default_protection) VALUES (?, ?, ?, ?, 'unlisted')",
-    [id, params.parentId, params.name, params.ownerSub],
+    "INSERT INTO collections (id, parent_id, name, owner_sub, protection, default_protection, link_token) VALUES (?, ?, ?, ?, ?, 'unlisted', ?)",
+    [id, params.parentId, params.name, params.ownerSub, protection, linkToken],
   );
   const record = await resolveCollectionById(id);
   if (record === null) throw new Error("storage/collections: createCollection - row vanished after insert");
@@ -159,6 +229,13 @@ export async function setCollectionDefaultProtection(id: string, protection: Pro
   await getPool().query("UPDATE collections SET default_protection = ? WHERE id = ?", [protection, id]);
 }
 
+// D-95: a collection's OWN protection - distinct from default_protection above. D-97's write-time floor
+// is enforced by the caller (controllers/manage.ts's assertNotBelowParent) before this is ever called;
+// this function itself is a plain, unconditional write, same shape as setCollectionDefaultProtection.
+export async function setCollectionProtection(id: string, protection: Protection): Promise<void> {
+  await getPool().query("UPDATE collections SET protection = ? WHERE id = ?", [protection, id]);
+}
+
 async function descendantCollectionIds(rootId: string): Promise<string[]> {
   const all: string[] = [];
   let frontier = [rootId];
@@ -197,6 +274,29 @@ export async function deleteCollectionRecursive(
     await getPool().query("DELETE FROM collections WHERE id = ?", [collectionId]);
   }
   return { deletedFileIds: fileIds };
+}
+
+// D-99: authorized identity for a restrictive collection's contents includes an ACL grant on ANY
+// ancestor collection, not only the one immediately holding the object - a grant on a top-level
+// collection must pierce down to everything nested beneath it. Walks the same chain protectionChain
+// does, checking collection_acl at each level in turn (root check happens last since the walk climbs
+// from the given collection upward), returning true on the first match.
+export async function hasAclGrantOnChain(collectionId: string, sub: string): Promise<boolean> {
+  let currentId = collectionId;
+  for (let depth = 0; depth < MAX_COLLECTION_DEPTH; depth++) {
+    const [rows] = await getPool().query<RowDataPacket[]>(
+      "SELECT 1 FROM collection_acl WHERE collection_id = ? AND sub = ? LIMIT 1",
+      [currentId, sub],
+    );
+    if (rows.length > 0) return true;
+    const record = await resolveCollectionById(currentId);
+    if (record === null) {
+      throw new Error(`storage/collections: hasAclGrantOnChain - dangling parent_id "${currentId}"`);
+    }
+    if (record.parentId === "") return false;
+    currentId = record.parentId;
+  }
+  throw new Error(`storage/collections: hasAclGrantOnChain exceeded max depth (${MAX_COLLECTION_DEPTH})`);
 }
 
 // D-87: the structure lands in E3 (this table + this read) so multiple users can hold upload rights on a

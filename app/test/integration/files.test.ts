@@ -16,9 +16,10 @@ import {
   resolveById,
   resolveByNames,
   resolveByToken,
+  resolveEffective,
   setFileProtection,
 } from "../../src/storage/files.ts";
-import { createCollection } from "../../src/storage/collections.ts";
+import { createCollection, setCollectionProtection } from "../../src/storage/collections.ts";
 import type { Protection } from "../../src/lib/protection.ts";
 
 // Against real MariaDB and a real temp directory. D-81/D-85: a file's identity is a surrogate id, and
@@ -246,6 +247,67 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
 
     it("is idempotent - deleting an already-gone id does nothing and does not throw", async () => {
       await expect(deleteFile(`nonexistent${randomUUID()}`.replace(/-/g, "").slice(0, 16))).resolves.toBeUndefined();
+    });
+  });
+
+  // D-96: the landmine. A row's stored `protection` is never safe to read directly - resolveEffective()
+  // folds the collection's ancestor chain together with the file's own stored level via
+  // lib/protection.ts's mostRestrictive(), and every read path must use ITS result, never record.protection.
+  describe("resolveEffective (D-96 - effective protection)", () => {
+    it("a public file in an unlisted collection is EFFECTIVELY unlisted, not public", async () => {
+      const collectionId = await seedCollection();
+      const { id } = await seedCommittedFile({ collectionId, protection: "public" });
+      const record = await resolveById(id);
+      const resolved = await resolveEffective(record!);
+      expect(resolved.protection).toBe("public"); // the STORED value, untouched
+      expect(resolved.effectiveProtection).toBe("unlisted"); // the collection is more restrictive
+    });
+
+    it("a public file in a public collection is effectively public", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `eff-public-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "public",
+      });
+      createdCollectionIds.push(collection.id);
+      const { id } = await seedCommittedFile({ collectionId: collection.id, protection: "public" });
+      const resolved = await resolveEffective((await resolveById(id))!);
+      expect(resolved.effectiveProtection).toBe("public");
+    });
+
+    it("raising the collection's protection is reflected immediately, with no rewrite of the file's own stored level", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `eff-raise-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "unlisted",
+      });
+      createdCollectionIds.push(collection.id);
+      const { id } = await seedCommittedFile({ collectionId: collection.id, protection: "unlisted" });
+
+      await setCollectionProtection(collection.id, "private");
+      const raised = await resolveEffective((await resolveById(id))!);
+      expect(raised.effectiveProtection).toBe("private");
+      expect(raised.protection).toBe("unlisted"); // D-97: the file's own row is untouched
+
+      // Lowering it again restores the previous per-file behaviour exactly.
+      await setCollectionProtection(collection.id, "unlisted");
+      const lowered = await resolveEffective((await resolveById(id))!);
+      expect(lowered.effectiveProtection).toBe("unlisted");
+    });
+
+    it("the file's own level can be the most restrictive one in the chain", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `eff-file-strictest-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "public",
+      });
+      createdCollectionIds.push(collection.id);
+      const { id } = await seedCommittedFile({ collectionId: collection.id, protection: "private" });
+      const resolved = await resolveEffective((await resolveById(id))!);
+      expect(resolved.effectiveProtection).toBe("private");
     });
   });
 

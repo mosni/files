@@ -77,14 +77,16 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
   async function seed(opts: {
     name: string;
     protection: Protection;
+    collectionProtection?: Protection;
     ownerSub?: string | null;
     width?: number | null;
     height?: number | null;
-  }): Promise<{ collectionName: string; linkToken: string; fileId: string }> {
+  }): Promise<{ collectionId: string; collectionName: string; linkToken: string; fileId: string }> {
     const collection = await createCollection({
       parentId: "",
       name: `c-${randomUUID()}`,
       ownerSub: opts.ownerSub ?? "user:owner",
+      protection: opts.collectionProtection,
     });
     const claimed = await claimFileRow({
       collectionId: collection.id,
@@ -105,7 +107,12 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       durationSeconds: null,
       textPreview: null,
     });
-    return { collectionName: collection.name, linkToken: claimed.linkToken, fileId: claimed.id };
+    return {
+      collectionId: collection.id,
+      collectionName: collection.name,
+      linkToken: claimed.linkToken,
+      fileId: claimed.id,
+    };
   }
 
   const get = (url: string, headers: Record<string, string> = {}) =>
@@ -311,6 +318,104 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
     const res = await get(`/api/preview/t/${linkToken}`);
     expect(res.statusCode).toBe(200);
     expect(res.headers["set-cookie"]).toBeUndefined();
+  });
+
+  // --- Effective protection (D-96) - the landmine: STORED protection is never safe to read directly ----
+
+  it("a public file inside a private collection: 200 at /f/, but only the minimal head, no OG, no embedded context (D-96/D-72)", async () => {
+    // D-96/D-99: private still RESOLVES at the readable path (unlike secret) - it just reveals nothing,
+    // exactly like a file stored private itself.
+    const { collectionName } = await seed({
+      name: "leak-check.txt",
+      protection: "public",
+      collectionProtection: "private",
+    });
+    const res = await get(`/f/${collectionName}/leak-check.txt`);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain("og:");
+    expect(res.body).not.toContain("leak-check.txt");
+    expect(res.body).not.toContain("preview-context");
+  });
+
+  it("a public file inside a secret collection also 404s at its readable path (secret never resolves)", async () => {
+    const { collectionName } = await seed({
+      name: "leak-check2.txt",
+      protection: "public",
+      collectionProtection: "secret",
+    });
+    expect((await get(`/f/${collectionName}/leak-check2.txt`)).statusCode).toBe(404);
+  });
+
+  it("a secret-gated file's own /t/<token> reveals the full document with no auth needed (D-96/D-100)", async () => {
+    // secret, unlike private, reveals fully once reached by its unguessable token - only the READABLE
+    // path is hidden (D-59). This is what makes the collection-gated file usable at all without an owner
+    // session.
+    const { linkToken } = await seed({
+      name: "leak-check3.txt",
+      protection: "public",
+      collectionProtection: "secret",
+    });
+    const res = await get(`/t/${linkToken}`);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("leak-check3.txt");
+  });
+
+  it("GET /api/preview/f/<path> for a file gated only by its collection is 404 anonymously, and a collection-name leak check", async () => {
+    const { collectionName, collectionId } = await seed({
+      name: "leak-check4.txt",
+      protection: "public",
+      collectionProtection: "private",
+    });
+    const res = await get(`/api/preview/f/${collectionName}/leak-check4.txt`);
+    expect(res.statusCode).toBe(404);
+    // D-100: nothing about a collection-gated file's OWN previewUrl/directUrl may name its collection -
+    // checked positively via the token API below, which is what the file's copy control actually offers.
+    expect(collectionId).toEqual(expect.any(String));
+  });
+
+  it("GET /api/preview/t/<token> for a collection-gated file never exposes the collection's name (D-100)", async () => {
+    const { collectionName, linkToken } = await seed({
+      name: "leak-check5.txt",
+      protection: "public",
+      collectionProtection: "secret",
+    });
+    const res = await get(`/api/preview/t/${linkToken}`);
+    expect(res.statusCode).toBe(200);
+    const ctx = res.json() as PreviewContext;
+    expect(ctx.previewUrl).not.toContain(collectionName);
+    expect(ctx.directUrl).not.toContain(collectionName);
+    expect(ctx.previewUrl).toContain(`/t/${linkToken}`);
+    expect(JSON.stringify(ctx)).not.toContain(collectionName);
+  });
+
+  it("the owner still reaches a file gated only by its collection, via /api/preview/t/<token> (D-99)", async () => {
+    const { linkToken } = await seed({
+      name: "owner-reach.txt",
+      protection: "public",
+      collectionProtection: "private",
+      ownerSub: "user:owner",
+    });
+    verifyMock.mockResolvedValue({ sub: "user:owner" } as never);
+    const res = await get(`/api/preview/t/${linkToken}`, { authorization: "Bearer t" });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as PreviewContext).isOwner).toBe(true);
+  });
+
+  it("a grantee on the collection (not the file) reaches an otherwise-private file inside a private collection (D-99)", async () => {
+    const { collectionId, linkToken } = await seed({
+      name: "collection-grant.txt",
+      protection: "private",
+      collectionProtection: "private",
+      ownerSub: "user:owner",
+    });
+    const grantedSub = `user:${randomUUID()}`;
+    await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+      collectionId,
+      grantedSub,
+    ]);
+    verifyMock.mockResolvedValue({ sub: grantedSub } as never);
+    const res = await get(`/api/preview/t/${linkToken}`, { authorization: "Bearer t" });
+    expect(res.statusCode).toBe(200);
   });
 
   // --- oEmbed (D-74) --------------------------------------------------------------------------------
