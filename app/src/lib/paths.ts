@@ -64,6 +64,16 @@ export function safeSegment(name: string): string | null {
  * trimmed, for the same "two inputs must not collapse to one" reason safeSegment rejects rather than trims.
  */
 export function safeRelPath(relPath: string): string | null {
+  const segments = safeSegments(relPath);
+  return segments === null ? null : segments.join("/");
+}
+
+// Same validation as safeRelPath, but returns the segment array rather than a joined string - what
+// routes/delivery.ts and routes/preview.ts need post-D-81, since a URL's segments are now collection
+// names + a file name resolved through the database, not a path assembled back into one string before
+// use. Every `/`-separated segment must pass safeSegment - so `..`, control characters, empty segments
+// (a `//` or a leading/trailing slash), and per-segment traversal are all rejected.
+export function safeSegments(relPath: string): string[] | null {
   if (typeof relPath !== "string" || relPath.length === 0) return null;
   const segments = relPath.split("/");
   const safe: string[] = [];
@@ -72,7 +82,7 @@ export function safeRelPath(relPath: string): string | null {
     if (s === null) return null;
     safe.push(s);
   }
-  return safe.join("/");
+  return safe;
 }
 
 // Belt and braces: safeSegment/safeRelPath should already make escape impossible, but this is the

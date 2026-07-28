@@ -5,7 +5,7 @@ import { closeRedis } from "../../src/storage/redis.ts";
 
 // The real boot sequence, against the real MariaDB/redis service containers (D-45). BOT_API/AUTH_ISSUER
 // point at hosts that don't exist in this compose network - proving registerGrantableRoles() (D-32) and
-// the applySchema() try/catch (also D-32-style) really are non-fatal, not just non-fatal in a mock.
+// the applyMigrations() try/catch (also D-32-style) really are non-fatal, not just non-fatal in a mock.
 describe("start()", () => {
   let app: Awaited<ReturnType<typeof start>>;
 

@@ -54,9 +54,10 @@ RUN apk add --no-cache --virtual .sharp-build vips-dev build-base pkgconfig pyth
     "
 COPY --from=build /repo/web/dist ./web/dist
 COPY --from=build /repo/app/dist ./app/dist
-# schema.sql is read at runtime relative to the BUILT server.js's own location (import.meta.url), not its
-# original app/src/storage/ path - the SSR build bundles everything into one file, so the asset must sit
-# next to it. This is the visible consequence of D-44 (the server runs built output, not source).
-COPY --from=build /repo/app/src/storage/schema.sql ./app/dist/schema.sql
+# D-83: numbered migrations are read at runtime relative to the BUILT server.js's own location
+# (import.meta.url via storage/db.ts's migrationsDir()), not their original app/src/storage/migrations
+# path - the SSR build bundles everything into one file, so the .sql assets must sit next to it. This is
+# the visible consequence of D-44 (the server runs built output, not source).
+COPY --from=build /repo/app/src/storage/migrations ./app/dist/migrations
 EXPOSE 3000
 CMD ["node", "app/dist/server.js"]

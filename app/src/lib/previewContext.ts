@@ -12,14 +12,16 @@ export type PreviewKind = "image" | "video" | "pdf" | "text" | "other";
 // Written exactly as specified in the waves hand-off (§1) - Wave B2 (the SPA) codes against this shape
 // in parallel and must not have to guess.
 export type PreviewContext = {
-  name: string; // basename, for the title and og:title
-  path: string; // relative path from STORAGE_ROOT - the file's identity
+  id: string; // the file's surrogate id (D-81) - what the E3 manage API (PATCH/DELETE /api/files/:id) addresses
+  collectionId: string; // the owning collection's id - what ManageControls needs for the destination picker
+  name: string; // DISPLAY name (D-82: renameable, independent of the on-disk name), for the title and og:title
+  path: string; // display path (collection names + file name) - for URLs and display, NOT an identity (D-81)
   bytes: number;
   sizeLabel: string; // humanised, e.g. "2.4 MB"
   protection: Protection;
   createdAt: string; // ISO 8601, from files.created_at
   previewUrl: string; // files.mosni.dev/f/<path> or /t/<token>
-  directUrl: string; // dl.mosni.dev/<path> or /t/<token>
+  directUrl: string; // dl.mosni.dev/<path> or /t/<token> - or a D-84 signed URL for a private file's owner
   kind: PreviewKind;
   mimeType: string; // "image/png", "video/mp4", "application/pdf", "text/plain",
   // "application/octet-stream" for unknown
@@ -62,11 +64,14 @@ export function previewKindFor(filename: string): PreviewKind {
 
 export function buildPreviewContext(
   record: FileRecord,
+  displayPath: string,
   urls: { previewUrl: string; directUrl: string },
 ): PreviewContext {
   return {
+    id: record.id,
+    collectionId: record.collectionId,
     name: record.name,
-    path: record.path,
+    path: displayPath,
     bytes: record.bytes,
     sizeLabel: humanSize(record.bytes),
     protection: record.protection,

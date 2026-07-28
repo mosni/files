@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
+import mysql from "mysql2/promise";
 
 // THE product invariant, finally executed end to end: open -> drop -> copy a link that works (D-1).
 //
@@ -74,9 +75,29 @@ test("a real authorized tus upload lands the bytes, and the returned link serves
   expect(previewUrl).toContain(filename);
   expect(directUrl).toContain(filename);
 
-  // --- the bytes are really on disk, unchanged ----------------------------------------------------
   const relPath = new URL(directUrl).pathname.replace(/^\//, "");
-  const onDisk = await readFile(path.join(STORAGE_ROOT, ...relPath.split("/").map(decodeURIComponent)));
+
+  // --- the bytes are really on disk, unchanged ----------------------------------------------------
+  // D-81/D-82: the on-disk location is no longer derivable from the URL (it's `<YYYY>/<mm>/<id>-<original
+  // filename>`, an internal detail the URL never mirrors) - so the disk_dir/disk_name are read back from
+  // the database by the file's display name, exactly as the app itself resolves delivery.
+  const conn = await mysql.createConnection({
+    host: process.env.DB_HOST ?? "mariadb",
+    port: Number(process.env.DB_PORT ?? 3306),
+    user: process.env.DB_USER ?? "files",
+    password: process.env.DB_PASS ?? "filespass",
+    database: process.env.DB_NAME ?? "files",
+  });
+  let diskRelPath: string;
+  try {
+    const [rows] = await conn.execute("SELECT disk_dir, disk_name FROM files WHERE name = ?", [filename]);
+    const row = (rows as { disk_dir: string; disk_name: string }[])[0];
+    expect(row, "the uploaded file's row must exist").toBeTruthy();
+    diskRelPath = `${row!.disk_dir}/${row!.disk_name}`;
+  } finally {
+    await conn.end();
+  }
+  const onDisk = await readFile(path.join(STORAGE_ROOT, diskRelPath));
   expect(createHash("sha256").update(onDisk).digest("hex")).toBe(
     createHash("sha256").update(body).digest("hex"),
   );

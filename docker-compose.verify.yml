@@ -75,6 +75,7 @@ services:
       DL_ORIGIN: https://dl.mosni.dev
       STORAGE_ROOT: /tmp/storage
       PORT: "3000"
+      DELIVERY_SIGNING_SECRET: verify-tier-signing-secret
     # D-70: `vite build` must run BEFORE the tests, not after - the preview shell-splice reads the built
     # web/dist/index.html, and running tests first would let every integration test silently exercise only
     # the fallback shell (a missing web/dist just warns, per server.ts's fastifyStatic comment). Do not
@@ -191,6 +192,7 @@ services:
       APP_ORIGIN: https://files-e2e.test
       DL_ORIGIN: https://dl.mosni.dev
       STORAGE_ROOT: /data/storage
+      DELIVERY_SIGNING_SECRET: e2e-tier-signing-secret
       # D-70 Wave D: 80, not 3000, here specifically (production's own port; nothing else in the app
       # depends on the number 3000). Fastify's `constraints: { host }` does an EXACT string match against
       # the raw incoming Host header (find-my-way's accept-host strategy - confirmed by reading it), which

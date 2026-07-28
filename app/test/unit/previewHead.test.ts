@@ -6,6 +6,8 @@ const APP_ORIGIN = "https://files.mosni.dev";
 
 function makeCtx(overrides: Partial<PreviewContext> = {}): PreviewContext {
   return {
+    id: "file0000000000id",
+    collectionId: "coll000000000000",
     name: "photo.png",
     path: "dir/photo.png",
     bytes: 2_400_000,

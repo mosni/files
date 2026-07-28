@@ -47,6 +47,8 @@ import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 
 function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
   return {
+    id: "file0000000000id",
+    collectionId: "coll000000000000",
     name: "hello.txt",
     path: "hello.txt",
     bytes: 5,
@@ -73,6 +75,18 @@ async function flush() {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
+}
+
+// React installs its own instance-level `value` setter on a mounted input/select (to track "did the
+// browser see this value already" for its onChange comparison). Assigning `.value` directly goes through
+// THAT setter too, so React's tracker silently updates right along with the DOM - and a subsequently
+// dispatched "input"/"change" event then finds nothing changed and never calls onChange. Using the
+// PROTOTYPE's native setter bypasses React's override, leaving the tracker stale so the event is seen as
+// a real change.
+function setNativeInputValue(input: HTMLInputElement | HTMLSelectElement, value: string): void {
+  const proto = input instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!;
+  setter.call(input, value);
 }
 
 type MockClaims = { sub: string; roles?: string[]; mosni_owner?: boolean } | null;
@@ -428,5 +442,129 @@ describe("DropZone", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("destination picker (G1/G2, D-42/D-86)", () => {
+    it("the Options disclosure is collapsed by default and fetches nothing until opened (D-1)", () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(<DropZone />);
+      });
+
+      const details = container.querySelector("details") as HTMLDetailsElement;
+      expect(details.open).toBe(false);
+      // /api/config fires unconditionally on mount (F1, pre-dates this wave) - /api/collections must not.
+      expect(fetchSpy).not.toHaveBeenCalledWith("/api/collections", expect.anything());
+    });
+
+    it("opening the disclosure fetches the caller's collections and lists them", async () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      const fetchSpy = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve([{ id: "coll1", name: "vacation" }]),
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(<DropZone />);
+      });
+
+      const details = container.querySelector("details") as HTMLDetailsElement;
+      await act(async () => {
+        details.setAttribute("open", "");
+        details.dispatchEvent(new Event("toggle", { bubbles: false }));
+        await flush();
+      });
+
+      expect(fetchSpy).toHaveBeenCalledWith("/api/collections", { headers: { Authorization: "Bearer test-token" } });
+      const options = Array.from(container.querySelectorAll("#destination-select option")).map((o) => o.textContent);
+      expect(options).toContain("vacation");
+    });
+
+    it("uploading with a selected destination passes destinationCollectionId in tus metadata", () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+
+      act(() => {
+        root.render(<DropZone />);
+      });
+
+      const select = container.querySelector("#destination-select") as HTMLSelectElement;
+      act(() => {
+        const option = document.createElement("option");
+        option.value = "coll-chosen";
+        select.appendChild(option);
+        setNativeInputValue(select, "coll-chosen");
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+
+      const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+      dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
+
+      expect(uploadInstances[0].options.metadata).toEqual({
+        filename: "hello.txt",
+        destinationCollectionId: "coll-chosen",
+      });
+    });
+
+    it("typing a new collection name creates it, then uploads use its returned id", async () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ id: "coll-new" }) });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(<DropZone />);
+      });
+
+      const nameInput = container.querySelector("#new-collection-name") as HTMLInputElement;
+      act(() => {
+        setNativeInputValue(nameInput, "vacation photos");
+        nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+
+      const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+      await act(async () => {
+        dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
+        await flush();
+      });
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "/api/collections",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ name: "vacation photos" }),
+        }),
+      );
+      expect(uploadInstances[0].options.metadata).toEqual({
+        filename: "hello.txt",
+        destinationCollectionId: "coll-new",
+      });
+    });
+
+    it("a failed new-collection creation falls back to the default rather than blocking the upload", async () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+
+      act(() => {
+        root.render(<DropZone />);
+      });
+
+      const nameInput = container.querySelector("#new-collection-name") as HTMLInputElement;
+      act(() => {
+        setNativeInputValue(nameInput, "will fail");
+        nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+
+      const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+      await act(async () => {
+        dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
+        await flush();
+      });
+
+      expect(uploadInstances).toHaveLength(1);
+      expect(uploadInstances[0].options.metadata).toEqual({ filename: "hello.txt" });
+    });
   });
 });

@@ -3,9 +3,10 @@
 // shrinks media and omits the owner banner (an upload's own drop zone has no reason to tell you that
 // you own the file you just uploaded).
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 import { CopyLink } from "./CopyLink.tsx";
+import { ManageControls } from "./ManageControls.tsx";
 
 const FIT: React.CSSProperties = { maxWidth: "100%", height: "auto", display: "block" };
 const FIT_COMPACT: React.CSSProperties = { maxWidth: "100%", maxHeight: "320px", height: "auto", width: "auto", display: "block" };
@@ -80,7 +81,13 @@ function renderMedia(ctx: PreviewContext, compact: boolean) {
 }
 
 export function PreviewCard({ context, compact = false }: { context: PreviewContext; compact?: boolean }) {
-  const ctx = context;
+  // Local, editable copy: ManageControls updates it optimistically on a successful rename/protection
+  // change so the page reflects the new state with no extra round trip. Reset whenever the PARENT hands
+  // in a genuinely new context (a real navigation, or Preview.tsx's owner-status refetch) rather than one
+  // this component produced itself.
+  const [ctx, setCtx] = useState(context);
+  useEffect(() => setCtx(context), [context]);
+
   return (
     // minmax(0, 1fr): see Preview.tsx - a grid item's automatic minimum size is its content, and a long
     // URL / wide image in a non-shrinking column would push the page wider than the viewport.
@@ -99,6 +106,10 @@ export function PreviewCard({ context, compact = false }: { context: PreviewCont
       )}
       {renderMedia(ctx, compact)}
       <CopyLink previewUrl={ctx.previewUrl} directUrl={ctx.directUrl} />
+      {/* D-89: full rename/protection/delete on the file's own page; the compact upload-completion card
+          gets only the protection selector (F3) - and only ever for the owner, so D-1's fast path never
+          grows a step for anyone else. */}
+      {ctx.isOwner && <ManageControls context={ctx} compact={compact} onUpdate={setCtx} />}
     </div>
   );
 }

@@ -9,10 +9,13 @@ import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
 import { isSuperuser } from "../lib/roles.ts";
 import { buildFileUrls } from "../lib/fileUrls.ts";
+import { safeSegments } from "../lib/paths.ts";
 import { readablePathResolves } from "../lib/protection.ts";
 import { buildPreviewContext, previewKindFor, type PreviewContext } from "../lib/previewContext.ts";
+import { signDelivery } from "../lib/deliverySignature.ts";
 import { injectHead } from "../lib/shellHtml.ts";
-import { hasAclGrant, resolveByPath, resolveByToken, type FileRecord } from "../storage/files.ts";
+import { hasAclGrant, resolveByNames, resolveByToken, type FileRecord } from "../storage/files.ts";
+import { collectionPath } from "../storage/collections.ts";
 import { getSpaShell } from "../storage/spaShell.ts";
 import { renderEmbeddedContext, renderPreviewHead } from "../views/PreviewHead.tsx";
 import { renderNotFoundPage } from "../views/NotFound.tsx";
@@ -24,15 +27,24 @@ function send404(reply: FastifyReply): void {
 // `secret` must 404 at its readable path, not 403 (D-59) - a 403 confirms existence, which is the one
 // thing the level exists to hide. The token path bypasses this gate entirely (it is exactly how a
 // `secret` file is reached).
-async function resolveDocumentByPath(relPath: string): Promise<FileRecord | null> {
-  const record = await resolveByPath(relPath);
+async function resolveDocumentByNames(segments: readonly string[]): Promise<FileRecord | null> {
+  const record = await resolveByNames(segments);
   if (record !== null && !readablePathResolves(record.protection)) return null;
   return record;
 }
 
-function sendDocument(reply: FastifyReply, config: Config, record: FileRecord): void {
-  const urls = buildFileUrls(config, record.protection, record.path, record.linkToken);
-  const ctx = buildPreviewContext(record, urls);
+// The display path (collection names + file's own display name) - what buildFileUrls and PreviewContext
+// need. Recomputed from the current DB state on every read, never stored (D-82: a rename is a pure DB
+// operation and must be reflected immediately).
+async function displayPathFor(record: FileRecord): Promise<string[]> {
+  const collectionSegments = await collectionPath(record.collectionId);
+  return [...collectionSegments, record.name];
+}
+
+async function sendDocument(reply: FastifyReply, config: Config, record: FileRecord): Promise<void> {
+  const segments = await displayPathFor(record);
+  const urls = buildFileUrls(config, record.protection, segments, record.linkToken);
+  const ctx = buildPreviewContext(record, segments.join("/"), urls);
   // D-72/D-75: a private file's document reveals nothing to an anonymous requester - no OG, no embedded
   // context, not even the filename. Only the API (given a Bearer) may describe it.
   const head =
@@ -48,12 +60,13 @@ export async function previewByPath(
   config: Config,
   relPath: string,
 ): Promise<void> {
-  const record = await resolveDocumentByPath(relPath);
+  const segments = safeSegments(relPath);
+  const record = segments === null ? null : await resolveDocumentByNames(segments);
   if (record === null) {
     send404(reply);
     return;
   }
-  sendDocument(reply, config, record);
+  await sendDocument(reply, config, record);
 }
 
 export async function previewByToken(
@@ -67,7 +80,7 @@ export async function previewByToken(
     send404(reply);
     return;
   }
-  sendDocument(reply, config, record);
+  await sendDocument(reply, config, record);
 }
 
 // Same grant rule controllers/delivery.ts's authorizePrivate uses (owner, superuser, or an explicit ACL
@@ -82,7 +95,16 @@ async function hasElevatedAccess(
   const claims = await claimsFromBearer(request, config.appOrigin);
   if (claims === null) return false;
   const isOwner = record.ownerSub !== null && claims.sub === record.ownerSub;
-  return isOwner || isSuperuser(claims) || (await hasAclGrant(record.path, claims.sub));
+  return isOwner || isSuperuser(claims) || (await hasAclGrant(record.id, claims.sub));
+}
+
+// D-84: only an authenticated, authorized request for a `private` file gets a signed directUrl - never
+// the anonymous embedded document (D-75 stands: it reveals nothing).
+function withSignedDirectUrl(ctx: PreviewContext, config: Config, record: FileRecord): PreviewContext {
+  if (record.protection !== "private") return ctx;
+  const expiresAt = Math.floor(Date.now() / 1000) + config.deliveryUrlTtlSeconds;
+  const sig = signDelivery(config.deliverySigningSecret, record.id, expiresAt);
+  return { ...ctx, directUrl: `${config.dlOrigin}/s/${record.id}?exp=${expiresAt}&sig=${sig}` };
 }
 
 async function sendContext(
@@ -96,20 +118,22 @@ async function sendContext(
     return;
   }
 
+  const segments = await displayPathFor(record);
+  const urls = buildFileUrls(config, record.protection, segments, record.linkToken);
+  const displayPath = segments.join("/");
+
   if (record.protection === "private") {
     const granted = await hasElevatedAccess(request, config, record);
     if (!granted) {
       reply.code(404).send();
       return;
     }
-    const urls = buildFileUrls(config, record.protection, record.path, record.linkToken);
-    const ctx: PreviewContext = { ...buildPreviewContext(record, urls), isOwner: true };
-    reply.send(ctx);
+    const ctx: PreviewContext = { ...buildPreviewContext(record, displayPath, urls), isOwner: true };
+    reply.send(withSignedDirectUrl(ctx, config, record));
     return;
   }
 
-  const urls = buildFileUrls(config, record.protection, record.path, record.linkToken);
-  const ctx = buildPreviewContext(record, urls);
+  const ctx = buildPreviewContext(record, displayPath, urls);
   const isOwner = await hasElevatedAccess(request, config, record);
   reply.send({ ...ctx, isOwner });
 }
@@ -120,7 +144,8 @@ export async function previewContextByPath(
   config: Config,
   relPath: string,
 ): Promise<void> {
-  const record = await resolveDocumentByPath(relPath);
+  const segments = safeSegments(relPath);
+  const record = segments === null ? null : await resolveDocumentByNames(segments);
   await sendContext(request, reply, config, record);
 }
 
@@ -175,14 +200,21 @@ export async function oembedForUrl(
     return;
   }
 
-  const record = relPath !== null ? await resolveDocumentByPath(relPath) : await resolveByToken(token!);
+  const segments = relPath === null ? null : safeSegments(relPath);
+  const record =
+    relPath !== null
+      ? segments === null
+        ? null
+        : await resolveDocumentByNames(segments)
+      : await resolveByToken(token!);
   if (record === null || record.protection === "private") {
     reply.code(404).send();
     return;
   }
 
-  const urls = buildFileUrls(config, record.protection, record.path, record.linkToken);
-  const ctx = buildPreviewContext(record, urls);
+  const displaySegments = await displayPathFor(record);
+  const urls = buildFileUrls(config, record.protection, displaySegments, record.linkToken);
+  const ctx = buildPreviewContext(record, displaySegments.join("/"), urls);
   const isPhoto = previewKindFor(record.name) === "image" && ctx.width !== null && ctx.height !== null;
 
   reply.send({

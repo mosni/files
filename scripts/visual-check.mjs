@@ -11,7 +11,8 @@
 //     -v "<host-out-dir>:/out" verify-e2e node scripts/visual-check.mjs /out
 //
 // Seeding mirrors e2e/preview.spec.ts exactly: there is no live IdP here, so fixtures are written
-// straight into the shared volume with rows inserted directly, rather than driven through a real upload.
+// straight into the shared volume with rows inserted directly (via the E3 schema - collections + files
+// with surrogate ids, D-81), rather than driven through a real upload.
 
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -36,22 +37,45 @@ const PNG_1PX = Buffer.from(
   "base64",
 );
 
+function newId() {
+  return randomUUID().replace(/-/g, "").slice(0, 16);
+}
+
 // textPreview matters: seeding rows directly means probeMedia() never runs, so leaving it null sends the
 // .txt preview down its iframe fallback instead of the <mosni-code> path - i.e. the check would silently
 // screenshot the wrong branch. Seed what a real ingest would have captured (D-74).
+//
+// D-81: `relPath` keeps its old one-segment-plus-filename shape for every caller below, but is now split
+// into a fresh root-level collection plus a file addressed by a surrogate id - the disk bytes live at
+// `<YYYY>/<mm>/<id>-<name>`, an internal detail the URL never mirrors.
 async function seed(
   conn,
-  { relPath, protection = "public", bytes, width = null, height = null, textPreview = null },
+  { relPath, protection = "public", bytes, width = null, height = null, textPreview = null, ownerSub = null },
 ) {
-  const abs = path.join(STORAGE_ROOT, ...relPath.split("/"));
+  const segments = relPath.split("/");
+  const name = segments[segments.length - 1];
+  const collectionName = segments.slice(0, -1).join("/");
+  const collectionId = newId();
+  const fileId = newId();
+  const diskDir = "2026/07";
+  const diskName = `${fileId}-${name}`;
+
+  const abs = path.join(STORAGE_ROOT, diskDir, diskName);
   await mkdir(path.dirname(abs), { recursive: true });
   await writeFile(abs, bytes);
   const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
+
   await conn.execute(
-    "INSERT INTO files (path, bytes, protection, link_token, width, height, text_preview) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    [relPath, bytes.length, protection, linkToken, width, height, textPreview],
+    "INSERT INTO collections (id, parent_id, name, owner_sub, default_protection) VALUES (?, '', ?, ?, 'unlisted')",
+    [collectionId, collectionName, ownerSub ?? "user:visual-check-fixtures"],
   );
-  return { relPath, linkToken };
+  await conn.execute(
+    `INSERT INTO files
+      (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, width, height, text_preview)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'committed', ?, ?, ?, ?)`,
+    [fileId, collectionId, name, diskDir, diskName, bytes.length, protection, linkToken, ownerSub, width, height, textPreview],
+  );
+  return { relPath, linkToken, fileId };
 }
 
 const run = randomUUID().slice(0, 8);
@@ -64,7 +88,10 @@ const conn = await mysql.createConnection({
   database: process.env.DB_NAME ?? "files",
 });
 
-// Every page state session 010 touched, plus the ones D-70 introduced.
+const WRITER = { sub: "user:visual-check", name: "Hannah", roles: ["files:write"] };
+const NO_ROLE = { sub: "user:visual-check", name: "Hannah", roles: [] };
+
+// Every page state session 010 touched, plus the ones D-70 and E3 introduced.
 const image = await seed(conn, {
   relPath: `vis-${run}/holiday-photo.png`,
   bytes: PNG_1PX,
@@ -88,6 +115,13 @@ const txt = await seed(conn, {
 const zip = await seed(conn, { relPath: `vis-${run}/archive.zip`, bytes: Buffer.from("PK fake zip") });
 const priv = await seed(conn, { relPath: `vis-${run}/confidential.txt`, bytes: Buffer.from("secret"), protection: "private" });
 const secret = await seed(conn, { relPath: `vis-${run}/hidden.txt`, bytes: Buffer.from("hidden"), protection: "secret" });
+// E3/D-89: owned by WRITER, so an authenticated request from WRITER's own token shows the manage controls.
+const owned = await seed(conn, {
+  relPath: `vis-${run}/my-report.pdf`,
+  bytes: Buffer.from("%PDF-1.4 fake"),
+  protection: "unlisted",
+  ownerSub: WRITER.sub,
+});
 
 await conn.end();
 
@@ -105,12 +139,10 @@ const signedInAs = (claims) => `
   });
 `;
 
-const WRITER = { sub: "user:visual-check", name: "Hannah", roles: ["files:write"] };
-const NO_ROLE = { sub: "user:visual-check", name: "Hannah", roles: [] };
-
-// A real, verify()-acceptable token, for the one state that needs an actual completed upload rather than
-// a seeded row: the compact preview card (finding 6). Same issuer the e2e tier uses (mock-idp), reachable
-// from this container the same way (docker-compose.verify.yml).
+// A real, verify()-acceptable token, for states that need a genuinely authorized request rather than a
+// seeded row: the compact preview card (finding 6), and E3's owner manage controls (D-89), which only
+// render once the client's own /api/preview fetch (carrying this Bearer) confirms isOwner. Same issuer
+// the e2e tier uses (mock-idp), reachable from this container the same way (docker-compose.verify.yml).
 async function mintToken(sub, roles = "files:write") {
   const idp = process.env.MOCK_IDP ?? "http://mock-idp:9000";
   const res = await fetch(`${idp}/token?sub=${encodeURIComponent(sub)}&roles=${encodeURIComponent(roles)}`);
@@ -197,6 +229,44 @@ const PAGES = [
         fireDrag(zone, "dragover");
       });
       await p.waitForTimeout(100);
+    },
+  },
+  {
+    id: "landing-destination-picker",
+    label: "Landing - signed in, the Options disclosure expanded (destination picker)",
+    url: "/",
+    note: "G1/G2 (D-42/D-86): collapsed by default; this state opens it to show the collection select " +
+      "and the new-collection field. Must never be the DEFAULT state (D-1's fast path stays three actions).",
+    init: signedInAs(WRITER),
+    interact: async (p) => {
+      await p.locator("details summary").click();
+      await p.waitForTimeout(150);
+    },
+  },
+  {
+    id: "preview-owner-controls",
+    label: "Preview - owner, the manage controls (rename / protection / delete)",
+    url: `/f/${owned.relPath}`,
+    note: "D-89: rename form, protection selector and the Delete button, all owner-only. Requires the " +
+      "background /api/preview refetch (with a real Bearer) to confirm isOwner - the embedded document " +
+      "copy is always isOwner:false (D-75), so this state only appears after that round trip settles.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.waitForSelector("text=Delete file", { timeout: 10_000 }).catch(() => {});
+    },
+  },
+  {
+    id: "preview-delete-confirm",
+    label: "Preview - owner, the delete confirmation step",
+    url: `/f/${owned.relPath}`,
+    note: "D-89: clicking Delete must show a confirm/cancel step, never delete on the first click. This " +
+      "run only opens the confirmation - it never clicks \"Yes, delete\", so the fixture survives for the " +
+      "next state/run.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.waitForSelector("text=Delete file", { timeout: 10_000 }).catch(() => {});
+      await p.locator("button", { hasText: "Delete file" }).click();
+      await p.waitForTimeout(150);
     },
   },
 ];

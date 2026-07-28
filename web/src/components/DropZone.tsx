@@ -94,16 +94,53 @@ async function fetchPreviewContext(previewUrl: string, token: string | null): Pr
   }
 }
 
+type CollectionOption = { id: string; name: string };
+
+function authHeaders(token: string | null): Record<string, string> {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function fetchCollections(token: string | null): Promise<CollectionOption[]> {
+  try {
+    const res = await fetch("/api/collections", { headers: authHeaders(token) });
+    if (!res.ok) return [];
+    return (await res.json()) as CollectionOption[];
+  } catch {
+    return [];
+  }
+}
+
+// G2: creates the typed-in collection name on demand, so a chosen destination is resolved to an id
+// before any file starts uploading. Returns null (falls back to the caller's default, server-side) on
+// any failure - a bad destination must never turn "drop a file" into an error dialog (D-1).
+async function createCollection(token: string | null, name: string): Promise<string | null> {
+  try {
+    const res = await fetch("/api/collections", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(token) },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) return null;
+    return ((await res.json()) as CollectionOption).id;
+  } catch {
+    return null;
+  }
+}
+
 function startUpload(
   file: File,
   token: string | null,
   chunkSize: number,
+  destinationCollectionId: string | null,
   onUpdate: (state: UploadState) => void,
 ) {
   const upload = new tus.Upload(file, {
     endpoint: "/api/upload",
     chunkSize,
-    metadata: { filename: file.name },
+    metadata: {
+      filename: file.name,
+      ...(destinationCollectionId ? { destinationCollectionId } : {}),
+    },
     headers: { Authorization: `Bearer ${token ?? ""}` },
     onProgress: (bytesSent, bytesTotal) => {
       onUpdate({ status: "uploading", progress: Math.round((bytesSent / bytesTotal) * 100), loaded: bytesSent, total: bytesTotal });
@@ -140,6 +177,13 @@ export function DropZone() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragDepth, setDragDepth] = useState(0); // >0 ⇒ a file drag is somewhere over the page
   const [zoneHover, setZoneHover] = useState(false); // a file drag is over the drop zone itself
+
+  // G1/G2 (D-42, D-86): the destination picker. Collapsed by default and never fetched until opened -
+  // D-1's three-action path (open → drop → copy) must never grow a step for anyone who leaves it alone.
+  const [collections, setCollections] = useState<CollectionOption[]>([]);
+  const [destinationCollectionId, setDestinationCollectionId] = useState("");
+  const [newCollectionName, setNewCollectionName] = useState("");
+  const [collectionsLoaded, setCollectionsLoaded] = useState(false);
 
   // Finding 2: dropping a file anywhere gave no visual cue it would even work. Tracked at the window
   // level (not just the zone) so the page-level overlay can invite the drag toward the zone; drop is
@@ -214,9 +258,17 @@ export function DropZone() {
     setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, state } : u)));
   }
 
-  function startUploads(files: File[]) {
+  async function startUploads(files: File[]) {
     if (files.length === 0) return;
     const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
+
+    // A typed-in new-collection name takes priority over a selected existing one; resolved to an id ONCE
+    // per batch, before any file starts, so every dropped file in this batch lands in the same place.
+    let destination = destinationCollectionId || null;
+    if (newCollectionName.trim().length > 0) {
+      destination = await createCollection(token, newCollectionName.trim());
+      setNewCollectionName("");
+    }
 
     // Each file gets its own tus.Upload and its own row - multi-file grouping into a single shared link
     // is a later epic (E6), not this one.
@@ -226,7 +278,7 @@ export function DropZone() {
         ...prev,
         { id, name: file.name, state: { status: "uploading", progress: 0, loaded: 0, total: file.size } },
       ]);
-      startUpload(file, token, chunkSize, (state) => {
+      startUpload(file, token, chunkSize, destination, (state) => {
         updateUpload(id, state);
         if (state.status === "done") {
           void fetchPreviewContext(state.previewUrl, token).then((context) => {
@@ -237,12 +289,19 @@ export function DropZone() {
     });
   }
 
+  function loadCollectionsOnce() {
+    if (collectionsLoaded) return;
+    setCollectionsLoaded(true);
+    const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
+    void fetchCollections(token).then(setCollections);
+  }
+
   function handleInputFiles(fileList: FileList | null) {
     if (!fileList) return;
     const all = Array.from(fileList);
     const files = all.filter((f) => f.size > 0);
     all.filter((f) => f.size === 0).forEach((f) => toastError(`Can't upload "${f.name}" — it's empty.`));
-    startUploads(files);
+    void startUploads(files);
   }
 
   if (!authReady) {
@@ -323,7 +382,7 @@ export function DropZone() {
           rejected.forEach((name) =>
             toastError(`Can't upload "${name}" — folders and empty files aren't supported yet.`),
           );
-          startUploads(files);
+          void startUploads(files);
         }}
         style={
           zoneHover
@@ -353,6 +412,43 @@ export function DropZone() {
           }}
         />
       </div>
+
+      {/* G1 (D-42/D-86): collapsed by default - the fast path (open → drop → copy) is unchanged for
+          anyone who never opens this. Fetches the caller's collections only once opened. */}
+      <details className="panel" onToggle={(event) => event.currentTarget.open && loadCollectionsOnce()}>
+        <summary style={{ cursor: "pointer" }}>Options</summary>
+        <div style={{ display: "grid", gap: "0.75rem", marginTop: "0.75rem" }}>
+          <div>
+            <label htmlFor="destination-select" style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.35rem", color: "var(--mosni-text-muted)" }}>
+              Upload into
+            </label>
+            <select
+              id="destination-select"
+              value={destinationCollectionId}
+              onChange={(event) => setDestinationCollectionId(event.target.value)}
+            >
+              <option value="">Default</option>
+              {collections.map((collection) => (
+                <option key={collection.id} value={collection.id}>
+                  {collection.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label htmlFor="new-collection-name" style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.35rem", color: "var(--mosni-text-muted)" }}>
+              Or create a new collection
+            </label>
+            <input
+              id="new-collection-name"
+              type="text"
+              placeholder="New collection name"
+              value={newCollectionName}
+              onChange={(event) => setNewCollectionName(event.target.value)}
+            />
+          </div>
+        </div>
+      </details>
 
       {uploads.map((upload) => {
         // The compact card renders the filename itself, as its own <h1>. Keeping the row label as well

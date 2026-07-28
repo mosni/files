@@ -9,18 +9,21 @@ vi.mock("../../src/auth/verify.ts", () => ({ verify: vi.fn() }));
 
 import { verify } from "../../src/auth/verify.ts";
 import { registerDeliveryRoutes } from "../../src/routes/delivery.ts";
-import { applySchema, closeDb, getPool, initDb } from "../../src/storage/db.ts";
-import { deleteFileRow, initFilesStorage } from "../../src/storage/files.ts";
+import { applyMigrations, closeDb, getPool, initDb } from "../../src/storage/db.ts";
+import { claimFileRow, commitFileRow, diskRelPath, initFilesStorage } from "../../src/storage/files.ts";
+import { createCollection } from "../../src/storage/collections.ts";
+import { signDelivery } from "../../src/lib/deliverySignature.ts";
 import { makeTestConfig } from "../helpers/testConfig.ts";
 import type { Protection } from "../../src/lib/protection.ts";
+import type { Config } from "../../src/config.ts";
 
 const verifyMock = vi.mocked(verify);
 const DL_HOST = "dl.mosni.dev";
 
-describe("routes/delivery.ts (E5a - the security-critical route, session 007 URL model)", () => {
+describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, signed URLs, own Content-Type)", () => {
   let root: string;
   let app: FastifyInstance;
-  const createdPaths: string[] = [];
+  let config: Config;
 
   beforeAll(async () => {
     initDb({
@@ -30,12 +33,13 @@ describe("routes/delivery.ts (E5a - the security-critical route, session 007 URL
       password: process.env.DB_PASS ?? "filespass",
       database: process.env.DB_NAME ?? "files",
     });
-    await applySchema();
+    await applyMigrations();
     root = await mkdtemp(path.join(os.tmpdir(), "delivery-test-"));
     initFilesStorage(root);
 
+    config = makeTestConfig({ storageRoot: root, deliverySigningSecret: "delivery-test-secret" });
     app = Fastify({ logger: false });
-    await registerDeliveryRoutes(app, makeTestConfig({ storageRoot: root }));
+    await registerDeliveryRoutes(app, config);
     await app.ready();
   }, 30_000);
 
@@ -47,92 +51,109 @@ describe("routes/delivery.ts (E5a - the security-critical route, session 007 URL
 
   afterEach(async () => {
     vi.mocked(verify).mockReset();
-    while (createdPaths.length > 0) await deleteFileRow(createdPaths.pop()!);
   });
 
   async function seed(opts: {
-    relPath?: string;
+    name?: string;
     protection: Protection;
     ownerSub?: string | null;
     content?: string;
-  }): Promise<{ relPath: string; linkToken: string }> {
-    const relPath = opts.relPath ?? `u-${randomUUID()}/file.txt`;
-    createdPaths.push(relPath);
-    const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
+  }): Promise<{ collectionName: string; name: string; linkToken: string; fileId: string }> {
+    const name = opts.name ?? `file-${randomUUID()}.txt`;
+    const collection = await createCollection({
+      parentId: "",
+      name: `c-${randomUUID()}`,
+      ownerSub: opts.ownerSub ?? "user:owner",
+    });
+    const claimed = await claimFileRow({
+      collectionId: collection.id,
+      name,
+      diskDir: "2026/07",
+      diskName: `${randomUUID()}-${name}`,
+      ownerSub: opts.ownerSub ?? "user:no-owner-placeholder",
+      uploaderSub: opts.ownerSub ?? "user:owner",
+      protection: opts.protection,
+    });
     const content = opts.content ?? "content";
-    const abs = path.join(root, ...relPath.split("/"));
+    const abs = path.join(root, ...diskRelPath(claimed).split("/"));
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, content);
-    await getPool().query(
-      "INSERT INTO files (path, bytes, protection, link_token, owner_sub, uploader_sub) VALUES (?, ?, ?, ?, ?, NULL)",
-      [relPath, content.length, opts.protection, linkToken, opts.ownerSub ?? null],
-    );
-    return { relPath, linkToken };
+    await commitFileRow(claimed.id, {
+      bytes: content.length,
+      width: null,
+      height: null,
+      durationSeconds: null,
+      textPreview: null,
+    });
+    return { collectionName: collection.name, name, linkToken: claimed.linkToken, fileId: claimed.id };
   }
 
   const get = (url: string, headers: Record<string, string> = {}) =>
     app.inject({ method: "GET", url, headers: { host: DL_HOST, ...headers } });
 
-  describe("plain-path delivery (/<relpath>)", () => {
+  describe("plain-path delivery (/<collection>/.../<name>)", () => {
     it("serves public and unlisted via X-Accel-Redirect with an empty body and the security headers", async () => {
       for (const protection of ["public", "unlisted"] as const) {
-        const { relPath } = await seed({ protection });
-        const res = await get(`/${relPath}`);
+        const { collectionName, name } = await seed({ protection });
+        const res = await get(`/${collectionName}/${name}`);
         expect(res.statusCode).toBe(200);
         expect(res.body).toBe(""); // Node never streams bytes (D-5)
-        expect(res.headers["x-accel-redirect"]).toBe(`/internal-storage/${relPath}`);
+        expect(res.headers["x-accel-redirect"]).toMatch(/^\/internal-storage\/2026\/07\/.+/);
         expect(res.headers["x-content-type-options"]).toBe("nosniff");
         expect(res.headers["referrer-policy"]).toBe("no-referrer");
       }
     });
 
-    it("serves an arbitrarily nested path (P6 deep nesting)", async () => {
-      const relPath = `d-${randomUUID()}/a/b/c.png`;
-      await seed({ relPath, protection: "public" });
-      const res = await get(`/${relPath}`);
+    it("D-90: sets Content-Type from the DISPLAY name, not the on-disk name", async () => {
+      const { collectionName } = await seed({ name: "report.txt", protection: "public" });
+      // Rename only the DB row (a pure UPDATE, D-82) - the disk name still ends in the OLD extension.
+      const renamed = await getPool().query("SELECT id FROM files WHERE name = ?", ["report.txt"]);
+      const fileId = (renamed[0] as { id: string }[])[0]!.id;
+      await getPool().query("UPDATE files SET name = ? WHERE id = ?", ["report.md", fileId]);
+
+      const res = await get(`/${collectionName}/report.md`);
       expect(res.statusCode).toBe(200);
-      expect(res.headers["x-accel-redirect"]).toBe(`/internal-storage/${relPath}`);
+      // .md is not on the inline allowlist, so it downloads - but Content-Type must still reflect the
+      // CURRENT (renamed) display name, not the pinned-forever disk name's original .txt extension.
+      expect(res.headers["content-type"]).not.toContain("text/plain");
+    });
+
+    it("D-90: a still-.txt display name gets text/plain Content-Type", async () => {
+      const { collectionName } = await seed({ name: "notes.txt", protection: "public" });
+      const res = await get(`/${collectionName}/notes.txt`);
+      expect(res.headers["content-type"]).toContain("text/plain");
     });
 
     it("returns 404 (not 403) for a secret file at its readable path (D-59 mandatory)", async () => {
-      const { relPath } = await seed({ protection: "secret" });
-      expect((await get(`/${relPath}`)).statusCode).toBe(404);
+      const { collectionName, name } = await seed({ protection: "secret" });
+      expect((await get(`/${collectionName}/${name}`)).statusCode).toBe(404);
     });
 
     it("sends Content-Disposition: attachment for a non-allowlisted extension", async () => {
-      const { relPath } = await seed({ relPath: `z-${randomUUID()}/a.zip`, protection: "public" });
-      expect((await get(`/${relPath}`)).headers["content-disposition"]).toContain("attachment");
+      const { collectionName, name } = await seed({ name: "a.zip", protection: "public" });
+      expect((await get(`/${collectionName}/${name}`)).headers["content-disposition"]).toContain("attachment");
     });
 
     it("returns 404 for a path with no row", async () => {
       expect((await get(`/${randomUUID()}/nope.txt`)).statusCode).toBe(404);
     });
 
-    // The URLs handed to users are percent-encoded per segment (buildFileUrls), so a name with a space or
-    // a non-ASCII character only works if the router hands the handler the DECODED path. Every other test
-    // here uses plain ASCII names and would miss a regression in that.
-    it("resolves a percent-encoded name (space and non-ASCII) back to the stored path", async () => {
-      const folder = `enc-${randomUUID()}`;
+    it("resolves a percent-encoded name (space and non-ASCII)", async () => {
       const name = "a b ü.png";
-      const relPath = `${folder}/${name}`;
-      await seed({ relPath, protection: "public" });
-
-      const encoded = `/${folder}/${encodeURIComponent(name)}`;
+      const { collectionName } = await seed({ name, protection: "public" });
+      const encoded = `/${collectionName}/${encodeURIComponent(name)}`;
       const res = await get(encoded);
       expect(res.statusCode).toBe(200);
-      expect(res.headers["x-accel-redirect"]).toBe(
-        `/internal-storage/${folder}/${encodeURIComponent(name)}`,
-      );
       expect(res.headers["content-disposition"]).toContain("filename*=UTF-8''");
     });
   });
 
   describe("token delivery (/t/:token)", () => {
     it("serves a secret file by token even though its readable path 404s", async () => {
-      const { relPath, linkToken } = await seed({ protection: "secret" });
+      const { linkToken } = await seed({ protection: "secret" });
       const res = await get(`/t/${linkToken}`);
       expect(res.statusCode).toBe(200);
-      expect(res.headers["x-accel-redirect"]).toBe(`/internal-storage/${relPath}`);
+      expect(res.headers["x-accel-redirect"]).toMatch(/^\/internal-storage\//);
     });
 
     it("404s an unknown token", async () => {
@@ -142,32 +163,82 @@ describe("routes/delivery.ts (E5a - the security-critical route, session 007 URL
 
   describe("private (security invariant 6 - byte-for-byte sub matching)", () => {
     it("401s with no token, 403s a wrong sub, 200s the owner", async () => {
-      const { relPath } = await seed({ protection: "private", ownerSub: "user:owner" });
-      expect((await get(`/${relPath}`)).statusCode).toBe(401);
+      const { collectionName, name } = await seed({ protection: "private", ownerSub: "user:owner" });
+      expect((await get(`/${collectionName}/${name}`)).statusCode).toBe(401);
 
       verifyMock.mockResolvedValue({ sub: "user:other", roles: [] } as never);
-      expect((await get(`/${relPath}`, { authorization: "Bearer x" })).statusCode).toBe(403);
+      expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(403);
 
       verifyMock.mockResolvedValue({ sub: "user:owner", roles: [] } as never);
-      expect((await get(`/${relPath}`, { authorization: "Bearer x" })).statusCode).toBe(200);
+      expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(200);
     });
 
     it("200s for a mosni_owner superuser regardless of ownership (files:admin dropped)", async () => {
-      const { relPath } = await seed({ protection: "private", ownerSub: "user:owner" });
+      const { collectionName, name } = await seed({ protection: "private", ownerSub: "user:owner" });
       verifyMock.mockResolvedValue({ sub: "user:root", mosni_owner: true, roles: [] } as never);
-      expect((await get(`/${relPath}`, { authorization: "Bearer x" })).statusCode).toBe(200);
+      expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(200);
     });
 
     it("grants an exact ACL sub and refuses a one-character-off near-miss", async () => {
-      const { relPath } = await seed({ protection: "private", ownerSub: "user:owner" });
+      const { collectionName, name, fileId } = await seed({ protection: "private", ownerSub: "user:owner" });
       const grantedSub = `user:${randomUUID()}`;
-      await getPool().query("INSERT INTO file_acl (path, sub) VALUES (?, ?)", [relPath, grantedSub]);
+      await getPool().query("INSERT INTO file_acl (file_id, sub) VALUES (?, ?)", [fileId, grantedSub]);
 
       verifyMock.mockResolvedValue({ sub: grantedSub, roles: [] } as never);
-      expect((await get(`/${relPath}`, { authorization: "Bearer x" })).statusCode).toBe(200);
+      expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(200);
 
       verifyMock.mockResolvedValue({ sub: grantedSub.slice(0, -1), roles: [] } as never);
-      expect((await get(`/${relPath}`, { authorization: "Bearer x" })).statusCode).toBe(403);
+      expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(403);
+    });
+  });
+
+  describe("signed delivery (/s/:id) - D-84", () => {
+    it("serves a private file's bytes given a valid, unexpired signature - no Bearer needed", async () => {
+      const { fileId } = await seed({ protection: "private", ownerSub: "user:owner" });
+      const exp = Math.floor(Date.now() / 1000) + 300;
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+
+      const res = await get(`/s/${fileId}?exp=${exp}&sig=${sig}`);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toBe("");
+      expect(res.headers["x-accel-redirect"]).toMatch(/^\/internal-storage\//);
+    });
+
+    it("404s an expired signature", async () => {
+      const { fileId } = await seed({ protection: "private", ownerSub: "user:owner" });
+      const exp = Math.floor(Date.now() / 1000) - 10;
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+      expect((await get(`/s/${fileId}?exp=${exp}&sig=${sig}`)).statusCode).toBe(404);
+    });
+
+    it("404s a tampered signature", async () => {
+      const { fileId } = await seed({ protection: "private", ownerSub: "user:owner" });
+      const exp = Math.floor(Date.now() / 1000) + 300;
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+      const tampered = sig.slice(0, -1) + (sig.at(-1) === "A" ? "B" : "A");
+      expect((await get(`/s/${fileId}?exp=${exp}&sig=${tampered}`)).statusCode).toBe(404);
+    });
+
+    it("404s a signature for a DIFFERENT file id", async () => {
+      const { fileId: fileA } = await seed({ protection: "private", ownerSub: "user:owner" });
+      const { fileId: fileB } = await seed({ protection: "private", ownerSub: "user:owner" });
+      const exp = Math.floor(Date.now() / 1000) + 300;
+      const sigForA = signDelivery(config.deliverySigningSecret, fileA, exp);
+      expect((await get(`/s/${fileB}?exp=${exp}&sig=${sigForA}`)).statusCode).toBe(404);
+    });
+
+    it("404s with missing exp/sig query params", async () => {
+      const { fileId } = await seed({ protection: "private", ownerSub: "user:owner" });
+      expect((await get(`/s/${fileId}`)).statusCode).toBe(404);
+    });
+
+    it("sets no cookie and reads no Authorization header at all (D-33)", async () => {
+      const { fileId } = await seed({ protection: "private", ownerSub: "user:owner" });
+      const exp = Math.floor(Date.now() / 1000) + 300;
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+      const res = await get(`/s/${fileId}?exp=${exp}&sig=${sig}`, { authorization: "Bearer garbage-never-checked" });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["set-cookie"]).toBeUndefined();
     });
   });
 });

@@ -14,6 +14,11 @@ export type Config = {
   storageRoot: string;
   tusTempDir: string;
   port: number;
+  // D-84: signs dl.mosni.dev/s/<id>?exp=&sig= URLs. A box provisioning prerequisite of the same class as
+  // DB_PASS - required (never defaulted), so an unset secret fails boot loudly instead of silently
+  // signing every URL with the empty string.
+  deliverySigningSecret: string;
+  deliveryUrlTtlSeconds: number;
 };
 
 const REQUIRED = [
@@ -29,7 +34,10 @@ const REQUIRED = [
   "DL_ORIGIN",
   "STORAGE_ROOT",
   "PORT",
+  "DELIVERY_SIGNING_SECRET",
 ] as const;
+
+const DEFAULT_DELIVERY_URL_TTL_SECONDS = 300;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const missing = REQUIRED.filter((key) => !env[key]);
@@ -59,5 +67,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // upload commit scans the destination directory for name collisions.
     tusTempDir: path.join(env.STORAGE_ROOT!, ".tus"),
     port: Number(env.PORT),
+    deliverySigningSecret: env.DELIVERY_SIGNING_SECRET!,
+    deliveryUrlTtlSeconds: env.DELIVERY_URL_TTL_SECONDS
+      ? Number(env.DELIVERY_URL_TTL_SECONDS)
+      : DEFAULT_DELIVERY_URL_TTL_SECONDS,
   };
 }

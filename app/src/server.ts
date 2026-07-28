@@ -6,7 +6,7 @@ import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import type { Redis } from "ioredis";
 import { loadConfig, type Config } from "./config.ts";
-import { applySchema, initDb } from "./storage/db.ts";
+import { applyMigrations, initDb } from "./storage/db.ts";
 import { getRedisClient, initRedis } from "./storage/redis.ts";
 import { initAudit } from "./storage/audit.ts";
 import { initFilesStorage } from "./storage/files.ts";
@@ -18,6 +18,7 @@ import { registerMetaRoutes } from "./routes/meta.ts";
 import { registerUploadRoutes } from "./routes/upload.ts";
 import { registerDeliveryRoutes } from "./routes/delivery.ts";
 import { registerPreviewRoutes } from "./routes/preview.ts";
+import { registerManageRoutes } from "./routes/manage.ts";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 // D-48: the SPA is built into the image (web/dist, alongside this built server at app/dist/server.js)
@@ -129,6 +130,9 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
   await registerUploadRoutes(app, config, redis);
   await registerDeliveryRoutes(app, config);
   await registerPreviewRoutes(app, config);
+  // E3: the app's first mutating API (rename/delete/protection-change for files and collections).
+  // files.mosni.dev-only, same containment reasoning as upload/preview above.
+  await registerManageRoutes(app, config);
 
   // Renders a real .tsx view through renderToString (technical-baseline.md §1: React SSR via JSX). This
   // is also what makes D-44 verifiable rather than assumed - JSX cannot be type-stripped, so a server
@@ -161,9 +165,9 @@ export async function start(): Promise<FastifyInstance> {
   const app = await buildServer(getRedisClient(), config);
 
   try {
-    await applySchema();
+    await applyMigrations();
   } catch (err) {
-    app.log.error(err, "applySchema failed on boot - continuing; a newly-added table/column may be missing");
+    app.log.error(err, "applyMigrations failed on boot - continuing; a newly-added table/column may be missing");
   }
   await registerGrantableRoles();
 

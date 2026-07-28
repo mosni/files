@@ -10,6 +10,8 @@ import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 
 function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
   return {
+    id: "file0000000000id",
+    collectionId: "coll000000000000",
     name: "photo.png",
     path: "photo.png",
     bytes: 2_400_000,
@@ -269,13 +271,28 @@ describe("PreviewPage", () => {
     expect(video?.hasAttribute("controls")).toBe(true);
   });
 
-  it("renders an iframe for kind text", () => {
-    embedContext(makeContext({ kind: "text", mimeType: "text/plain", name: "notes.txt" }));
+  it("renders an iframe for kind text when there is no captured textPreview", () => {
+    embedContext(makeContext({ kind: "text", mimeType: "text/plain", name: "notes.txt", textPreview: null }));
     vi.stubGlobal("fetch", vi.fn());
 
     renderAt("/f/notes.txt");
 
     expect(container.querySelector("iframe")).not.toBeNull();
+  });
+
+  // session 013 debt: PreviewCard's CodeBlock (mosni-code wrapper) had no coverage at any tier.
+  it("renders <mosni-code> instead of an iframe for kind text when a textPreview was captured at ingest", () => {
+    embedContext(
+      makeContext({ kind: "text", mimeType: "text/plain", name: "notes.txt", textPreview: "Hello from the file." }),
+    );
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/notes.txt");
+
+    expect(container.querySelector("iframe")).toBeNull();
+    const code = container.querySelector("mosni-code");
+    expect(code).not.toBeNull();
+    expect(code?.textContent).toBe("Hello from the file.");
   });
 
   it("renders the download card for kind other", () => {
