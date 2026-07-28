@@ -107,6 +107,25 @@ function withSignedDirectUrl(ctx: PreviewContext, config: Config, record: FileRe
   return { ...ctx, directUrl: `${config.dlOrigin}/s/${record.id}?exp=${expiresAt}&sig=${sig}` };
 }
 
+// The context an already-authorized owner sees: current display path, current URLs (which change shape
+// when protection does - `secret` moves both links onto /t/<token>), and a D-84 signed directUrl when the
+// file is `private`, so its bytes still render in its own preview.
+//
+// Exported because controllers/manage.ts returns exactly this from a successful PATCH /api/files/:id.
+// Both a rename and a protection change invalidate previewUrl/directUrl, and the SPA cannot recompute
+// them (it never sees the link_token) - so the mutation response has to carry them, or the page keeps
+// offering the URL the mutation just retired. Sharing this builder is what keeps the two answers
+// identical; a second copy in manage.ts would be one refactor away from disagreeing.
+export async function ownerContextFor(config: Config, record: FileRecord): Promise<PreviewContext> {
+  const segments = await displayPathFor(record);
+  const urls = buildFileUrls(config, record.protection, segments, record.linkToken);
+  const ctx: PreviewContext = {
+    ...buildPreviewContext(record, segments.join("/"), urls),
+    isOwner: true,
+  };
+  return withSignedDirectUrl(ctx, config, record);
+}
+
 async function sendContext(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -118,20 +137,19 @@ async function sendContext(
     return;
   }
 
-  const segments = await displayPathFor(record);
-  const urls = buildFileUrls(config, record.protection, segments, record.linkToken);
-  const displayPath = segments.join("/");
-
   if (record.protection === "private") {
     const granted = await hasElevatedAccess(request, config, record);
     if (!granted) {
       reply.code(404).send();
       return;
     }
-    const ctx: PreviewContext = { ...buildPreviewContext(record, displayPath, urls), isOwner: true };
-    reply.send(withSignedDirectUrl(ctx, config, record));
+    reply.send(await ownerContextFor(config, record));
     return;
   }
+
+  const segments = await displayPathFor(record);
+  const urls = buildFileUrls(config, record.protection, segments, record.linkToken);
+  const displayPath = segments.join("/");
 
   const ctx = buildPreviewContext(record, displayPath, urls);
   const isOwner = await hasElevatedAccess(request, config, record);

@@ -13,7 +13,9 @@ import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
 import { can, isSuperuser, type Claims, type VerifiedClaims } from "../lib/roles.ts";
 import type { Protection } from "../lib/protection.ts";
+import { isReservedRootName, safeSegment } from "../lib/paths.ts";
 import { actorLabel } from "../lib/audit.ts";
+import { ownerContextFor } from "./preview.ts";
 import { emitAuditEvent } from "../storage/audit.ts";
 import {
   canUploadTo,
@@ -46,6 +48,23 @@ async function requireClaims(
   return claims;
 }
 
+// A display name IS a URL segment: post-D-81 both `/f/<collection>/.../<name>` and `dl.mosni.dev/...`
+// resolve through the database BY display name, and routes/preview.ts + routes/delivery.ts reject any
+// segment failing safeSegment() before they ever query. So a name this API accepts but safeSegment()
+// would not is a name whose own readable link can never resolve again - the row survives, the `/t/<token>`
+// link keeps working, and the app's own copy control quietly offers a dead URL. Uploads have always run
+// their filename through safeSegment(); rename and collection-create must apply exactly the same rule, or
+// the boundary is only half a boundary.
+//
+// `reservedRoot` additionally rejects a root-level collection name that would shadow a static route
+// (lib/paths.ts's isReservedRootName). Returns null when the name is unusable.
+function validatedName(value: string, opts: { rootLevel: boolean }): string | null {
+  const safe = safeSegment(value);
+  if (safe === null) return null;
+  if (opts.rootLevel && isReservedRootName(safe)) return null;
+  return safe;
+}
+
 function isDuplicateNameError(err: unknown, constraintName: string): boolean {
   return (
     typeof err === "object" &&
@@ -65,9 +84,6 @@ function collectionResponse(record: CollectionRecord) {
   };
 }
 
-function fileResponse(record: FileRecord) {
-  return { id: record.id, name: record.name, protection: record.protection };
-}
 
 // --- Collections ------------------------------------------------------------------------------------
 
@@ -89,6 +105,12 @@ export async function createCollectionHandler(
   const body = request.body as { parentId?: string; name: string };
   const parentId = body.parentId ?? "";
 
+  const name = validatedName(body.name, { rootLevel: parentId === "" });
+  if (name === null) {
+    reply.code(400).send({ error: "invalid_name" });
+    return;
+  }
+
   if (parentId !== "") {
     const parent = await resolveCollectionById(parentId);
     if (parent === null || !(await canUploadTo(parent, claims))) {
@@ -98,7 +120,7 @@ export async function createCollectionHandler(
   }
 
   try {
-    const created = await createCollection({ parentId, name: body.name, ownerSub: claims.sub });
+    const created = await createCollection({ parentId, name, ownerSub: claims.sub });
     reply.code(201).send(collectionResponse(created));
   } catch (err) {
     if (isDuplicateNameError(err, "uniq_sibling_name")) {
@@ -136,8 +158,13 @@ export async function updateCollectionHandler(
 
   const body = request.body as { name?: string; defaultProtection?: string };
   if (body.name !== undefined && body.name !== collection.name) {
+    const name = validatedName(body.name, { rootLevel: collection.parentId === "" });
+    if (name === null) {
+      reply.code(400).send({ error: "invalid_name" });
+      return;
+    }
     try {
-      await renameCollection(id, body.name);
+      await renameCollection(id, name);
     } catch (err) {
       if (isDuplicateNameError(err, "uniq_sibling_name")) {
         reply.code(409).send({ error: "name_taken" });
@@ -217,8 +244,13 @@ export async function updateFileHandler(
 
   const body = request.body as { name?: string; protection?: string };
   if (body.name !== undefined && body.name !== record.name) {
+    const name = validatedName(body.name, { rootLevel: false });
+    if (name === null) {
+      reply.code(400).send({ error: "invalid_name" });
+      return;
+    }
     try {
-      await renameFile(id, body.name);
+      await renameFile(id, name);
     } catch (err) {
       if (isDuplicateNameError(err, "uniq_name_in_collection")) {
         reply.code(409).send({ error: "name_taken" });
@@ -242,8 +274,10 @@ export async function updateFileHandler(
     });
   }
 
+  // The full preview context, not just the changed fields: a rename or a protection change retires the
+  // file's previewUrl/directUrl, and the SPA has no way to recompute them (it never sees the link_token).
   const updated = await resolveById(id);
-  reply.send(fileResponse(updated!));
+  reply.send(await ownerContextFor(config, updated!));
 }
 
 export async function deleteFileHandler(

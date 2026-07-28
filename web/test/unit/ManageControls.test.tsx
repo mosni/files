@@ -68,7 +68,11 @@ describe("ManageControls (D-89: rename, protection, delete - owner-only)", () =>
 
   it("renames: submits PATCH /api/files/:id with the new name and the Bearer, then calls onUpdate", async () => {
     (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
-    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(makeContext({ name: "renamed.png" })),
+    });
     vi.stubGlobal("fetch", fetchSpy);
     const onUpdate = vi.fn();
     const ctx = makeContext();
@@ -129,7 +133,11 @@ describe("ManageControls (D-89: rename, protection, delete - owner-only)", () =>
 
   it("changes protection: PATCH with the new level and the Bearer, then calls onUpdate", async () => {
     (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
-    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(makeContext({ protection: "private" })),
+    });
     vi.stubGlobal("fetch", fetchSpy);
     const onUpdate = vi.fn();
     const ctx = makeContext({ protection: "unlisted" });
@@ -154,6 +162,68 @@ describe("ManageControls (D-89: rename, protection, delete - owner-only)", () =>
       }),
     );
     expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ protection: "private" }));
+  });
+
+  // Review session 017: the PATCH response carries the whole updated context, and it must be applied
+  // wholesale. Patching only the field we sent left CopyLink showing the URL the change had just retired
+  // - most visibly on a switch to `secret`, where both links move onto /t/<token>, and on a switch to
+  // `private`, where the image needs the freshly signed directUrl to keep rendering.
+  it("applies the URLs the server returns, not a locally patched copy of the old ones", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
+    const serverContext = makeContext({
+      protection: "secret",
+      previewUrl: "https://files.mosni.dev/t/Ab3xY",
+      directUrl: "https://dl.mosni.dev/t/Ab3xY",
+    });
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve(serverContext) });
+    vi.stubGlobal("fetch", fetchSpy);
+    const onUpdate = vi.fn();
+
+    act(() => {
+      root.render(<ManageControls context={makeContext({ protection: "unlisted" })} onUpdate={onUpdate} />);
+    });
+
+    const select = container.querySelector("select") as HTMLSelectElement;
+    await act(async () => {
+      setNativeInputValue(select, "secret");
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      await flush();
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        protection: "secret",
+        previewUrl: "https://files.mosni.dev/t/Ab3xY",
+        directUrl: "https://dl.mosni.dev/t/Ab3xY",
+      }),
+    );
+  });
+
+  it("a 400 on rename explains the name was rejected, rather than reporting a generic failure", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ error: "invalid_name" }),
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    act(() => {
+      root.render(<ManageControls context={makeContext()} />);
+    });
+
+    const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
+    act(() => {
+      setNativeInputValue(input, "a/b.png");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const form = container.querySelector("form") as HTMLFormElement;
+    await act(async () => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await flush();
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("slashes");
   });
 
   it("compact mode renders ONLY the protection selector - no rename form, no delete", () => {

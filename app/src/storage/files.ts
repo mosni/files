@@ -8,7 +8,7 @@
 
 import { stat, unlink } from "node:fs/promises";
 import type { RowDataPacket } from "mysql2/promise";
-import { resolveRelPath } from "../lib/paths.ts";
+import { resolveRelPath, suffixForCollision } from "../lib/paths.ts";
 import type { Protection } from "../lib/protection.ts";
 import { generateLinkToken } from "../lib/tokens.ts";
 import { generateId } from "../lib/ids.ts";
@@ -168,18 +168,25 @@ export async function hasAclGrant(fileId: string, sub: string): Promise<boolean>
   return rows.length > 0;
 }
 
-function isLinkTokenDuplicate(err: unknown): boolean {
+function isDuplicateOf(err: unknown, pattern: RegExp): boolean {
   return (
     typeof err === "object" &&
     err !== null &&
     (err as { code?: string }).code === "ER_DUP_ENTRY" &&
-    /link_token|uniq_link_token/.test((err as { message?: string }).message ?? "")
+    pattern.test((err as { message?: string }).message ?? "")
   );
 }
 
 // D-85, phase 1: claim a `pending` row (fresh id, disk location decided, but bytes not moved into place
 // yet) before anything touches the filesystem. `bytes` starts at 0 and is meaningless until commitFileRow
 // - pending rows are never returned by any lookup above, so nobody can observe the placeholder value.
+//
+// Display-name collisions are resolved HERE rather than by the caller, because the INSERT is the only
+// point that can actually detect one. A caller that read the sibling names first and suffixed against
+// that list is racing: two concurrent uploads of the same filename both read the same list, both pick the
+// same name, and the second one's INSERT dies on uniq_name_in_collection (AC11 requires it to succeed as a
+// second, distinct file). Retrying against a freshly-read list closes that window - `name` is therefore a
+// REQUESTED name, and the returned record's `name` is the one actually taken.
 export async function claimFileRow(params: {
   // Optional: lets a caller that needs the id BEFORE this call returns (upload.ts builds diskName as
   // "<id>-<originalFilename>", so it must know the id up front) generate it with lib/ids.ts's
@@ -196,7 +203,10 @@ export async function claimFileRow(params: {
 }): Promise<FileRecord> {
   const pool = getPool();
   const id = params.id ?? generateId();
-  for (let attempt = 0; attempt < 5; attempt++) {
+  // The requested name is only re-suffixed after a collision actually happens, so a name with no
+  // conflict is stored exactly as asked for.
+  let name = params.name;
+  for (let attempt = 0; attempt < 10; attempt++) {
     const linkToken = generateLinkToken();
     const createdAt = new Date();
     try {
@@ -207,7 +217,7 @@ export async function claimFileRow(params: {
         [
           id,
           params.collectionId,
-          params.name,
+          name,
           params.diskDir,
           params.diskName,
           params.protection,
@@ -220,7 +230,7 @@ export async function claimFileRow(params: {
       return {
         id,
         collectionId: params.collectionId,
-        name: params.name,
+        name,
         diskDir: params.diskDir,
         diskName: params.diskName,
         bytes: 0,
@@ -235,11 +245,17 @@ export async function claimFileRow(params: {
         textPreview: null,
       };
     } catch (err) {
-      if (isLinkTokenDuplicate(err)) continue; // regenerate the token and retry
+      if (isDuplicateOf(err, /link_token|uniq_link_token/)) continue; // regenerate the token and retry
+      if (isDuplicateOf(err, /uniq_name_in_collection/)) {
+        // Always re-suffix from the ORIGINAL requested name against a freshly-read sibling list, never
+        // from the previous candidate - suffixing "dup(2).txt" again would produce "dup(2)(2).txt".
+        name = suffixForCollision(params.name, await listNamesInCollection(params.collectionId));
+        continue;
+      }
       throw err;
     }
   }
-  throw new Error("storage/files: could not generate a unique link token after 5 attempts");
+  throw new Error(`storage/files: could not claim a row for "${params.name}" after 10 attempts`);
 }
 
 // D-85, phase 2: the bytes are already at their final disk location (the caller moved them) by the time
@@ -272,12 +288,14 @@ export async function abandonFileRow(id: string): Promise<void> {
   await deleteFileRow(id);
 }
 
-// Display names already taken within a collection - what upload.ts's suffixForCollision() needs to avoid
-// a duplicate `name` (uniq_name_in_collection). Only committed rows matter: a `pending` row's name is not
-// yet a real occupant of the collection (its upload might still fail and never commit).
+// Display names already taken within a collection - what claimFileRow's collision retry suffixes against.
+// This deliberately includes `pending` rows: uniq_name_in_collection constrains every row regardless of
+// state, so a list that skipped pending names would keep proposing a name an in-flight upload already
+// holds and the retry would never converge. A pending name is released again by abandonFileRow if that
+// upload fails.
 export async function listNamesInCollection(collectionId: string): Promise<string[]> {
   const [rows] = await getPool().query<RowDataPacket[]>(
-    "SELECT name FROM files WHERE collection_id = ? AND state = 'committed'",
+    "SELECT name FROM files WHERE collection_id = ?",
     [collectionId],
   );
   return (rows as { name: string }[]).map((row) => row.name);

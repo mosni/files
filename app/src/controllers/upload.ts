@@ -18,7 +18,7 @@ import { FileStore } from "@tus/file-store";
 import type { Config } from "../config.ts";
 import { verify } from "../auth/verify.ts";
 import { can, type VerifiedClaims } from "../lib/roles.ts";
-import { resolveRelPath, safeSegment, suffixForCollision } from "../lib/paths.ts";
+import { isReservedRootName, resolveRelPath, safeSegment } from "../lib/paths.ts";
 import { buildFileUrls } from "../lib/fileUrls.ts";
 import { generateId, ID_LENGTH } from "../lib/ids.ts";
 import { actorLabel } from "../lib/audit.ts";
@@ -28,7 +28,6 @@ import {
   commitFileRow,
   currentDiskDir,
   diskRelPath,
-  listNamesInCollection,
 } from "../storage/files.ts";
 import {
   canUploadTo,
@@ -44,11 +43,6 @@ import { emitAuditEvent } from "../storage/audit.ts";
 interface RequestWithClaims extends http.IncomingMessage {
   filesClaims?: VerifiedClaims;
 }
-
-// dl.mosni.dev/t/<token> is the token delivery route, so a top-level collection literally named "t" would
-// shadow single-file token URLs. It is the one reserved top-level name (preliminary-review P6 collapsed
-// the old five-name reserved set to this).
-const RESERVED_ROOTS = new Set(["t"]);
 
 // tus errors: throwing an object shaped like this from a hook makes @tus/server's own error handler send
 // exactly this status/body (confirmed by reading its Server.handle() onError, which reads
@@ -71,7 +65,8 @@ function deriveDefaultCollectionName(claims: VerifiedClaims): string | null {
   const fromName = typeof claims.name === "string" ? safeSegment(claims.name) : null;
   const name = fromName ?? opaqueNameForSub(claims.sub);
   if (name === null) return null;
-  return RESERVED_ROOTS.has(name) ? `${name}-files` : name;
+  // The reserved-root set itself now lives in lib/paths.ts, so the manage API applies the same one.
+  return isReservedRootName(name) ? `${name}-files` : name;
 }
 
 // Session 016 (Hannah's report, 2026-07-28): the raw `sub` must never be the fallback here - subs look
@@ -175,10 +170,10 @@ export function buildTusServer(config: Config): TusServer {
 
       // Display-name collision suffixing is now purely cosmetic (D-81: the disk name can never collide,
       // since it is prefixed with a fresh id) - but siblings still cannot share a `name` in the DB
-      // (uniq_name_in_collection), so a collision still needs resolving before the claim.
-      const taken = await listNamesInCollection(collection.id);
-      const finalName = suffixForCollision(safeName, taken);
-
+      // (uniq_name_in_collection). Resolving it is claimFileRow's job, not this one's: reading the sibling
+      // names here and suffixing against that snapshot is a read-then-write race, and two same-named
+      // uploads in flight at once both read the same snapshot (AC11). claimFileRow retries against a fresh
+      // list on the INSERT that actually detects the clash, and returns the name it really took.
       const id = generateId();
       const diskDir = currentDiskDir();
       const diskName = `${id}-${safeName}`; // the ORIGINAL uploaded name, pinned forever (D-82) - never
@@ -188,7 +183,7 @@ export function buildTusServer(config: Config): TusServer {
       const claimed = await claimFileRow({
         id,
         collectionId: collection.id,
-        name: finalName,
+        name: safeName,
         diskDir,
         diskName,
         ownerSub: claims.sub,
@@ -236,13 +231,13 @@ export function buildTusServer(config: Config): TusServer {
         emitAuditEvent({
           action: "upload",
           actor: actorLabel(claims),
-          target: finalName,
+          target: record.name,
           protection: record.protection,
           bytes: size,
           collection: collectionSegments.join("/"),
         });
 
-        const urls = buildFileUrls(config, record.protection, [...collectionSegments, finalName], record.linkToken);
+        const urls = buildFileUrls(config, record.protection, [...collectionSegments, record.name], record.linkToken);
         return {
           res,
           // The tus PATCH response is 204, and Node's http.ServerResponse drops any body on a 204 at the

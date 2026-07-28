@@ -265,4 +265,51 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
       expect(await hasAclGrant(id, `user:${randomUUID()}`)).toBe(false);
     });
   });
+
+  // Review session 017 - acceptance criterion 11: "Two CONCURRENT same-named uploads into one collection
+  // produce two distinct files." The suffixing used to happen in controllers/upload.ts, against a sibling
+  // list read BEFORE the insert: two uploads in flight at once both read the same list, both picked the
+  // same name, and the second one's INSERT died on uniq_name_in_collection. Resolving the collision inside
+  // claimFileRow - at the insert that actually detects it - is what makes the criterion hold.
+  describe("claimFileRow display-name collisions (AC11)", () => {
+    it("suffixes a sequential same-name claim", async () => {
+      const collectionId = await seedCollection();
+      const first = await claim(collectionId, "dup.txt");
+      const second = await claim(collectionId, "dup.txt");
+      expect(first.name).toBe("dup.txt");
+      expect(second.name).toBe("dup(2).txt");
+    });
+
+    it("resolves CONCURRENT same-name claims into two distinct rows", async () => {
+      const collectionId = await seedCollection();
+      const claimed = await Promise.all([
+        claim(collectionId, "race.txt"),
+        claim(collectionId, "race.txt"),
+        claim(collectionId, "race.txt"),
+      ]);
+
+      const names = claimed.map((c) => c.name).sort();
+      const ids = new Set(claimed.map((c) => c.id));
+      expect(ids.size).toBe(3);
+      expect(new Set(names).size).toBe(3); // no two rows share a display name
+      expect(names).toContain("race.txt");
+      // The suffix is never applied twice over ("race(2)(2).txt") - it is always recomputed from the
+      // originally requested name.
+      for (const name of names) expect(name).toMatch(/^race(\(\d+\))?\.txt$/);
+    });
+
+    async function claim(collectionId: string, name: string) {
+      const claimed = await claimFileRow({
+        collectionId,
+        name,
+        diskDir: "2026/07",
+        diskName: `${randomUUID()}-${name}`,
+        ownerSub: "user:owner",
+        uploaderSub: "user:owner",
+        protection: "unlisted",
+      });
+      createdFileIds.push(claimed.id);
+      return claimed;
+    }
+  });
 });

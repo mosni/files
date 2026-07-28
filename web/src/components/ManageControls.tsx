@@ -32,6 +32,19 @@ async function patchFile(id: string, body: Record<string, unknown>): Promise<Res
   });
 }
 
+// A rename or a protection change retires the file's previewUrl/directUrl - `secret` moves both links
+// onto /t/<token>, and `private` needs a freshly signed directUrl for its bytes to keep rendering. The
+// client cannot recompute either (it never sees the link_token), so the PATCH response carries the whole
+// updated context and it is applied wholesale. Patching only the field we sent would leave the copy
+// control offering the URL the change just retired.
+async function updatedContext(res: Response, fallback: PreviewContext): Promise<PreviewContext> {
+  try {
+    return (await res.json()) as PreviewContext;
+  } catch {
+    return fallback; // a body we can't read must not wipe the rendered state
+  }
+}
+
 export function ManageControls({
   context,
   onUpdate,
@@ -60,11 +73,17 @@ export function ManageControls({
         setRenameError(`"${name}" is already used here - choose another name.`);
         return;
       }
+      // The server validates a display name exactly as it validates an uploaded filename (it becomes a
+      // URL segment), so say which shapes are rejected rather than the generic failure.
+      if (res.status === 400) {
+        setRenameError("That name can't be used - no slashes, and no leading or trailing spaces.");
+        return;
+      }
       if (!res.ok) {
         setRenameError("Rename failed.");
         return;
       }
-      onUpdate?.({ ...context, name });
+      onUpdate?.(await updatedContext(res, { ...context, name }));
     } finally {
       setRenaming(false);
     }
@@ -78,7 +97,7 @@ export function ManageControls({
       setProtection(previous); // the request failed - don't leave the control lying about the real state
       return;
     }
-    onUpdate?.({ ...context, protection: next });
+    onUpdate?.(await updatedContext(res, { ...context, protection: next }));
   }
 
   async function confirmDelete() {

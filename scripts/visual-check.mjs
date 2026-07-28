@@ -48,6 +48,24 @@ function newId() {
 // D-81: `relPath` keeps its old one-segment-plus-filename shape for every caller below, but is now split
 // into a fresh root-level collection plus a file addressed by a surrogate id - the disk bytes live at
 // `<YYYY>/<mm>/<id>-<name>`, an internal detail the URL never mirrors.
+// Collections are keyed (parent_id, name) UNIQUE, and every fixture below shares one `vis-<run>/` prefix -
+// so the collection has to be created once and reused. Creating a fresh one per fixture (as the first
+// E3 version of this script did) fails on the SECOND seed with ER_DUP_ENTRY, which made the script
+// unrunnable end to end; it was written in session 015 but never executed there, so nothing caught it.
+const collectionIdsByName = new Map();
+
+async function collectionFor(conn, name, ownerSub) {
+  const existing = collectionIdsByName.get(name);
+  if (existing !== undefined) return existing;
+  const id = newId();
+  await conn.execute(
+    "INSERT INTO collections (id, parent_id, name, owner_sub, default_protection) VALUES (?, '', ?, ?, 'unlisted')",
+    [id, name, ownerSub],
+  );
+  collectionIdsByName.set(name, id);
+  return id;
+}
+
 async function seed(
   conn,
   { relPath, protection = "public", bytes, width = null, height = null, textPreview = null, ownerSub = null },
@@ -55,7 +73,7 @@ async function seed(
   const segments = relPath.split("/");
   const name = segments[segments.length - 1];
   const collectionName = segments.slice(0, -1).join("/");
-  const collectionId = newId();
+  const collectionId = await collectionFor(conn, collectionName, ownerSub ?? "user:visual-check-fixtures");
   const fileId = newId();
   const diskDir = "2026/07";
   const diskName = `${fileId}-${name}`;
@@ -65,10 +83,6 @@ async function seed(
   await writeFile(abs, bytes);
   const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
 
-  await conn.execute(
-    "INSERT INTO collections (id, parent_id, name, owner_sub, default_protection) VALUES (?, '', ?, ?, 'unlisted')",
-    [collectionId, collectionName, ownerSub ?? "user:visual-check-fixtures"],
-  );
   await conn.execute(
     `INSERT INTO files
       (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, width, height, text_preview)

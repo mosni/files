@@ -163,6 +163,38 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       expect(res.statusCode).toBe(201);
       expect(res.json()).toMatchObject({ parentId: parent.id });
     });
+
+    // Review session 017: collection names are URL segments too, and this endpoint is user-facing (Wave
+    // G's "new collection" field types straight into it).
+    it.each([["x/y"], [".."], [" lead"], ["ctl\u0001"]])(
+      "rejects a collection name of %j with 400",
+      async (hostile) => {
+        asUser("user:creator");
+        const res = await req("POST", "/api/collections", { token: "t", body: { name: hostile } });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({ error: "invalid_name" });
+      },
+    );
+
+    // `/t/:token` is a static route on both origins and outranks the `/*` wildcard, so a ROOT collection
+    // named "t" makes every file inside it unreachable by its readable link. controllers/upload.ts has
+    // always guarded the DERIVED default name against this; the user-facing endpoint did not.
+    it("rejects a root-level collection named \"t\" (it would shadow /t/<token>)", async () => {
+      asUser("user:creator");
+      const res = await req("POST", "/api/collections", { token: "t", body: { name: "t" } });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: "invalid_name" });
+    });
+
+    it("allows a NESTED collection named \"t\" (only the root level shadows a route)", async () => {
+      asUser("user:nester-t");
+      const parent = await seedCollection("user:nester-t");
+      const res = await req("POST", "/api/collections", {
+        token: "t",
+        body: { parentId: parent.id, name: "t" },
+      });
+      expect(res.statusCode).toBe(201);
+    });
   });
 
   describe("PATCH /api/collections/:id", () => {
@@ -203,6 +235,21 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       });
       expect(res.statusCode).toBe(200);
       expect((await resolveCollectionById(collection.id))?.defaultProtection).toBe("private");
+    });
+
+    it("rejects a rename to an unsafe segment with 400", async () => {
+      const collection = await seedCollection("user:owner", `keep-${randomUUID()}`);
+      asUser("user:owner");
+      const res = await req("PATCH", `/api/collections/${collection.id}`, { token: "t", body: { name: "a/b" } });
+      expect(res.statusCode).toBe(400);
+      expect((await resolveCollectionById(collection.id))?.name).toBe(collection.name);
+    });
+
+    it("rejects renaming a ROOT collection to \"t\" (it would shadow /t/<token>)", async () => {
+      const collection = await seedCollection("user:owner");
+      asUser("user:owner");
+      const res = await req("PATCH", `/api/collections/${collection.id}`, { token: "t", body: { name: "t" } });
+      expect(res.statusCode).toBe(400);
     });
 
     it("409s on a rename that collides with a sibling", async () => {
@@ -276,6 +323,61 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       asUser("user:owner");
       const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { protection: "bogus" } });
       expect(res.statusCode).toBe(400);
+    });
+
+    // Review session 017: a display name IS a URL segment (D-81 resolves /f/... by display name), so a
+    // rename must pass the same safeSegment() gate an uploaded filename does. Without this the row is
+    // renamed successfully and becomes permanently unreachable at its own readable link.
+    it.each([["a/b.txt"], [".."], ["  spaced.txt"], ["nul\u0000.txt"], ["trailing "]])(
+      "rejects a rename to %j with 400 and leaves the name unchanged",
+      async (hostile) => {
+        const collection = await seedCollection("user:owner");
+        const file = await seedFile({ collectionId: collection.id, name: "keep.txt", ownerSub: "user:owner" });
+        asUser("user:owner");
+        const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { name: hostile } });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({ error: "invalid_name" });
+        expect((await resolveById(file.id))?.name).toBe("keep.txt");
+      },
+    );
+
+    // Review session 017: the response has to carry the URLs, because a rename and a protection change
+    // both retire them and the SPA cannot recompute them (it never sees the link_token).
+    it("returns the updated preview context, with URLs reflecting the new name", async () => {
+      const collection = await seedCollection("user:owner");
+      const file = await seedFile({ collectionId: collection.id, name: "before.txt", ownerSub: "user:owner" });
+      asUser("user:owner");
+      const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { name: "after.txt" } });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.name).toBe("after.txt");
+      expect(body.previewUrl).toContain(`${encodeURIComponent(collection.name)}/after.txt`);
+      expect(body.directUrl).toContain(`${encodeURIComponent(collection.name)}/after.txt`);
+      expect(body.previewUrl).not.toContain("before.txt");
+    });
+
+    it("returns the /t/<token> URL shape after a change to `secret`", async () => {
+      const collection = await seedCollection("user:owner");
+      const file = await seedFile({ collectionId: collection.id, ownerSub: "user:owner", protection: "unlisted" });
+      asUser("user:owner");
+      const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { protection: "secret" } });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // The readable path 404s for a `secret` file (D-59), so both links must move onto the token.
+      expect(body.previewUrl).toContain(`/t/${file.linkToken}`);
+      expect(body.directUrl).toContain(`/t/${file.linkToken}`);
+    });
+
+    it("returns a signed directUrl after a change to `private` (D-84)", async () => {
+      const collection = await seedCollection("user:owner");
+      const file = await seedFile({ collectionId: collection.id, ownerSub: "user:owner", protection: "unlisted" });
+      asUser("user:owner");
+      const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { protection: "private" } });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // Without this the owner's own preview stops rendering the bytes the moment they make it private.
+      expect(body.directUrl).toContain(`/s/${file.id}?exp=`);
+      expect(body.directUrl).toContain("&sig=");
     });
   });
 

@@ -122,3 +122,18 @@ export function suffixForCollision(name: string, taken: readonly string[]): stri
 export function isIgnoredEntry(name: string): boolean {
   return name.startsWith(".");
 }
+
+// `/t/:token` is a static route on both files.mosni.dev (preview) and dl.mosni.dev (delivery), and
+// find-my-way ranks a static segment above the `/*` wildcard those origins use for readable paths - so a
+// ROOT-level collection literally named "t" makes every file inside it unreachable by its own readable
+// link (the request is answered by token lookup instead, which never matches). Only the root level
+// shadows anything; a nested collection may be called "t" freely.
+//
+// This lives here, next to the other name checks, because every path that accepts a collection name must
+// apply the same set. It began as a private constant in controllers/upload.ts covering only the derived
+// default-collection name, which left the user-facing POST /api/collections unguarded.
+const RESERVED_ROOT_NAMES = new Set(["t"]);
+
+export function isReservedRootName(name: string): boolean {
+  return RESERVED_ROOT_NAMES.has(name);
+}
