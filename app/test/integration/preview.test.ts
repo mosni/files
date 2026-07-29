@@ -680,4 +680,67 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       expect(res.body).not.toContain(child.name);
     });
   });
+
+  // E4.1 Wave C: GET /api/preview/f|t/* needs the SAME file-then-collection fallback the document routes
+  // got in Wave A - this is what a client-side navigation (or a back/forward Router doesn't reload the
+  // document for) resolves through, since there is no embedded context to read on that path.
+  describe("GET /api/preview/f|t/* resolves a collection too, same shape as the document route (E4.1 Wave C)", () => {
+    it("GET /api/preview/f/<collection path> returns the CollectionLocation shape", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `ctxpub-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "public",
+      });
+      const res = await get(`/api/preview/f/${collection.name}`);
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ kind: "collection", collectionId: collection.id });
+    });
+
+    it("GET /api/preview/t/<collection token> returns the same shape, even for a secret collection", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `ctxsec-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "secret",
+      });
+      const res = await get(`/api/preview/t/${collection.linkToken}`);
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ kind: "collection", collectionId: collection.id });
+    });
+
+    it("GET /api/preview/f/<secret collection's readable path> 404s (same gate as the document)", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `ctxsec2-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "secret",
+      });
+      expect((await get(`/api/preview/f/${collection.name}`)).statusCode).toBe(404);
+    });
+
+    it("GET /api/preview/f/<private collection's path> 404s for anonymous, 200 for the owner (D-99)", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `ctxpriv-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "private",
+      });
+      expect((await get(`/api/preview/f/${collection.name}`)).statusCode).toBe(404);
+
+      verifyMock.mockResolvedValue({ sub: "user:owner" } as never);
+      const res = await get(`/api/preview/f/${collection.name}`, { authorization: "Bearer t" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ kind: "collection", collectionId: collection.id });
+    });
+
+    it("a file token still wins over a collection token (§1.1 file-then-collection ordering)", async () => {
+      const { linkToken } = await seed({ name: "wins.txt", protection: "public" });
+      const res = await get(`/api/preview/t/${linkToken}`);
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { name?: string; kind?: string };
+      expect(body.kind).not.toBe("collection");
+      expect(body.name).toBe("wins.txt");
+    });
+  });
 });

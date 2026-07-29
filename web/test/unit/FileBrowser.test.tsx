@@ -1,10 +1,22 @@
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter, useLocation } from "react-router";
 import { FileBrowser } from "../../src/components/FileBrowser.tsx";
 import type { BrowseCollection, BrowseFile, BrowseResponse } from "../../../app/src/lib/browseContext.ts";
+
+// E4.1 Wave C: FileBrowser no longer drills via local state - a collection click is a REAL navigation
+// (useNavigate), and pages/Preview.tsx (not FileBrowser itself) re-resolves and remounts on the new URL.
+// This spy observes what FileBrowser actually navigated to, the same way a real <Routes> consumer would.
+function LocationSpy({ onLocation }: { onLocation: (pathname: string) => void }) {
+  const location = useLocation();
+  useEffect(() => {
+    onLocation(location.pathname);
+  }, [location.pathname, onLocation]);
+  return null;
+}
 
 async function flush() {
   await act(async () => {
@@ -104,7 +116,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -128,7 +140,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -138,27 +150,31 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     );
   });
 
-  it("clicking a collection row drills in, refetching with collectionId set and showing the breadcrumb", async () => {
+  it("clicking a collection row navigates to its previewUrl's pathname (E4.1 Wave C, D-100: no URL construction)", async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => null,
       token: () => null,
       onChange: (cb: (u: unknown) => void) => cb(null),
     };
-    const fetchSpy = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse(makeResponse({ collections: [makeCollection({ reason: "public" })] })))
-      .mockResolvedValueOnce(
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
         jsonResponse(
           makeResponse({
-            breadcrumb: [{ id: "coll0000000000id", name: "Photos" }],
-            files: [makeFile({ reason: "public" })],
+            collections: [makeCollection({ reason: "public", previewUrl: "https://files.mosni.dev/f/Photos" })],
           }),
         ),
-      );
-    vi.stubGlobal("fetch", fetchSpy);
+      ),
+    );
 
+    const locations: string[] = [];
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(
+        <MemoryRouter>
+          <FileBrowser />
+          <LocationSpy onLocation={(p) => locations.push(p)} />
+        </MemoryRouter>,
+      );
     });
     await flush();
 
@@ -170,10 +186,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       await flush();
     });
 
-    // anonymous (no token) - same "no headers arg at all" shape the first test pins down.
-    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("collectionId=coll0000000000id"), undefined);
-    expect(container.textContent).toContain("Photos"); // now in the breadcrumb
-    expect(container.textContent).toContain("photo.png");
+    expect(locations.at(-1)).toBe("/f/Photos");
   });
 
   it('"load more" appends the next page without discarding the current one', async () => {
@@ -193,7 +206,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
     expect(container.textContent).toContain("one.png");
@@ -218,7 +231,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       vi.fn().mockResolvedValue(jsonResponse(makeResponse({ files: [makeFile({ reason: "public" })] }))),
     );
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
     expect(container.querySelector('mosni-tooltip[text="Public"] mosni-icon[name="globe"]')).not.toBeNull();
@@ -245,7 +258,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     );
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -279,7 +292,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     );
 
     act(() => {
-      root.render(<FileBrowser initialScope="all" />);
+      root.render(<MemoryRouter><FileBrowser initialScope="all" /></MemoryRouter>);
     });
     await flush();
 
@@ -304,7 +317,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -346,7 +359,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -384,7 +397,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -408,7 +421,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
     expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=mine"), expect.anything());
@@ -437,7 +450,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -477,7 +490,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -505,38 +518,80 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(container.querySelector('input[aria-label="New name"]')).toBeNull(); // the panel closed
   });
 
-  it("breadcrumb: a crumb navigates there, and Home returns to the root", async () => {
+  // C3: a PERMANENT root crumb - always present, even at "/" itself (where it reads as plain text, not a
+  // link, since it IS the current location). C4: ancestor crumbs are real links; the deepest/current one
+  // is plain text, never a control.
+  it("breadcrumb: Home is permanent; ancestor crumbs are links; the deepest crumb is not interactive", async () => {
     (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
-    const fetchSpy = vi.fn().mockResolvedValue(
-      jsonResponse(
-        makeResponse({
-          breadcrumb: [
-            { id: "root-id", name: "Root" },
-            { id: "child-id", name: "Child" },
-          ],
-        }),
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          makeResponse({
+            breadcrumb: [
+              { id: "root-id", name: "Root", previewUrl: "https://files.mosni.dev/f/Root" },
+              { id: "child-id", name: "Child", previewUrl: "https://files.mosni.dev/f/Root/Child" },
+            ],
+          }),
+        ),
       ),
     );
-    vi.stubGlobal("fetch", fetchSpy);
 
+    const locations: string[] = [];
     act(() => {
-      root.render(<FileBrowser initialScope="public" />);
+      root.render(
+        <MemoryRouter>
+          {/* A non-root breadcrumb only happens for a collection-route mount (Preview.tsx passes
+              initialCollectionId) - a root mount's collectionId never changes after mount (E4.1 Wave C:
+              drilling is a real navigation, not local state), so it can never be "not at root" itself. */}
+          <FileBrowser initialCollectionId="child-id" />
+          <LocationSpy onLocation={(p) => locations.push(p)} />
+        </MemoryRouter>,
+      );
     });
     await flush();
 
-    const rootCrumb = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Root") as HTMLButtonElement;
+    // Home is a LINK here (we are not at root - there is a breadcrumb).
+    const home = Array.from(container.querySelectorAll("a")).find((a) => a.textContent === "Home") as HTMLAnchorElement;
+    expect(home).not.toBeUndefined();
+
+    // "Root" (ancestor) is a link; "Child" (current/deepest) is plain text, not any kind of control.
+    const rootLink = Array.from(container.querySelectorAll("a")).find((a) => a.textContent === "Root") as HTMLAnchorElement;
+    expect(rootLink).not.toBeUndefined();
+    expect(rootLink.getAttribute("href")).toBe("/f/Root");
+    expect(Array.from(container.querySelectorAll("a, button")).some((el) => el.textContent === "Child")).toBe(false);
+    expect(container.textContent).toContain("Child");
+
     await act(async () => {
-      rootCrumb.click();
+      rootLink.click();
       await flush();
     });
-    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("collectionId=root-id"), undefined);
+    // The crumb's own onClick preventDefault()s the real <a> navigation and calls useNavigate() instead,
+    // landing exactly on the crumb's own previewUrl pathname (D-100) rather than a client-constructed one.
+    expect(locations.at(-1)).toBe("/f/Root");
 
-    const home = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Home") as HTMLButtonElement;
     await act(async () => {
       home.click();
       await flush();
     });
-    expect(fetchSpy).toHaveBeenLastCalledWith("/api/browse?scope=public", undefined);
+    expect(locations.at(-1)).toBe("/");
+  });
+
+  it("breadcrumb: at root, Home reads as plain text (the current location), not a link", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse())));
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <FileBrowser initialScope="public" />
+        </MemoryRouter>,
+      );
+    });
+    await flush();
+
+    expect(Array.from(container.querySelectorAll("a")).some((a) => a.textContent === "Home")).toBe(false);
+    expect(container.textContent).toContain("Home");
   });
 
   it("rename: cancelling closes the field without issuing a PATCH", async () => {
@@ -545,7 +600,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -572,7 +627,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -598,7 +653,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -626,7 +681,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse())));
 
     act(() => {
-      root.render(<FileBrowser initialScope="public" />);
+      root.render(<MemoryRouter><FileBrowser initialScope="public" /></MemoryRouter>);
     });
     await flush();
 
@@ -646,7 +701,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       ),
     );
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -662,7 +717,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ collections: [makeCollection({ reason: "public" })] }))));
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -682,7 +737,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       ),
     );
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -703,7 +758,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     Object.assign(navigator, { clipboard: { writeText } });
 
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
@@ -718,10 +773,76 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse())));
     act(() => {
-      root.render(<FileBrowser />);
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
 
     expect(container.querySelector("h2")?.textContent).toBeTruthy();
+  });
+
+  // E4.1 Wave C: mounted via pages/Preview.tsx on a collection route (D-107 client half).
+  describe("initialCollectionId / initialToken (collection-route mount)", () => {
+    it("fetches scope=public for the given collectionId, never mine/all, regardless of who is signed in", async () => {
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles: ["files:write", "files:delete"] }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write", "files:delete"] }),
+      };
+      const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(makeResponse()));
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(
+          <MemoryRouter>
+            <FileBrowser initialCollectionId="coll-x" />
+          </MemoryRouter>,
+        );
+      });
+      await flush();
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/^\/api\/browse\?scope=public&collectionId=coll-x/),
+        expect.anything(),
+      );
+    });
+
+    it("appends the supplied token to the browse fetch (D-98's anonymous secret-collection bypass)", async () => {
+      (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
+      const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(makeResponse()));
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(
+          <MemoryRouter>
+            <FileBrowser initialCollectionId="coll-x" initialToken="secrettoken123" />
+          </MemoryRouter>,
+        );
+      });
+      await flush();
+
+      // Anonymous (no Bearer) - same "no headers arg at all" shape the other anonymous tests pin down.
+      expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining("token=secrettoken123"), undefined);
+    });
+
+    it("renders no scope-switcher tabs and no create-collection form on a collection-route mount", async () => {
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles: ["files:write"] }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write"] }),
+      };
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse())));
+
+      act(() => {
+        root.render(
+          <MemoryRouter>
+            <FileBrowser initialCollectionId="coll-x" />
+          </MemoryRouter>,
+        );
+      });
+      await flush();
+
+      expect(container.querySelector("mosni-tabs")).toBeNull();
+      expect(container.querySelector('input[aria-label="New collection name"]')).toBeNull();
+    });
   });
 });

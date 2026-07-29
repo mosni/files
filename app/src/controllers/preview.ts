@@ -263,6 +263,10 @@ async function sendContext(
   reply.send({ ...ctx, isOwner });
 }
 
+// E4.1 Wave C: a client-side navigation (or a back/forward that lands React Router on this route without
+// a fresh document) has no embedded context to fall back on - it must resolve through this API instead,
+// so it needs the SAME file-then-collection fallback the document routes (previewByPath/previewByToken)
+// already have, returning CollectionLocation's shape when the target is a collection.
 export async function previewContextByPath(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -270,8 +274,25 @@ export async function previewContextByPath(
   relPath: string,
 ): Promise<void> {
   const segments = safeSegments(relPath);
-  const record = segments === null ? null : await resolveDocumentByNames(segments);
-  await sendContext(request, reply, config, record);
+  if (segments === null) {
+    reply.code(404).send();
+    return;
+  }
+
+  const fileRecord = await resolveDocumentByNames(segments);
+  if (fileRecord !== null) {
+    await sendContext(request, reply, config, fileRecord);
+    return;
+  }
+
+  const collectionRecord = await resolveDocumentCollectionByNames(request, config, segments);
+  if (collectionRecord !== null) {
+    const location: CollectionLocation = { kind: "collection", collectionId: collectionRecord.id };
+    reply.send(location);
+    return;
+  }
+
+  reply.code(404).send();
 }
 
 export async function previewContextByToken(
@@ -280,8 +301,21 @@ export async function previewContextByToken(
   config: Config,
   token: string,
 ): Promise<void> {
-  const record = await resolveByToken(token);
-  await sendContext(request, reply, config, record === null ? null : await resolveEffective(record));
+  const fileRecord = await resolveByToken(token);
+  if (fileRecord !== null) {
+    await sendContext(request, reply, config, await resolveEffective(fileRecord));
+    return;
+  }
+
+  // Token bypasses the readable-path/authorization gate entirely, same as the document route (D-59/D-98).
+  const collectionRecord = await resolveCollectionByToken(token);
+  if (collectionRecord !== null) {
+    const location: CollectionLocation = { kind: "collection", collectionId: collectionRecord.id };
+    reply.send(location);
+    return;
+  }
+
+  reply.code(404).send();
 }
 
 function relPathFromPreviewUrl(url: string, appOrigin: string): string | null {
