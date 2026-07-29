@@ -174,9 +174,11 @@ test("the link offered for a file gated only by its collection contains no colle
   // D-100: the owner deliberately navigated into the gating collection (its name in the breadcrumb is
   // expected - they already know where they are), but the SHARE LINK this row hands out must still be
   // the token form, never a /f/<collection>/<name> path that would leak the collection to whoever
-  // receives the link.
-  const shareInput = page.locator(".copy-field-primary input").first();
-  await expect(shareInput).toHaveValue(new RegExp(`/t/${file.linkToken}$`));
+  // receives the link. E4.1 Wave B replaced the always-visible copy-field input with the row's own name
+  // link (`previewUrl` verbatim, D-100/D-96) and a "Copy link" item in the trailing overflow menu that
+  // copies the same URL - checking the row's own href is the more direct assertion of the two.
+  const fileLink = page.getByRole("link", { name: "gated.txt" });
+  await expect(fileLink).toHaveAttribute("href", new RegExp(`/t/${file.linkToken}$`));
 });
 
 // PRODUCTION INCIDENT, 2026-07-29: FileBrowser's mosni-tabs switcher crashed the ENTIRE page in production

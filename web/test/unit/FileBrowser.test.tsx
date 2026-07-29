@@ -14,6 +14,18 @@ async function flush() {
   });
 }
 
+// `<mosni-dropdown>` never actually upgrades in jsdom (mosnicat.js isn't loaded here - see
+// technical-baseline.md §4), so there is no real click-to-open/keyboard-nav behavior to drive. Tests
+// interact with it the same way the existing `mosni-tab-change` test already does with `<mosni-tabs>`:
+// dispatch the CustomEvent the real component would emit on selection, directly on the element.
+async function selectRowAction(row: Element, value: string) {
+  const dropdown = row.querySelector("mosni-dropdown")!;
+  await act(async () => {
+    dropdown.dispatchEvent(new CustomEvent("mosni-dropdown-select", { detail: { value } }));
+    await flush();
+  });
+}
+
 function makeCollection(overrides: Partial<BrowseCollection> = {}): BrowseCollection {
   return {
     id: "coll0000000000id",
@@ -199,7 +211,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent === "Load more")).toBe(false);
   });
 
-  it("shows the visibility badge for each row's reason", async () => {
+  it("shows the visibility indicator for each row's reason", async () => {
     (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
     vi.stubGlobal(
       "fetch",
@@ -209,10 +221,10 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       root.render(<FileBrowser />);
     });
     await flush();
-    expect(container.querySelector(".badge.success")?.textContent).toBe("Public");
+    expect(container.querySelector('mosni-tooltip[text="Public"] mosni-icon[name="globe"]')).not.toBeNull();
   });
 
-  it("owner row (reason=own) gets a protection control and a delete button; a non-owner row gets neither", async () => {
+  it("owner row (reason=own) gets a Protection menu item and a Delete item; a non-owner row gets neither", async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => ({ sub: "user:a", roles: [] }),
       token: () => "tok",
@@ -240,10 +252,42 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     const rows = Array.from(container.querySelectorAll("[data-row-id]"));
     const mineRow = rows.find((r) => r.getAttribute("data-row-id") === "mine")!;
     const theirsRow = rows.find((r) => r.getAttribute("data-row-id") === "theirs")!;
-    expect(mineRow.querySelector("select")).not.toBeNull();
-    expect(Array.from(mineRow.querySelectorAll("button")).some((b) => b.textContent === "Delete")).toBe(true);
-    expect(theirsRow.querySelector("select")).toBeNull();
-    expect(Array.from(theirsRow.querySelectorAll("button")).some((b) => b.textContent === "Delete")).toBe(false);
+
+    function itemValues(row: Element): string[] {
+      return Array.from(row.querySelectorAll("mosni-dropdown-item")).map((item) => item.getAttribute("value")!);
+    }
+    expect(itemValues(mineRow)).toEqual(expect.arrayContaining(["rename", "protection", "delete"]));
+    expect(itemValues(theirsRow)).not.toEqual(expect.arrayContaining(["rename"]));
+    expect(itemValues(theirsRow)).not.toEqual(expect.arrayContaining(["protection"]));
+    expect(itemValues(theirsRow)).not.toEqual(expect.arrayContaining(["delete"]));
+
+    await selectRowAction(mineRow, "protection");
+    expect(mineRow.parentElement!.querySelector("select")).not.toBeNull();
+  });
+
+  it("a files:delete holder (not the owner) sees Delete on someone else's row in All files, but not Rename or Protection (D-115)", async () => {
+    (window as unknown as { mosni: unknown }).mosni = {
+      user: () => ({ sub: "user:admin", roles: ["files:delete"] }),
+      token: () => "tok",
+      onChange: (cb: (u: unknown) => void) => cb({ sub: "user:admin", roles: ["files:delete"] }),
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(makeResponse({ files: [makeFile({ id: "theirs", name: "theirs.png", reason: "public" })] })),
+      ),
+    );
+
+    act(() => {
+      root.render(<FileBrowser initialScope="all" />);
+    });
+    await flush();
+
+    const row = container.querySelector('[data-row-id="theirs"]')!;
+    const values = Array.from(row.querySelectorAll("mosni-dropdown-item")).map((item) => item.getAttribute("value")!);
+    expect(values).toContain("delete");
+    expect(values).not.toContain("rename");
+    expect(values).not.toContain("protection");
   });
 
   it("collection create form posts to /api/collections with the current collectionId as parentId and reloads", async () => {
@@ -306,21 +350,19 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     });
     await flush();
 
-    const deleteButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Delete") as HTMLButtonElement;
-    await act(async () => {
-      deleteButton.click();
-      await flush();
-    });
+    const row = container.querySelector("[data-row-id]")!;
+    await selectRowAction(row, "delete");
 
     expect(fetchSpy).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining("/api/collections/coll0000000000id?dryRun=true"),
       expect.anything(),
     );
+    // D-88's pluralization fix: 3 collections total means 2 OTHER nested ones, correctly plural.
     expect(container.textContent).toContain("2 nested collections");
     expect(container.textContent).toContain("5 files");
 
-    const confirmButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Yes, delete") as HTMLButtonElement;
+    const confirmButton = Array.from(row.querySelectorAll("button")).find((b) => b.textContent === "Yes, delete") as HTMLButtonElement;
     await act(async () => {
       confirmButton.click();
       await flush();
@@ -331,6 +373,29 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       "/api/collections/coll0000000000id",
       expect.objectContaining({ method: "DELETE" }),
     );
+  });
+
+  it("collection delete confirmation pluralizes 0 and 1 descendant correctly", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => ({ sub: "user:a" }), token: () => "tok", onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a" }) };
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(makeResponse({ collections: [makeCollection({ reason: "own" })] })))
+      .mockResolvedValueOnce(jsonResponse({ collectionCount: 2, fileCount: 1 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    act(() => {
+      root.render(<FileBrowser />);
+    });
+    await flush();
+
+    const row = container.querySelector("[data-row-id]")!;
+    await selectRowAction(row, "delete");
+
+    // collectionCount 2 total = 1 OTHER nested collection (singular), fileCount 1 (singular).
+    expect(container.textContent).toContain("1 nested collection ");
+    expect(container.textContent).not.toContain("1 nested collections");
+    expect(container.textContent).toContain("1 file ");
+    expect(container.textContent).not.toContain("1 files");
   });
 
   it("dispatching mosni-tab-change on the tab bar switches scope and resets to the root", async () => {
@@ -376,8 +441,8 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     });
     await flush();
 
-    const renameButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Rename") as HTMLButtonElement;
-    act(() => renameButton.click());
+    const row = container.querySelector("[data-row-id]")!;
+    await selectRowAction(row, "rename");
 
     const input = container.querySelector('input[aria-label="New name"]') as HTMLInputElement;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
@@ -396,6 +461,48 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       "/api/files/file0000000000id",
       expect.objectContaining({ method: "PATCH", body: JSON.stringify({ name: "renamed.png" }) }),
     );
+  });
+
+  it("rename: a collection row submits to its own PATCH endpoint, closes the panel, and reloads", async () => {
+    (window as unknown as { mosni: unknown }).mosni = {
+      user: () => ({ sub: "user:a", roles: [] }),
+      token: () => "tok",
+      onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: [] }),
+    };
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(makeResponse({ collections: [makeCollection({ reason: "own" })] })))
+      .mockResolvedValueOnce(jsonResponse({ ...makeCollection({ reason: "own" }), name: "Renamed" }))
+      .mockResolvedValueOnce(jsonResponse(makeResponse({ collections: [makeCollection({ reason: "own", name: "Renamed" })] })));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    act(() => {
+      root.render(<FileBrowser />);
+    });
+    await flush();
+
+    const row = container.querySelector("[data-row-id]")!;
+    await selectRowAction(row, "rename");
+
+    const input = container.querySelector('input[aria-label="New name"]') as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    act(() => {
+      setter.call(input, "Renamed");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const form = Array.from(container.querySelectorAll("form")).find((f) => f.querySelector('input[aria-label="New name"]')) as HTMLFormElement;
+    await act(async () => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await flush();
+    });
+
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      2,
+      "/api/collections/coll0000000000id",
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ name: "Renamed" }) }),
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(3); // the PATCH triggered a reload fetch too
+    expect(container.querySelector('input[aria-label="New name"]')).toBeNull(); // the panel closed
   });
 
   it("breadcrumb: a crumb navigates there, and Home returns to the root", async () => {
@@ -442,9 +549,14 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     });
     await flush();
 
-    const renameButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Rename") as HTMLButtonElement;
-    act(() => renameButton.click());
-    const cancelButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Cancel") as HTMLButtonElement;
+    const row = container.querySelector("[data-row-id]")!;
+    await selectRowAction(row, "rename");
+    // Scoped to the rename form itself - the row's (always-present-but-closed, per jsdom's lack of
+    // mosni-modal upgrade) delete-confirmation modal has its own "Cancel" button too.
+    const renameForm = Array.from(container.querySelectorAll("form")).find((f) =>
+      f.querySelector('input[aria-label="New name"]'),
+    )!;
+    const cancelButton = Array.from(renameForm.querySelectorAll("button")).find((b) => b.textContent === "Cancel") as HTMLButtonElement;
     act(() => cancelButton.click());
 
     expect(container.querySelector('input[aria-label="New name"]')).toBeNull();
@@ -464,14 +576,11 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     });
     await flush();
 
-    const deleteButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Delete") as HTMLButtonElement;
-    await act(async () => {
-      deleteButton.click();
-      await flush();
-    });
-    expect(container.textContent).toContain('Delete "Photos"? This can\'t be undone.');
+    const row = container.querySelector("[data-row-id]")!;
+    await selectRowAction(row, "delete");
+    expect(row.querySelector("mosni-modal")?.getAttribute("heading")).toBe('Delete "Photos"?');
 
-    const cancelButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Cancel") as HTMLButtonElement;
+    const cancelButton = Array.from(row.querySelectorAll("button")).find((b) => b.textContent === "Cancel") as HTMLButtonElement;
     await act(async () => {
       cancelButton.click();
       await flush();
@@ -492,6 +601,9 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       root.render(<FileBrowser />);
     });
     await flush();
+
+    const row = container.querySelector("[data-row-id]")!;
+    await selectRowAction(row, "protection");
 
     const select = container.querySelector("select") as HTMLSelectElement;
     const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!;
@@ -519,5 +631,97 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     await flush();
 
     expect(container.querySelector('input[aria-label="New collection name"]')).toBeNull();
+  });
+
+  // E4.1 Wave B: the listing becomes one real <table> (D-108, AC1) with the six columns §2/B1 lists, one
+  // row per item rather than a `.panel` card (AC2).
+  it("renders the listing as a single table with one row per item, no .panel cards", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          makeResponse({ collections: [makeCollection({ reason: "public" })], files: [makeFile({ reason: "public" })] }),
+        ),
+      ),
+    );
+    act(() => {
+      root.render(<FileBrowser />);
+    });
+    await flush();
+
+    const table = container.querySelector("table.table.interactive");
+    expect(table).not.toBeNull();
+    expect(table!.querySelectorAll("tbody > tr[data-row-id]")).toHaveLength(2);
+    expect(container.querySelectorAll(".panel[data-row-id]")).toHaveLength(0);
+  });
+
+  // D-110: a collection is not a file - its size and "added" cells read a dash rather than fabricated
+  // values, and no server field was added to BrowseCollection for either.
+  it("a collection row's size and added cells both read —", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ collections: [makeCollection({ reason: "public" })] }))));
+    act(() => {
+      root.render(<FileBrowser />);
+    });
+    await flush();
+
+    const row = container.querySelector("[data-row-id]")!;
+    const cells = Array.from(row.querySelectorAll("td")).map((td) => td.textContent);
+    expect(cells[2]).toBe("—"); // size
+    expect(cells[3]).toBe("—"); // added
+  });
+
+  // Defect 6 / AC4: collections and files are distinguishable at a glance by icon, not just by row shape.
+  it("a collection row uses a folder icon and a file row uses a file icon", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(makeResponse({ collections: [makeCollection({ reason: "public" })], files: [makeFile({ reason: "public" })] })),
+      ),
+    );
+    act(() => {
+      root.render(<FileBrowser />);
+    });
+    await flush();
+
+    const rows = container.querySelectorAll("[data-row-id]");
+    expect(rows[0]!.querySelector("mosni-icon")?.getAttribute("name")).toBe("folder");
+    expect(rows[1]!.querySelector("mosni-icon")?.getAttribute("name")).toBe("file");
+  });
+
+  // AC3's "Copy link" item, the one action every viewer gets regardless of ownership (unlike the old
+  // always-visible CopyField, this is now the dropdown's first item rather than an inline input).
+  it('the "Copy link" menu item writes previewUrl to the clipboard for a row the viewer does not own', async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(makeResponse({ files: [makeFile({ reason: "public", previewUrl: "https://files.mosni.dev/f/x.png" })] }))),
+    );
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    act(() => {
+      root.render(<FileBrowser />);
+    });
+    await flush();
+
+    const row = container.querySelector("[data-row-id]")!;
+    await selectRowAction(row, "copy");
+    expect(writeText).toHaveBeenCalledWith("https://files.mosni.dev/f/x.png");
+  });
+
+  // Defect 13: the listing has its own heading, so it no longer reads as an unlabelled continuation of
+  // the drop zone above it.
+  it("the listing has its own section heading", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse())));
+    act(() => {
+      root.render(<FileBrowser />);
+    });
+    await flush();
+
+    expect(container.querySelector("h2")?.textContent).toBeTruthy();
   });
 });
