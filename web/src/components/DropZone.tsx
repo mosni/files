@@ -1,6 +1,12 @@
 // F1: this component *is* the product for now (D-64) - drag/drop or click-to-pick, one independent
 // tus.Upload per file, per-file progress, and a hand-off to CopyLink on completion. F5's gating also
 // lives here since the full landing page (file browser, admin entry point) is a later epic (E4).
+//
+// E4.1 Wave D (D-114, amending D-42): the drop target and its Options render as ONE panel - a permanent
+// dashed rectangle (not a hover-only state) plus the destination controls, always expanded rather than
+// behind a <details> disclosure. D-1 still governs: expanding Options adds no REQUIRED step to open →
+// drop → copy, and Options data loads once on mount for anyone who may upload, not on a toggle that no
+// longer exists.
 
 import { useEffect, useRef, useState } from "react";
 import * as tus from "tus-js-client";
@@ -104,7 +110,11 @@ async function fetchCollections(token: string | null): Promise<CollectionOption[
   try {
     const res = await fetch("/api/collections", { headers: authHeaders(token) });
     if (!res.ok) return [];
-    return (await res.json()) as CollectionOption[];
+    const body: unknown = await res.json();
+    // D2 (Wave D) calls this unconditionally on mount rather than behind a disclosure the caller opted
+    // into, so a malformed/unexpected response must degrade to "no collections" rather than crash the
+    // whole panel - never block the fast path over a destination-picker fetch (D-1).
+    return Array.isArray(body) ? (body as CollectionOption[]) : [];
   } catch {
     return [];
   }
@@ -254,6 +264,13 @@ export function DropZone() {
     };
   }, []);
 
+  // D2/D-114: Options has no disclosure to open anymore, so its data loads once eligibility is known
+  // instead of on a toggle event. `loadCollectionsOnce`'s own `collectionsLoaded` guard keeps this to
+  // exactly one fetch even though `user` can change reference as auth resolves.
+  useEffect(() => {
+    if (user !== null && can(user, "files:write")) loadCollectionsOnce();
+  }, [user]);
+
   function updateUpload(id: string, state: UploadState) {
     setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, state } : u)));
   }
@@ -354,70 +371,78 @@ export function DropZone() {
           <span style={{ fontSize: "1.5rem", color: "var(--mosni-white)" }}>Drop on the box below to upload</span>
         </div>
       )}
-      <div
-        className="panel"
-        role="button"
-        tabIndex={0}
-        onClick={() => inputRef.current?.click()}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            inputRef.current?.click();
-          }
-        }}
-        onDragEnter={(event) => {
-          event.preventDefault();
-          setZoneHover(true);
-        }}
-        onDragOver={(event) => {
-          event.preventDefault();
-          setZoneHover(true);
-        }}
-        onDragLeave={() => setZoneHover(false)}
-        onDrop={(event) => {
-          event.preventDefault();
-          setZoneHover(false);
-          setDragDepth(0);
-          const { files, rejected } = uploadableFiles(event.dataTransfer);
-          rejected.forEach((name) =>
-            toastError(`Can't upload "${name}" — folders and empty files aren't supported yet.`),
-          );
-          void startUploads(files);
-        }}
-        style={
-          zoneHover
-            ? {
-                borderColor: "var(--mosni-purple)",
-                borderStyle: "dashed",
-                background: "var(--mosni-surface-input)",
-                transform: "scale(1.01)",
-              }
-            : undefined
-        }
-      >
-        Drop files here, or click to choose
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          style={{ display: "none" }}
-          // input.click() dispatches its own bubbling native click event - without stopping it here,
-          // that synthetic click would bubble back up to the wrapping div's onClick and call
-          // inputRef.current.click() again, recursing forever. Same fix react-dropzone uses.
-          onClick={(event) => event.stopPropagation()}
-          onChange={(event) => {
-            handleInputFiles(event.target.files);
-            // Allow re-selecting the same file again later (browsers don't fire "change" otherwise).
-            event.target.value = "";
+      {/* D1/D-114: ONE panel for the drop target and its Options - previously two sibling `.panel`s (the
+          drop zone and a `<details>`), which read as two equal stacked boxes (defect 11 / H9). */}
+      <div className="panel" style={{ display: "grid", gap: "1rem" }}>
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => inputRef.current?.click()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              inputRef.current?.click();
+            }
           }}
-        />
-      </div>
+          onDragEnter={(event) => {
+            event.preventDefault();
+            setZoneHover(true);
+          }}
+          onDragOver={(event) => {
+            event.preventDefault();
+            setZoneHover(true);
+          }}
+          onDragLeave={() => setZoneHover(false)}
+          onDrop={(event) => {
+            event.preventDefault();
+            setZoneHover(false);
+            setDragDepth(0);
+            const { files, rejected } = uploadableFiles(event.dataTransfer);
+            rejected.forEach((name) =>
+              toastError(`Can't upload "${name}" — folders and empty files aren't supported yet.`),
+            );
+            void startUploads(files);
+          }}
+          // D1: the dashed rectangle is now the drop target's permanent resting state (previously only a
+          // hover affordance) - hovering just accents it further, it never starts undecorated.
+          style={{
+            border: "3px dashed var(--mosni-border-muted)",
+            borderRadius: "8px",
+            padding: "3rem 1.5rem",
+            textAlign: "center",
+            cursor: "pointer",
+            ...(zoneHover
+              ? {
+                  borderColor: "var(--mosni-purple)",
+                  background: "var(--mosni-surface-input)",
+                  transform: "scale(1.01)",
+                }
+              : undefined),
+          }}
+        >
+          Drop files here, or click to choose
+          <input
+            ref={inputRef}
+            type="file"
+            multiple
+            style={{ display: "none" }}
+            // input.click() dispatches its own bubbling native click event - without stopping it here,
+            // that synthetic click would bubble back up to the wrapping div's onClick and call
+            // inputRef.current.click() again, recursing forever. Same fix react-dropzone uses.
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => {
+              handleInputFiles(event.target.files);
+              // Allow re-selecting the same file again later (browsers don't fire "change" otherwise).
+              event.target.value = "";
+            }}
+          />
+        </div>
 
-      {/* G1 (D-42/D-86): collapsed by default - the fast path (open → drop → copy) is unchanged for
-          anyone who never opens this. Fetches the caller's collections only once opened. */}
-      <details className="panel" onToggle={(event) => event.currentTarget.open && loadCollectionsOnce()}>
-        <summary style={{ cursor: "pointer" }}>Options</summary>
-        <div style={{ display: "grid", gap: "0.75rem", marginTop: "0.75rem" }}>
+        {/* G1 (D-42/D-86, amended by D-114): expanded rather than behind a disclosure - D3's check is
+            that this adds no REQUIRED step: a user who ignores it entirely still does exactly
+            open → drop → copy, with the default destination unchanged. */}
+        <div style={{ display: "grid", gap: "0.75rem" }}>
+          <h2 style={{ margin: 0, fontSize: "1rem" }}>Options</h2>
           <div>
             <label htmlFor="destination-select" style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.35rem", color: "var(--mosni-text-muted)" }}>
               Upload into
@@ -448,7 +473,7 @@ export function DropZone() {
             />
           </div>
         </div>
-      </details>
+      </div>
 
       {uploads.map((upload) => {
         // The compact card renders the filename itself, as its own <h1>. Keeping the row label as well

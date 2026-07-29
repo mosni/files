@@ -444,23 +444,24 @@ describe("DropZone", () => {
     }
   });
 
-  describe("destination picker (G1/G2, D-42/D-86)", () => {
-    it("the Options disclosure is collapsed by default and fetches nothing until opened (D-1)", () => {
+  describe("destination picker (G1/G2, D-42/D-86, presentation amended by D-114)", () => {
+    it("the drop zone and Options render as a single panel, Options expanded with no disclosure", () => {
       installMockMosni({ sub: "user:1", roles: ["files:write"] });
-      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
-      vi.stubGlobal("fetch", fetchSpy);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) }));
 
       act(() => {
         root.render(<DropZone />);
       });
 
-      const details = container.querySelector("details") as HTMLDetailsElement;
-      expect(details.open).toBe(false);
-      // /api/config fires unconditionally on mount (F1, pre-dates this wave) - /api/collections must not.
-      expect(fetchSpy).not.toHaveBeenCalledWith("/api/collections", expect.anything());
+      expect(container.querySelector("details")).toBeNull();
+      const panels = container.querySelectorAll(".panel");
+      expect(panels).toHaveLength(1);
+      // Both the drop target and the destination select live in that one panel.
+      expect(panels[0]!.querySelector('[role="button"]')).not.toBeNull();
+      expect(panels[0]!.querySelector("#destination-select")).not.toBeNull();
     });
 
-    it("opening the disclosure fetches the caller's collections and lists them", async () => {
+    it("Options data loads once on mount for an eligible user, with no toggle to trigger it (D2)", async () => {
       installMockMosni({ sub: "user:1", roles: ["files:write"] });
       const fetchSpy = vi.fn().mockResolvedValue({
         ok: true,
@@ -471,17 +472,24 @@ describe("DropZone", () => {
       act(() => {
         root.render(<DropZone />);
       });
-
-      const details = container.querySelector("details") as HTMLDetailsElement;
-      await act(async () => {
-        details.setAttribute("open", "");
-        details.dispatchEvent(new Event("toggle", { bubbles: false }));
-        await flush();
-      });
+      await flush();
 
       expect(fetchSpy).toHaveBeenCalledWith("/api/collections", { headers: { Authorization: "Bearer test-token" } });
       const options = Array.from(container.querySelectorAll("#destination-select option")).map((o) => o.textContent);
       expect(options).toContain("vacation");
+    });
+
+    it("no upload access: collections are never fetched (D2 only fires for an eligible signed-in user)", async () => {
+      installMockMosni({ sub: "user:1", roles: [] });
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(<DropZone />);
+      });
+      await flush();
+
+      expect(fetchSpy).not.toHaveBeenCalledWith("/api/collections", expect.anything());
     });
 
     it("uploading with a selected destination passes destinationCollectionId in tus metadata", () => {
