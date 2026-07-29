@@ -24,10 +24,6 @@ declare module "react" {
   namespace JSX {
     interface IntrinsicElements {
       "mosni-tabs": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-      "mosni-tab": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement> & {
-        label?: string;
-        selected?: string;
-      };
     }
   }
 }
@@ -55,6 +51,10 @@ function browseUrl(scope: Scope, collectionId: string, offset: number): string {
 
 function currentToken(): string | null {
   return typeof window.mosni !== "undefined" ? window.mosni.token() : null;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 function canManage(reason: BrowseFile["reason"], user: MosniUser): boolean {
@@ -288,6 +288,29 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
     [user],
   );
 
+  // PRODUCTION INCIDENT, 2026-07-29: mosni-chrome's real MosniTab class declares `label` as a
+  // getter-only accessor (no setter). React 19 sets a custom element's props by assigning them as JS
+  // properties whenever a matching accessor exists on the element's prototype, so `<mosni-tab
+  // label={...}>` made React execute `element.label = value` and throw, crashing the whole page for
+  // every signed-in user - invisible in every test here because ui.mosni.dev/mosnicat.js (which defines
+  // the real class) never actually loads in this sandbox's e2e tier or in jsdom, so <mosni-tab> stayed an
+  // inert, unupgraded element with no such accessor everywhere it was tested. Building the markup as a
+  // literal HTML string and letting the browser's own parser set real ATTRIBUTES (never touching the
+  // property) sidesteps React's custom-element prop-assignment path entirely - the same reason
+  // <mosni-header> lives in the static index.html shell rather than JSX. Deliberately keyed on
+  // `visibleTabs` alone, not the live `scope`: MosniTabs.render() only ever reads `selected` at its own
+  // one-time initial connect (see the comment below) - it tracks the ACTUAL highlighted tab itself
+  // afterward, so recomputing this string on every scope change would need render() to run again
+  // ordinarily, but if the string comes out byte-identical (deps unchanged), React never re-touches the
+  // DOM (dangerouslySetInnerHTML compares by string value, not by object identity).
+  const initialTabsHtml = useMemo(
+    () =>
+      visibleTabs
+        .map((tab) => `<mosni-tab label="${escapeHtml(tab.label)}"${scope === tab.scope ? " selected" : ""}></mosni-tab>`)
+        .join(""),
+    [visibleTabs],
+  );
+
   useEffect(() => {
     const el = tabsRef.current;
     if (!el) return;
@@ -352,19 +375,23 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
   return (
     <div style={{ display: "grid", gap: "1rem" }}>
       {authReady && visibleTabs.length > 1 && (
-        // The tab bar's own children are static and empty (never touched again after this component's
-        // first render) - MosniTabs.render() runs exactly once, on connect, and physically MOVES whatever
-        // is inside each <mosni-tab> into a panel div it owns from then on. Handing it React-controlled
-        // content would let a later re-render try to diff nodes the custom element already relocated -
-        // the same custom-element reparenting hazard that keeps <mosni-header> out of React entirely
-        // (see index.html). The actual listing lives OUTSIDE the tabs, driven by the `mosni-tab-change`
-        // event this component listens for instead. `key` forces a fresh element (and so a fresh
-        // one-time render) if the visible tab set itself changes, e.g. once auth resolves.
-        <mosni-tabs key={visibleTabs.map((t) => t.scope).join(",")} ref={tabsRef}>
-          {visibleTabs.map((tab) => (
-            <mosni-tab key={tab.scope} label={tab.label} selected={scope === tab.scope ? "" : undefined} />
-          ))}
-        </mosni-tabs>
+        // The tab bar's own children are static and empty of REACT-rendered content (never touched again
+        // after this component's first render) - MosniTabs.render() runs exactly once, on connect, and
+        // physically MOVES whatever is inside each <mosni-tab> into a panel div it owns from then on.
+        // Handing it React-controlled content would let a later re-render try to diff nodes the custom
+        // element already relocated - the same custom-element reparenting hazard that keeps <mosni-header>
+        // out of React entirely (see index.html). The actual listing lives OUTSIDE the tabs, driven by the
+        // `mosni-tab-change` event this component listens for instead. `key` forces a fresh element (and so
+        // a fresh one-time render) if the visible tab set itself changes, e.g. once auth resolves.
+        //
+        // dangerouslySetInnerHTML, not JSX props, for the <mosni-tab> children themselves - see the long
+        // comment on `initialTabsHtml` above for why: React 19 would otherwise crash the whole page trying
+        // to assign `label` as a JS property onto mosni-chrome's real MosniTab class.
+        <mosni-tabs
+          key={visibleTabs.map((t) => t.scope).join(",")}
+          ref={tabsRef}
+          dangerouslySetInnerHTML={{ __html: initialTabsHtml }}
+        />
       )}
 
       {data && data.breadcrumb.length > 0 && (

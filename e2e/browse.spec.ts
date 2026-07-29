@@ -178,3 +178,55 @@ test("the link offered for a file gated only by its collection contains no colle
   const shareInput = page.locator(".copy-field-primary input").first();
   await expect(shareInput).toHaveValue(new RegExp(`/t/${file.linkToken}$`));
 });
+
+// PRODUCTION INCIDENT, 2026-07-29: FileBrowser's mosni-tabs switcher crashed the ENTIRE page in production
+// ("Uncaught TypeError: setting getter-only property 'label'") the moment a signed-in user (2+ tabs)
+// loaded "/". mosni-chrome's real MosniTab class declares `label` as a getter-only accessor; React sets a
+// custom element's props as JS properties once the element is already an instance of its real registered
+// class (which only happens once ui.mosni.dev/mosnicat.js has actually loaded and called
+// `customElements.define`) - so `<mosni-tab label={...}>` crashed only once that upgrade had happened,
+// which every real user eventually reaches. Every other test in this file, and every other test in this
+// whole e2e suite, blocks or never triggers mosnicat.js loading at all (it fails TLS validation in this
+// sandbox otherwise), so `<mosni-tab>` was always an inert, unupgraded element in every test that ran
+// before this one - which is exactly why nothing caught it. `ignoreHTTPSErrors` is what makes the REAL
+// script load for real, through this sandbox's outbound proxy, and this test is scoped to just this file
+// via `test.use` below rather than the whole suite, since no other test here needs it.
+test.describe("real mosni-chrome integration (must load the ACTUAL mosnicat.js/auth SDK, not a stub of them)", () => {
+  test.use({ ignoreHTTPSErrors: true });
+  // This is the one test in the whole suite that depends on a genuine external fetch (ui.mosni.dev)
+  // through the sandbox's own outbound proxy, rather than purely local/mocked network calls - under
+  // parallel workers it occasionally loses the race against other tests for that fetch. A retry is the
+  // right tool for that: real network flakiness passes on a retry, but an actual regression (the crash
+  // this test exists to catch) fails identically every time regardless of how many retries it gets.
+  test.describe.configure({ retries: 2 });
+
+  test("the tab switcher renders and is clickable with zero uncaught page errors", async ({ page, request }) => {
+    const sub = `user:e2e-browse-${randomUUID()}`;
+    const token = await mintToken(request, sub);
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err) => pageErrors.push(err.message));
+
+    // Only sdk.js is blocked (it needs a live auth.mosni.dev to do anything useful, same as every other
+    // authenticated test in this suite) - mosnicat.js is left to load for REAL, which is the entire point.
+    await page.route("**/sdk.js", (route) => route.abort());
+    await page.addInitScript(`
+      window.mosni = Object.assign(window.mosni ?? {}, {
+        user: () => ({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        token: () => ${JSON.stringify(token)},
+        onChange: (cb) => cb({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        login: () => {}, logout: () => {},
+        toast: () => {},
+      });
+    `);
+
+    await page.goto(`${FILES_ORIGIN}/`);
+    // A signed-in user without the admin role sees exactly two tabs ("My files", "Browse") - the case
+    // that crashed in production, since visibleTabs.length > 1 is what renders <mosni-tabs> at all.
+    await expect(page.locator("mosni-tabs button", { hasText: "My files" })).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator("mosni-tabs button", { hasText: "Browse" })).toBeVisible();
+    await page.locator("mosni-tabs button", { hasText: "Browse" }).click();
+    await page.waitForTimeout(300);
+
+    expect(pageErrors, `uncaught page errors: ${pageErrors.join(", ")}`).toEqual([]);
+  });
+});
