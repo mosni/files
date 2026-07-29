@@ -313,6 +313,18 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
     expect((await get(`/api/preview/f/${collectionName}/x.txt`)).statusCode).toBe(404);
   });
 
+  // AC7, the preview half: the readable path 404s for the owner and a superuser too, not just anonymously.
+  // The `secret` gate sits in resolveDocumentByNames, ahead of every identity check, and must stay there.
+  it("GET /api/preview/f/<secret's readable path> is 404 for the OWNER and for a superuser as well", async () => {
+    const { collectionName } = await seed({ name: "s.txt", protection: "secret", ownerSub: "user:owner" });
+
+    verifyMock.mockResolvedValue({ sub: "user:owner" } as never);
+    expect((await get(`/api/preview/f/${collectionName}/s.txt`, { authorization: "Bearer t" })).statusCode).toBe(404);
+
+    verifyMock.mockResolvedValue({ sub: "user:root", mosni_owner: true } as never);
+    expect((await get(`/api/preview/f/${collectionName}/s.txt`, { authorization: "Bearer t" })).statusCode).toBe(404);
+  });
+
   it("GET /api/preview/t/:token works for a secret file and never sets a cookie", async () => {
     const { linkToken } = await seed({ name: "x.txt", protection: "secret" });
     const res = await get(`/api/preview/t/${linkToken}`);
@@ -386,6 +398,22 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
     expect(ctx.directUrl).not.toContain(collectionName);
     expect(ctx.previewUrl).toContain(`/t/${linkToken}`);
     expect(JSON.stringify(ctx)).not.toContain(collectionName);
+  });
+
+  it("reports the EFFECTIVE protection for a collection-gated file, never the stored column (D-96)", async () => {
+    // The file is stored `public`; its collection is `secret`, so its effective level is `secret` and
+    // D-97 leaves the stored column alone. Answering "public" here is the D-96 landmine reaching the wire:
+    // the owner's own preview page renders this value verbatim ("You own this file (public)." -
+    // PreviewCard.tsx) and offers it as the protection selector's current state, both of which would then
+    // be claiming a gated file is publicly listed.
+    const { linkToken } = await seed({
+      name: "effective-level.txt",
+      protection: "public",
+      collectionProtection: "secret",
+    });
+    const res = await get(`/api/preview/t/${linkToken}`);
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as PreviewContext).protection).toBe("secret");
   });
 
   it("the owner still reaches a file gated only by its collection, via /api/preview/t/<token> (D-99)", async () => {

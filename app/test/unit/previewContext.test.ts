@@ -6,9 +6,14 @@ import {
   previewKindFor,
   type PreviewContext,
 } from "../../src/lib/previewContext.ts";
-import type { FileRecord } from "../../src/storage/files.ts";
+import type { ResolvedFile } from "../../src/storage/files.ts";
 
-function makeRecord(overrides: Partial<FileRecord> = {}): FileRecord {
+// A ResolvedFile, not a bare FileRecord: buildPreviewContext reports the EFFECTIVE level (D-96), so the
+// type system refuses a caller that has not resolved the ancestor chain first. `effectiveProtection`
+// defaults to the same value as `protection` here, which is the ordinary case (nothing above the file is
+// stricter); the tests below that care about the landmine set them apart deliberately.
+function makeRecord(overrides: Partial<ResolvedFile> = {}): ResolvedFile {
+  const protection = overrides.protection ?? "public";
   return {
     id: "file0000000000id",
     collectionId: "coll000000000000",
@@ -16,7 +21,8 @@ function makeRecord(overrides: Partial<FileRecord> = {}): FileRecord {
     diskDir: "2026/07",
     diskName: "file0000000000id-photo.png",
     bytes: 2_400_000,
-    protection: "public",
+    protection,
+    effectiveProtection: protection,
     linkToken: "abcde",
     ownerSub: "user-1",
     uploaderSub: "user-1",
@@ -93,6 +99,20 @@ describe("buildPreviewContext()", () => {
       textPreview: null,
       isOwner: false,
     });
+  });
+
+  // D-96, the landmine (technical-baseline.md §3): a row stored looser than an ancestor collection is
+  // legitimate - D-97 deliberately rewrites nothing when a collection is raised - so the context this
+  // builder produces must report the EFFECTIVE level. Reporting the stored column instead tells the
+  // owner's own preview page ("You own this file (public)." - PreviewCard.tsx) and the anonymous
+  // /api/preview/t/<token> body that a collection-gated file is public, which is false.
+  it("reports the EFFECTIVE protection, never the stored column (D-96)", () => {
+    const ctx = buildPreviewContext(
+      makeRecord({ protection: "public", effectiveProtection: "private" }),
+      displayPath,
+      urls,
+    );
+    expect(ctx.protection).toBe("private");
   });
 
   it("isOwner is false even when the record has an ownerSub", () => {

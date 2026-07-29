@@ -290,6 +290,18 @@ export async function deleteCollectionRecursive(
   return { deletedFileIds: fileIds };
 }
 
+// One level only: is there a collection_acl row for exactly this collection? Security invariant 6: the sub
+// is matched byte-for-byte by a plain equality clause, never parsed. Exported because a listing needs the
+// per-row check on its own, separately from the ancestor walk below - every row on one browse page shares
+// the same ancestors, so walking the chain again per row is pure repeated work (controllers/browse.ts).
+export async function hasCollectionAclGrant(collectionId: string, sub: string): Promise<boolean> {
+  const [rows] = await getPool().query<RowDataPacket[]>(
+    "SELECT 1 FROM collection_acl WHERE collection_id = ? AND sub = ? LIMIT 1",
+    [collectionId, sub],
+  );
+  return rows.length > 0;
+}
+
 // D-99: authorized identity for a restrictive collection's contents includes an ACL grant on ANY
 // ancestor collection, not only the one immediately holding the object - a grant on a top-level
 // collection must pierce down to everything nested beneath it. Walks the same chain protectionChain
@@ -298,11 +310,7 @@ export async function deleteCollectionRecursive(
 export async function hasAclGrantOnChain(collectionId: string, sub: string): Promise<boolean> {
   let currentId = collectionId;
   for (let depth = 0; depth < MAX_COLLECTION_DEPTH; depth++) {
-    const [rows] = await getPool().query<RowDataPacket[]>(
-      "SELECT 1 FROM collection_acl WHERE collection_id = ? AND sub = ? LIMIT 1",
-      [currentId, sub],
-    );
-    if (rows.length > 0) return true;
+    if (await hasCollectionAclGrant(currentId, sub)) return true;
     const record = await resolveCollectionById(currentId);
     if (record === null) {
       throw new Error(`storage/collections: hasAclGrantOnChain - dangling parent_id "${currentId}"`);

@@ -26,9 +26,24 @@ const STORAGE_ROOT = "/data/storage";
 const ORIGIN = "http://files-e2e.test";
 const OUT_DIR = process.argv[2] ?? "/out";
 
+// ignoreHTTPSErrors is LOAD-BEARING for this script, not a convenience (review session 022). The design
+// system - `<mosni-header>`, `<mosni-tabs>`, `<mosni-code>`, `.panel`, `.badge`, `.btn`, and the ONLY
+// stylesheet the app has - all arrive from https://ui.mosni.dev/mosnicat.js, and this sandbox's egress
+// proxy is not trusted by Playwright's bundled Chromium, which uses its own certificate verifier and
+// ignores the system and NSS stores alike (measured: `certutil -A` into /root/.pki/nssdb changes nothing).
+// Without this flag mosnicat.js fails with ERR_CERT_AUTHORITY_INVALID, `customElements.get("mosni-tabs")`
+// is undefined, `document.styleSheets.length` is 0, and EVERY page screenshots as unstyled black-on-white
+// with no header, no panels and no badges - which is indistinguishable from a genuinely broken page and is
+// exactly how sessions 017 and 020 signed off 78 screenshots that showed nothing of what D-79 exists to
+// check ("layout, typography and chrome"). Nothing real is masked: the e2e stack terminates no TLS at all
+// (nginx-e2e strips the 443 blocks), so the only certificate this can wave through is the sandbox proxy's.
+// Same technique, same reason, as session 021's scoped `test.use({ ignoreHTTPSErrors: true })` in
+// e2e/browse.spec.ts.
+const IGNORE_TLS = { ignoreHTTPSErrors: true };
+
 const VIEWPORTS = [
-  { name: "desktop", options: { viewport: { width: 1280, height: 800 } } },
-  { name: "mobile", options: devices["iPhone 13"] },
+  { name: "desktop", options: { ...IGNORE_TLS, viewport: { width: 1280, height: 800 } } },
+  { name: "mobile", options: { ...devices["iPhone 13"], ...IGNORE_TLS } },
 ];
 
 // A minimal valid PNG (1x1 red), so an <img> preview has real decodable bytes rather than a broken icon.

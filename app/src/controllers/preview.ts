@@ -146,7 +146,7 @@ export async function ownerContextFor(config: Config, record: FileRecord): Promi
   const segments = await displayPathFor(resolved);
   const urls = buildFileUrls(config, resolved.effectiveProtection, segments, record.linkToken);
   const ctx: PreviewContext = {
-    ...buildPreviewContext(record, segments.join("/"), urls),
+    ...buildPreviewContext(resolved, segments.join("/"), urls),
     isOwner: true,
   };
   return withSignedDirectUrl(ctx, config, resolved);

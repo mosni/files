@@ -259,6 +259,11 @@ export async function deleteCollectionHandler(
   // D-104: the browser's recursive-delete confirmation names the descendant count before the owner
   // commits to it - a dry run reports the same counts deleteCollectionRecursive would act on, without
   // touching a row.
+  //
+  // The PRESENCE of the parameter is what counts, not its value - so `?dryRun=false` is still a dry run.
+  // That is deliberate and fails closed: D-88 calls recursive collection delete the most destructive
+  // operation in the app, and a caller who wrote the parameter at all clearly did not mean to delete. A
+  // real delete is the request with no `dryRun` at all.
   const query = request.query as { dryRun?: string };
   if (query.dryRun !== undefined) {
     reply.send(await countDescendants(id));

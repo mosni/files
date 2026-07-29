@@ -29,8 +29,11 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "html"],
       include: ["app/src/**/*.{ts,tsx}", "web/src/**/*.{ts,tsx}"],
-      // web/src/main.tsx: untestable DOM-mount glue (placeholder entry - E1 ships no real SPA UI yet),
-      // same headroom the baseline grants server bootstrap/config loading.
+      // web/src/main.tsx: untestable DOM-mount glue - it mounts eagerly against document#root and drives
+      // BrowserRouter, so importing it in a test drags in routing rather than the thing under test. Same
+      // headroom the baseline grants server bootstrap/config loading. The one guarantee it DOES carry -
+      // D-1/D-93's DropZone-then-FileBrowser order on "/" - is asserted on that exact composition by
+      // web/test/unit/mainLayout.test.tsx instead.
       exclude: ["**/*.test.{ts,tsx}", "web/src/main.tsx"],
       thresholds: { lines: 90 },
     },

@@ -292,6 +292,23 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
       expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(403);
     });
 
+    // AC7 in full: `secret` at a readable path is 404 for EVERYONE - anonymous, grantee, owner and
+    // superuser alike (D-99: readablePathResolves returns false before any identity check runs). The
+    // anonymous and grantee cases are covered above and below; these are the two the AC names that a
+    // reasonable implementation could get wrong by adding an owner bypass, so they get their own assertion
+    // rather than resting on the structure happening to be right today.
+    it("the OWNER still 404s on their own secret file's readable path", async () => {
+      const { collectionName, name } = await seed({ protection: "secret", ownerSub: "user:owner" });
+      verifyMock.mockResolvedValue({ sub: "user:owner", roles: [] } as never);
+      expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(404);
+    });
+
+    it("a mosni_owner SUPERUSER still 404s on a secret file's readable path", async () => {
+      const { collectionName, name } = await seed({ protection: "secret", ownerSub: "user:owner" });
+      verifyMock.mockResolvedValue({ sub: "user:root", mosni_owner: true } as never);
+      expect((await get(`/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(404);
+    });
+
     it("a grantee still 404s on a secret file's readable path - secret never consults identity", async () => {
       const { collectionId, collectionName, name } = await seed({
         protection: "secret",
