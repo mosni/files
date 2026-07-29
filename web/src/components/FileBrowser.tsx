@@ -3,18 +3,20 @@
 // anonymous visitor's public browse (D-94) is never blocked behind DropZone's own signed-out gate.
 //
 // Three scopes share one endpoint (§1.4): "mine" (own things, Bearer required), "public" (the anonymous
-// tree, D-94), "all" (the D-101 admin gate). A `mosni-tabs` switcher lives inside this section (D-93/D-102)
-// - see the note above the tab bar for why `<mosni-tab>` children stay empty and the actual listing is
-// rendered OUTSIDE them.
+// tree, D-94), "all" (the D-101 admin gate). A `mosni-tabs` switcher lives inside this section (D-93/D-102).
+//
+// E4.1 Wave B: the listing is a real `<table>` (D-108), one row per item; per-row actions (copy link,
+// rename, protection, delete) live behind a trailing `<mosni-dropdown>` overflow menu (D-109) instead of
+// always-expanded inline controls. Wave 0's write-through property setters (D-112) are what let
+// `<mosni-tab>`/`<mosni-dropdown>` be written as ordinary JSX props below - see mosnicat.md.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { can, isSuperuser, isFilesAdmin, type Claims } from "../../../app/src/lib/roles.ts";
-import type { Protection } from "../../../app/src/lib/protection.ts";
+import type { Protection, VisibilityReason } from "../../../app/src/lib/protection.ts";
 import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../../../app/src/lib/browseContext.ts";
-import { humanSize } from "../../../app/src/lib/previewContext.ts";
-import { CopyLink } from "./CopyLink.tsx";
+import { formatUploadDate, humanSize } from "../../../app/src/lib/previewContext.ts";
 import { ProtectionControl } from "./ProtectionControl.tsx";
-import { VisibilityBadge } from "./VisibilityBadge.tsx";
+import { VisibilityIndicator } from "./VisibilityIndicator.tsx";
 
 type MosniUser = Claims | null;
 
@@ -24,6 +26,23 @@ declare module "react" {
   namespace JSX {
     interface IntrinsicElements {
       "mosni-tabs": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
+      "mosni-tab": React.DetailedHTMLProps<
+        React.HTMLAttributes<HTMLElement> & { label?: string; selected?: boolean },
+        HTMLElement
+      >;
+      "mosni-icon": React.DetailedHTMLProps<
+        React.HTMLAttributes<HTMLElement> & { name?: string; size?: string | number },
+        HTMLElement
+      >;
+      "mosni-dropdown": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement> & { label?: string }, HTMLElement>;
+      "mosni-dropdown-item": React.DetailedHTMLProps<
+        React.HTMLAttributes<HTMLElement> & { value?: string; variant?: string; disabled?: boolean },
+        HTMLElement
+      >;
+      "mosni-modal": React.DetailedHTMLProps<
+        React.HTMLAttributes<HTMLElement> & { heading?: string; open?: boolean },
+        HTMLElement
+      >;
     }
   }
 }
@@ -33,6 +52,8 @@ const SCOPE_TABS: { scope: Scope; label: string }[] = [
   { scope: "public", label: "Browse" },
   { scope: "all", label: "All files" },
 ];
+
+const TABLE_COLUMN_COUNT = 6; // icon, name, size, added, visibility, actions - the colSpan an expanded row panel needs
 
 function authHeaders(token: string | null): { headers: Record<string, string> } | undefined {
   return token ? { headers: { Authorization: `Bearer ${token}` } } : undefined;
@@ -53,17 +74,38 @@ function currentToken(): string | null {
   return typeof window.mosni !== "undefined" ? window.mosni.token() : null;
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
-function canManage(reason: BrowseFile["reason"], user: MosniUser): boolean {
+// D-104: rename/protection stay owner-or-superuser only. D-115 (closes BROWSE-ADMIN-DELETE): delete is
+// ADDITIONALLY offered to a files:delete holder, with the same affordance and confirmation as an owner's -
+// a strictly wider gate than manage, never a separate path.
+function canManage(reason: VisibilityReason, user: MosniUser): boolean {
   return reason === "own" || (user !== null && isSuperuser(user));
 }
 
-// D-104: reused by both a file row and a collection row - `patchUrl` is the only thing that differs.
-function RenameControl({ patchUrl, name, onRenamed }: { patchUrl: string; name: string; onRenamed: () => void }) {
-  const [editing, setEditing] = useState(false);
+function canDelete(reason: VisibilityReason, user: MosniUser): boolean {
+  return canManage(reason, user) || (user !== null && can(user, "files:delete"));
+}
+
+async function copyLinkToClipboard(url: string): Promise<void> {
+  await navigator.clipboard.writeText(url);
+  if (typeof window.mosni !== "undefined" && window.mosni.toast) {
+    window.mosni.toast("Link copied", { variant: "success" });
+  }
+}
+
+// D-104: reused by both a file row and a collection row - `patchUrl` is the only thing that differs. Now
+// always rendered already in "editing" shape (Wave B4) - the dropdown's "Rename" item is what opens it;
+// this component no longer owns its own open/closed toggle.
+function RenameForm({
+  patchUrl,
+  name,
+  onRenamed,
+  onCancel,
+}: {
+  patchUrl: string;
+  name: string;
+  onRenamed: () => void;
+  onCancel: () => void;
+}) {
   const [value, setValue] = useState(name);
 
   async function submit(event: React.FormEvent) {
@@ -74,33 +116,83 @@ function RenameControl({ patchUrl, name, onRenamed }: { patchUrl: string; name: 
       headers: jsonHeaders(currentToken()),
       body: JSON.stringify({ name: value }),
     });
-    if (res.ok) {
-      setEditing(false);
-      onRenamed();
-    }
-  }
-
-  if (!editing) {
-    return (
-      <button type="button" onClick={() => setEditing(true)}>
-        Rename
-      </button>
-    );
+    if (res.ok) onRenamed();
   }
 
   return (
-    <form onSubmit={(e) => void submit(e)} style={{ display: "flex", gap: "0.35rem" }}>
-      <input type="text" aria-label="New name" value={value} onChange={(e) => setValue(e.target.value)} />
-      <button type="submit">Save</button>
-      <button type="button" onClick={() => setEditing(false)}>
+    <form onSubmit={(e) => void submit(e)} style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+      <label htmlFor="row-rename-input" className="little-link">
+        New name
+      </label>
+      <input id="row-rename-input" type="text" aria-label="New name" value={value} onChange={(e) => setValue(e.target.value)} />
+      <button type="submit" className="btn-sm">
+        Save
+      </button>
+      <button type="button" className="btn-ghost btn-sm" onClick={onCancel}>
         Cancel
       </button>
     </form>
   );
 }
 
+type RowPanel = "rename" | "protection" | null;
+
+function pluralize(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function RowActions({
+  itemLabel,
+  previewUrl,
+  manage,
+  mayDelete,
+  onRename,
+  onProtection,
+  onDeleteSelected,
+}: {
+  itemLabel: string;
+  previewUrl: string;
+  manage: boolean;
+  mayDelete: boolean;
+  onRename: () => void;
+  onProtection: () => void;
+  onDeleteSelected: () => void;
+}) {
+  const ref = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    function onSelect(event: Event) {
+      const value = (event as CustomEvent<{ value: string }>).detail.value;
+      if (value === "copy") void copyLinkToClipboard(previewUrl);
+      else if (value === "rename") onRename();
+      else if (value === "protection") onProtection();
+      else if (value === "delete") onDeleteSelected();
+    }
+    el.addEventListener("mosni-dropdown-select", onSelect);
+    return () => el.removeEventListener("mosni-dropdown-select", onSelect);
+  }, [previewUrl, onRename, onProtection, onDeleteSelected]);
+
+  return (
+    <mosni-dropdown ref={ref} label={`Actions for ${itemLabel}`}>
+      <mosni-dropdown-item value="copy">Copy link</mosni-dropdown-item>
+      {manage && <mosni-dropdown-item value="rename">Rename</mosni-dropdown-item>}
+      {manage && <mosni-dropdown-item value="protection">Protection</mosni-dropdown-item>}
+      {mayDelete && (
+        <mosni-dropdown-item value="delete" variant="danger">
+          Delete
+        </mosni-dropdown-item>
+      )}
+    </mosni-dropdown>
+  );
+}
+
 function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; onReload: () => void }) {
-  const [confirming, setConfirming] = useState(false);
+  const [panel, setPanel] = useState<RowPanel>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const manage = canManage(row.reason, user);
+  const mayDelete = canDelete(row.reason, user);
 
   async function changeProtection(next: Protection): Promise<boolean> {
     const res = await fetch(`/api/files/${row.id}`, {
@@ -115,41 +207,70 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
 
   async function confirmDelete() {
     const res = await fetch(`/api/files/${row.id}`, { method: "DELETE", headers: authHeaders(currentToken())?.headers });
-    if (res.ok) onReload();
+    if (res.ok) {
+      setDeleteOpen(false);
+      onReload();
+    }
   }
 
   return (
-    <div className="panel" data-row-id={row.id} style={{ display: "grid", gap: "0.5rem" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem" }}>
-        <a href={row.previewUrl}>{row.name}</a>
-        <VisibilityBadge reason={row.reason} />
-      </div>
-      <p className="little-link" style={{ margin: 0 }}>
-        {humanSize(row.bytes)}
-      </p>
-      <CopyLink previewUrl={row.previewUrl} directUrl={row.directUrl} />
-      {canManage(row.reason, user) && (
-        <>
-          <RenameControl patchUrl={`/api/files/${row.id}`} name={row.name} onRenamed={onReload} />
-          <ProtectionControl id={row.id} protection={row.effectiveProtection} onChange={changeProtection} />
-          {!confirming ? (
-            <button type="button" onClick={() => setConfirming(true)}>
-              Delete
+    <>
+      <tr data-row-id={row.id}>
+        <td>
+          <mosni-icon name="file" size="18" />
+        </td>
+        <td>
+          <a href={row.previewUrl}>{row.name}</a>
+        </td>
+        <td>{humanSize(row.bytes)}</td>
+        <td>{formatUploadDate(row.createdAt)}</td>
+        <td>
+          <VisibilityIndicator reason={row.reason} />
+        </td>
+        <td>
+          <RowActions
+            itemLabel={row.name}
+            previewUrl={row.previewUrl}
+            manage={manage}
+            mayDelete={mayDelete}
+            onRename={() => setPanel("rename")}
+            onProtection={() => setPanel("protection")}
+            onDeleteSelected={() => setDeleteOpen(true)}
+          />
+          <mosni-modal heading={`Delete "${row.name}"?`} open={deleteOpen}>
+            <p>This can&apos;t be undone.</p>
+            <button slot="footer" type="button" className="btn-ghost" onClick={() => setDeleteOpen(false)}>
+              Cancel
             </button>
-          ) : (
-            <div role="alertdialog" style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-              <span>Delete &quot;{row.name}&quot;? This can&apos;t be undone.</span>
-              <button type="button" onClick={() => void confirmDelete()}>
-                Yes, delete
-              </button>
-              <button type="button" onClick={() => setConfirming(false)}>
-                Cancel
-              </button>
-            </div>
-          )}
-        </>
+            <button slot="footer" type="button" className="btn-danger" onClick={() => void confirmDelete()}>
+              Yes, delete
+            </button>
+          </mosni-modal>
+        </td>
+      </tr>
+      {panel === "rename" && (
+        <tr>
+          <td colSpan={TABLE_COLUMN_COUNT}>
+            <RenameForm
+              patchUrl={`/api/files/${row.id}`}
+              name={row.name}
+              onRenamed={() => {
+                setPanel(null);
+                onReload();
+              }}
+              onCancel={() => setPanel(null)}
+            />
+          </td>
+        </tr>
       )}
-    </div>
+      {panel === "protection" && (
+        <tr>
+          <td colSpan={TABLE_COLUMN_COUNT}>
+            <ProtectionControl id={row.id} protection={row.effectiveProtection} onChange={changeProtection} />
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 
@@ -164,7 +285,11 @@ function CollectionRow({
   onOpen: (id: string) => void;
   onReload: () => void;
 }) {
+  const [panel, setPanel] = useState<RowPanel>(null);
   const [pending, setPending] = useState<{ collectionCount: number; fileCount: number } | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const manage = canManage(row.reason, user);
+  const mayDelete = canDelete(row.reason, user);
 
   async function changeProtection(next: Protection): Promise<boolean> {
     const res = await fetch(`/api/collections/${row.id}`, {
@@ -177,6 +302,8 @@ function CollectionRow({
     return true;
   }
 
+  // D-88/D-104: the descendant count is fetched (dry run) BEFORE the modal opens, so its confirmation
+  // text can name what will actually be removed.
   async function requestDelete() {
     const res = await fetch(`/api/collections/${row.id}?dryRun=true`, {
       method: "DELETE",
@@ -184,48 +311,93 @@ function CollectionRow({
     });
     if (!res.ok) return;
     setPending((await res.json()) as { collectionCount: number; fileCount: number });
+    setDeleteOpen(true);
   }
 
   async function confirmDelete() {
     const res = await fetch(`/api/collections/${row.id}`, { method: "DELETE", headers: authHeaders(currentToken())?.headers });
-    if (res.ok) onReload();
+    if (res.ok) {
+      setDeleteOpen(false);
+      setPending(null);
+      onReload();
+    }
   }
 
   return (
-    <div className="panel" data-row-id={row.id} style={{ display: "grid", gap: "0.5rem" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem" }}>
-        <button type="button" onClick={() => onOpen(row.id)}>
-          {row.name}
-        </button>
-        <VisibilityBadge reason={row.reason} />
-      </div>
-      <CopyLink previewUrl={row.previewUrl} />
-      {canManage(row.reason, user) && (
-        <>
-          <RenameControl patchUrl={`/api/collections/${row.id}`} name={row.name} onRenamed={onReload} />
-          <ProtectionControl id={row.id} protection={row.effectiveProtection} onChange={changeProtection} />
-          {pending === null ? (
-            <button type="button" onClick={() => void requestDelete()}>
-              Delete
+    <>
+      <tr data-row-id={row.id}>
+        <td>
+          <mosni-icon name="folder" size="18" />
+        </td>
+        <td>
+          <button type="button" className="btn-ghost" onClick={() => onOpen(row.id)}>
+            {row.name}
+          </button>
+        </td>
+        <td>{"—" /* D-110: collections are not files - no size to show */}</td>
+        <td>{"—" /* BrowseCollection carries no date */}</td>
+        <td>
+          <VisibilityIndicator reason={row.reason} />
+        </td>
+        <td>
+          <RowActions
+            itemLabel={row.name}
+            previewUrl={row.previewUrl}
+            manage={manage}
+            mayDelete={mayDelete}
+            onRename={() => setPanel("rename")}
+            onProtection={() => setPanel("protection")}
+            onDeleteSelected={() => void requestDelete()}
+          />
+          <mosni-modal
+            heading={`Delete "${row.name}"?`}
+            open={deleteOpen}
+          >
+            <p>
+              {pending !== null && pending.collectionCount > 1 && `${pluralize(pending.collectionCount - 1, "nested collection")} and `}
+              {pending !== null && pending.fileCount > 0 && `${pluralize(pending.fileCount, "file")} will also be deleted. `}
+              This can&apos;t be undone.
+            </p>
+            <button
+              slot="footer"
+              type="button"
+              className="btn-ghost"
+              onClick={() => {
+                setDeleteOpen(false);
+                setPending(null);
+              }}
+            >
+              Cancel
             </button>
-          ) : (
-            <div role="alertdialog" style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-              <span>
-                Delete &quot;{row.name}&quot;
-                {pending.collectionCount > 1 && ` and its ${pending.collectionCount - 1} nested collections`}
-                {pending.fileCount > 0 && ` and ${pending.fileCount} files`}? This can&apos;t be undone.
-              </span>
-              <button type="button" onClick={() => void confirmDelete()}>
-                Yes, delete
-              </button>
-              <button type="button" onClick={() => setPending(null)}>
-                Cancel
-              </button>
-            </div>
-          )}
-        </>
+            <button slot="footer" type="button" className="btn-danger" onClick={() => void confirmDelete()}>
+              Yes, delete
+            </button>
+          </mosni-modal>
+        </td>
+      </tr>
+      {panel === "rename" && (
+        <tr>
+          <td colSpan={TABLE_COLUMN_COUNT}>
+            <RenameForm
+              patchUrl={`/api/collections/${row.id}`}
+              name={row.name}
+              onRenamed={() => {
+                setPanel(null);
+                onReload();
+              }}
+              onCancel={() => setPanel(null)}
+            />
+          </td>
+        </tr>
       )}
-    </div>
+      {panel === "protection" && (
+        <tr>
+          <td colSpan={TABLE_COLUMN_COUNT}>
+            <ProtectionControl id={row.id} protection={row.effectiveProtection} onChange={changeProtection} />
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 
@@ -286,29 +458,6 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
   const visibleTabs = useMemo(
     () => SCOPE_TABS.filter((t) => t.scope === "public" || (user !== null && (t.scope === "mine" || isFilesAdmin(user)))),
     [user],
-  );
-
-  // PRODUCTION INCIDENT, 2026-07-29: mosni-chrome's real MosniTab class declares `label` as a
-  // getter-only accessor (no setter). React 19 sets a custom element's props by assigning them as JS
-  // properties whenever a matching accessor exists on the element's prototype, so `<mosni-tab
-  // label={...}>` made React execute `element.label = value` and throw, crashing the whole page for
-  // every signed-in user - invisible in every test here because ui.mosni.dev/mosnicat.js (which defines
-  // the real class) never actually loads in this sandbox's e2e tier or in jsdom, so <mosni-tab> stayed an
-  // inert, unupgraded element with no such accessor everywhere it was tested. Building the markup as a
-  // literal HTML string and letting the browser's own parser set real ATTRIBUTES (never touching the
-  // property) sidesteps React's custom-element prop-assignment path entirely - the same reason
-  // <mosni-header> lives in the static index.html shell rather than JSX. Deliberately keyed on
-  // `visibleTabs` alone, not the live `scope`: MosniTabs.render() only ever reads `selected` at its own
-  // one-time initial connect (see the comment below) - it tracks the ACTUAL highlighted tab itself
-  // afterward, so recomputing this string on every scope change would need render() to run again
-  // ordinarily, but if the string comes out byte-identical (deps unchanged), React never re-touches the
-  // DOM (dangerouslySetInnerHTML compares by string value, not by object identity).
-  const initialTabsHtml = useMemo(
-    () =>
-      visibleTabs
-        .map((tab) => `<mosni-tab label="${escapeHtml(tab.label)}"${scope === tab.scope ? " selected" : ""}></mosni-tab>`)
-        .join(""),
-    [visibleTabs],
   );
 
   useEffect(() => {
@@ -375,23 +524,16 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
   return (
     <div style={{ display: "grid", gap: "1rem" }}>
       {authReady && visibleTabs.length > 1 && (
-        // The tab bar's own children are static and empty of REACT-rendered content (never touched again
-        // after this component's first render) - MosniTabs.render() runs exactly once, on connect, and
-        // physically MOVES whatever is inside each <mosni-tab> into a panel div it owns from then on.
-        // Handing it React-controlled content would let a later re-render try to diff nodes the custom
-        // element already relocated - the same custom-element reparenting hazard that keeps <mosni-header>
-        // out of React entirely (see index.html). The actual listing lives OUTSIDE the tabs, driven by the
-        // `mosni-tab-change` event this component listens for instead. `key` forces a fresh element (and so
-        // a fresh one-time render) if the visible tab set itself changes, e.g. once auth resolves.
-        //
-        // dangerouslySetInnerHTML, not JSX props, for the <mosni-tab> children themselves - see the long
-        // comment on `initialTabsHtml` above for why: React 19 would otherwise crash the whole page trying
-        // to assign `label` as a JS property onto mosni-chrome's real MosniTab class.
-        <mosni-tabs
-          key={visibleTabs.map((t) => t.scope).join(",")}
-          ref={tabsRef}
-          dangerouslySetInnerHTML={{ __html: initialTabsHtml }}
-        />
+        // D-112 (Wave 0) gave `<mosni-tab>` a write-through `label` setter, so this is ordinary JSX now -
+        // no more building an HTML string for dangerouslySetInnerHTML. `key` still forces a fresh element
+        // (and so a fresh one-time render() call) when the visible tab set itself changes, e.g. once auth
+        // resolves: MosniTabs.render() only runs once at connect and physically relocates its `<mosni-tab>`
+        // children from then on (see session-021's log), so a later prop-only update wouldn't re-run it.
+        <mosni-tabs key={visibleTabs.map((t) => t.scope).join(",")} ref={tabsRef}>
+          {visibleTabs.map((tab) => (
+            <mosni-tab key={tab.scope} label={tab.label} selected={scope === tab.scope} />
+          ))}
+        </mosni-tabs>
       )}
 
       {data && data.breadcrumb.length > 0 && (
@@ -410,9 +552,15 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
         </nav>
       )}
 
+      <h2>Files and collections</h2>
+
       {canCreateHere && (
         <form onSubmit={(e) => void submitCreateCollection(e)} className="panel" style={{ display: "flex", gap: "0.5rem" }}>
+          <label htmlFor="new-collection-name-input" className="little-link">
+            New collection name
+          </label>
           <input
+            id="new-collection-name-input"
             type="text"
             aria-label="New collection name"
             placeholder="New collection name"
@@ -429,12 +577,26 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
         <span className="spinner" role="status" aria-label="Loading" />
       ) : (
         <>
-          {data.collections.map((row) => (
-            <CollectionRow key={row.id} row={row} user={user} onOpen={setCollectionId} onReload={reload} />
-          ))}
-          {data.files.map((row) => (
-            <FileRow key={row.id} row={row} user={user} onReload={reload} />
-          ))}
+          <table className="table interactive">
+            <thead>
+              <tr>
+                <th scope="col" aria-label="Type" />
+                <th scope="col">Name</th>
+                <th scope="col">Size</th>
+                <th scope="col">Added</th>
+                <th scope="col" aria-label="Visibility" />
+                <th scope="col" aria-label="Actions" />
+              </tr>
+            </thead>
+            <tbody>
+              {data.collections.map((row) => (
+                <CollectionRow key={row.id} row={row} user={user} onOpen={setCollectionId} onReload={reload} />
+              ))}
+              {data.files.map((row) => (
+                <FileRow key={row.id} row={row} user={user} onReload={reload} />
+              ))}
+            </tbody>
+          </table>
           {data.collections.length === 0 && data.files.length === 0 && <p>Nothing here yet.</p>}
           {data.nextOffset !== null && (
             <button type="button" onClick={() => void loadMore()}>

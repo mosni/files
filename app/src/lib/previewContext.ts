@@ -112,7 +112,9 @@ function kindLabel(ctx: PreviewContext): string {
   return KIND_LABELS[ctx.mimeType] ?? "File";
 }
 
-function formatUploadDate(iso: string): string {
+// Exported for E4.1 Wave B's browse table "added" column, which wants the same date format the preview
+// card already uses rather than a second copy of this formatting.
+export function formatUploadDate(iso: string): string {
   const d = new Date(iso);
   const day = d.getUTCDate();
   const month = d.toLocaleString("en-US", { month: "short", timeZone: "UTC" });
