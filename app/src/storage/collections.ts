@@ -141,11 +141,23 @@ export async function protectionChain(id: string): Promise<Protection[]> {
   return (await ancestorChainRecords(id)).map((record) => record.protection);
 }
 
-// D-102/§1.4 of the E4 waves hand-off: root-first {id, name} pairs for the browse API's breadcrumb, empty
-// at root. Unlike collectionPath, the browser needs each ancestor's id too, to link a breadcrumb segment
-// back to a navigable collectionId.
-export async function collectionBreadcrumb(id: string): Promise<{ id: string; name: string }[]> {
-  return (await ancestorChainRecords(id)).map((record) => ({ id: record.id, name: record.name }));
+// D-102/§1.4 of the E4 waves hand-off: root-first {id, name, linkToken} triples for the browse API's
+// breadcrumb, empty at root. `linkToken` (E4.1 Wave C) is what lets the caller build each ancestor's OWN
+// previewUrl (buildCollectionPreviewUrl) without the client ever constructing a URL itself (D-100) - a
+// breadcrumb crumb needs to be a REAL clickable link, not just a label.
+// `ownerSub` (E4.1 Wave C) is what lets the caller decide, per ancestor, whether THIS SPECIFIC crumb's
+// own token is safe to hand back - see controllers/browse.ts's breadcrumb construction: being authorized
+// on the deeper TARGET does not imply authorization on every ancestor above it (an ACL grant can be
+// scoped to one nested collection with none on its parent).
+export async function collectionBreadcrumb(
+  id: string,
+): Promise<{ id: string; name: string; linkToken: string; ownerSub: string }[]> {
+  return (await ancestorChainRecords(id)).map((record) => ({
+    id: record.id,
+    name: record.name,
+    linkToken: record.linkToken,
+    ownerSub: record.ownerSub,
+  }));
 }
 
 export async function listCollectionsFor(sub: string): Promise<CollectionRecord[]> {

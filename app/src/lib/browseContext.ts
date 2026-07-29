@@ -30,8 +30,10 @@ export type BrowseFile = {
   durationSeconds: number | null;
 };
 
+// E4.1 Wave C: `previewUrl` lets a breadcrumb crumb be a real link (C4) without the client ever
+// constructing a URL itself (D-100) - same shape and same reasoning as BrowseCollection.previewUrl.
 export type BrowseResponse = {
-  breadcrumb: { id: string; name: string }[];
+  breadcrumb: { id: string; name: string; previewUrl: string }[];
   collections: BrowseCollection[];
   files: BrowseFile[];
   nextOffset: number | null;

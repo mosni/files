@@ -2,13 +2,15 @@
 
 // D-1/D-93/D6: the browser must render BELOW the drop zone on "/", never above it and never with
 // anything in between - this is the exact composition web/src/main.tsx uses for that route. main.tsx
-// itself isn't imported here (it mounts eagerly against document#root and drives BrowserRouter, which
-// would drag in routing/navigation concerns unrelated to this ordering guarantee) - this mounts the same
-// two components in the same order main.tsx wires them in and asserts on the resulting DOM order.
+// itself isn't imported here (it mounts eagerly against document#root, which would drag in that concern
+// unrelated to this ordering guarantee) - this mounts the same two components in the same order main.tsx
+// wires them in and asserts on the resulting DOM order. A MemoryRouter is still required as of E4.1 Wave
+// C: FileBrowser now calls useNavigate() unconditionally (a collection click is a real navigation).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router";
 import { DropZone } from "../../src/components/DropZone.tsx";
 import { FileBrowser } from "../../src/components/FileBrowser.tsx";
 
@@ -51,10 +53,10 @@ describe("main.tsx's \"/\" composition: DropZone then FileBrowser, never reorder
 
     act(() => {
       root.render(
-        <>
+        <MemoryRouter>
           <DropZone />
           <FileBrowser />
-        </>,
+        </MemoryRouter>,
       );
     });
     await flush();

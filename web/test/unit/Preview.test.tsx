@@ -337,4 +337,88 @@ describe("PreviewPage", () => {
     const previewInput = container.querySelector(".copy-field-primary input") as HTMLInputElement;
     expect(previewInput.value).toBe("https://files.mosni.dev/f/photo.png");
   });
+
+  // E4.1 Wave C (D-107 client half): the same route now resolves to EITHER a file or a collection - these
+  // mount <FileBrowser> instead of <PreviewCard> when the server says the target is a collection.
+  describe("collection targets (E4.1 Wave C)", () => {
+    function embedCollection(collectionId: string) {
+      const script = document.createElement("script");
+      script.type = "application/json";
+      script.id = "preview-context";
+      script.textContent = JSON.stringify({ kind: "collection", collectionId });
+      document.head.appendChild(script);
+    }
+
+    function browseResponse() {
+      return { ok: true, json: () => Promise.resolve({ breadcrumb: [], collections: [], files: [], nextOffset: null }) };
+    }
+
+    it("mounts FileBrowser (not PreviewCard) from an embedded CollectionLocation, with zero round trips for the target itself", () => {
+      embedCollection("coll-abc");
+      const fetchSpy = vi.fn().mockImplementation((url: string) =>
+        url.startsWith("/api/browse") ? Promise.resolve(browseResponse()) : Promise.reject(new Error("unexpected fetch")),
+      );
+      vi.stubGlobal("fetch", fetchSpy);
+
+      renderAt("/f/Photos");
+
+      // No /api/preview round trip for the TARGET itself - only FileBrowser's own /api/browse call.
+      expect(fetchSpy).not.toHaveBeenCalledWith(expect.stringContaining("/api/preview"), expect.anything());
+      expect(container.textContent).toContain("Files and collections"); // FileBrowser's own heading
+      expect(container.querySelector(".copy-field-primary")).toBeNull(); // not a PreviewCard
+    });
+
+    it("resolves a collection via the API when there is no embedded target (client-side navigation)", async () => {
+      const fetchSpy = vi.fn().mockImplementation((url: string) => {
+        if (url === "/api/preview/f/Vacation") {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ kind: "collection", collectionId: "coll-vac" }) });
+        }
+        if (url.startsWith("/api/browse")) return Promise.resolve(browseResponse());
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      renderAt("/f/Vacation");
+      expect(container.querySelector(".spinner")).not.toBeNull();
+
+      await flush();
+
+      expect(container.textContent).toContain("Files and collections");
+      expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining("collectionId=coll-vac"), undefined);
+    });
+
+    it("resolves via /t/:token too, and threads the token through to FileBrowser's own browse fetch", async () => {
+      const fetchSpy = vi.fn().mockImplementation((url: string) => {
+        if (url === "/api/preview/t/sec12") {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ kind: "collection", collectionId: "coll-sec" }) });
+        }
+        if (url.startsWith("/api/browse")) return Promise.resolve(browseResponse());
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      renderAt("/t/sec12");
+      await flush();
+
+      expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining("token=sec12"), undefined);
+    });
+
+    it("a client-side navigation from a file to a collection swaps PreviewCard for FileBrowser", async () => {
+      embedContext(makeContext({ name: "first.png", previewUrl: "https://files.mosni.dev/f/first.png" }));
+      const fetchSpy = vi.fn().mockImplementation((url: string) => {
+        if (url === "/api/preview/f/Photos") {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ kind: "collection", collectionId: "coll-photos" }) });
+        }
+        if (url.startsWith("/api/browse")) return Promise.resolve(browseResponse());
+        return Promise.reject(new Error(`unexpected fetch ${url}`));
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      renderNavigating("/f/first.png", "/f/Photos");
+      await flush();
+
+      expect(container.textContent).toContain("Files and collections");
+      expect(container.querySelector("img")).toBeNull();
+    });
+  });
 });

@@ -9,8 +9,16 @@
 // rename, protection, delete) live behind a trailing `<mosni-dropdown>` overflow menu (D-109) instead of
 // always-expanded inline controls. Wave 0's write-through property setters (D-112) are what let
 // `<mosni-tab>`/`<mosni-dropdown>` be written as ordinary JSX props below - see mosnicat.md.
-
+//
+// E4.1 Wave C (D-107 client half): mounted two ways now. On `/` with no `initialCollectionId`, this owns
+// its own scope (mine/public/all) exactly as before. Mounted by pages/Preview.tsx on `/f/*`/`/t/:token`
+// with a server-RESOLVED `initialCollectionId`, it shows that one collection under scope=public only (the
+// scope E4.1 Wave C extended to also authorize an owner/superuser/ACL-grant/token viewer, not just a
+// literally-public chain - see controllers/browse.ts) and never switches scope or drills via local state:
+// every collection click is a REAL navigation (`useNavigate`), and `pages/Preview.tsx` remounts this
+// component fresh (via `key`) once it re-resolves a different collection - see that file's comment.
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router";
 import { can, isSuperuser, isFilesAdmin, type Claims } from "../../../app/src/lib/roles.ts";
 import type { Protection, VisibilityReason } from "../../../app/src/lib/protection.ts";
 import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../../../app/src/lib/browseContext.ts";
@@ -63,11 +71,21 @@ function jsonHeaders(token: string | null): Record<string, string> {
   return { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 }
 
-function browseUrl(scope: Scope, collectionId: string, offset: number): string {
+function browseUrl(scope: Scope, collectionId: string, offset: number, token?: string): string {
   let url = `/api/browse?scope=${scope}`;
   if (collectionId !== "") url += `&collectionId=${encodeURIComponent(collectionId)}`;
   if (offset > 0) url += `&offset=${offset}`;
+  // D-98: a collection's own token, when the caller has one (mounted via /t/<token> - see
+  // pages/Preview.tsx), is what lets an otherwise-unauthorized anonymous viewer list a secret/private
+  // collection reached that way - controllers/browse.ts's isAuthorizedForTarget checks it.
+  if (token !== undefined) url += `&token=${encodeURIComponent(token)}`;
   return url;
+}
+
+// D-100: the client never constructs a URL - this only ever extracts the PATHNAME from a `previewUrl`
+// the server already built (a row's own, or a breadcrumb crumb's), for use with react-router's navigate().
+function pathnameOf(absoluteUrl: string): string {
+  return new URL(absoluteUrl).pathname;
 }
 
 function currentToken(): string | null {
@@ -282,7 +300,7 @@ function CollectionRow({
 }: {
   row: BrowseCollection;
   user: MosniUser;
-  onOpen: (id: string) => void;
+  onOpen: (row: BrowseCollection) => void;
   onReload: () => void;
 }) {
   const [panel, setPanel] = useState<RowPanel>(null);
@@ -330,7 +348,7 @@ function CollectionRow({
           <mosni-icon name="folder" size="18" />
         </td>
         <td>
-          <button type="button" className="btn-ghost" onClick={() => onOpen(row.id)}>
+          <button type="button" className="btn-ghost" onClick={() => onOpen(row)}>
             {row.name}
           </button>
         </td>
@@ -401,11 +419,20 @@ function CollectionRow({
   );
 }
 
-export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
+export function FileBrowser({
+  initialScope,
+  initialCollectionId,
+  initialToken,
+}: { initialScope?: Scope; initialCollectionId?: string; initialToken?: string } = {}) {
+  const navigate = useNavigate();
+  // A collection-route mount (pages/Preview.tsx) never switches scope or drills via local state - see
+  // this file's header comment. `collectionId`/`scope` are therefore fixed for the component's whole
+  // lifetime in that mode; a DIFFERENT resolved collection remounts a fresh instance (`key`) instead.
+  const isCollectionRoute = initialCollectionId !== undefined;
+  const collectionId = initialCollectionId ?? "";
   const [user, setUser] = useState<MosniUser>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [scope, setScope] = useState<Scope | null>(initialScope ?? null);
-  const [collectionId, setCollectionId] = useState("");
+  const [scope, setScope] = useState<Scope | null>(isCollectionRoute ? "public" : (initialScope ?? null));
   const [data, setData] = useState<BrowseResponse | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [newCollectionName, setNewCollectionName] = useState("");
@@ -445,7 +472,7 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
   useEffect(() => {
     if (scope === null) return;
     let cancelled = false;
-    void fetch(browseUrl(scope, collectionId, 0), authHeaders(currentToken()))
+    void fetch(browseUrl(scope, collectionId, 0, initialToken), authHeaders(currentToken()))
       .then((res) => (res.ok ? (res.json() as Promise<BrowseResponse>) : null))
       .then((json) => {
         if (!cancelled) setData(json);
@@ -453,7 +480,9 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
     return () => {
       cancelled = true;
     };
-  }, [scope, collectionId, reloadKey]);
+    // collectionId/initialToken are fixed for this component's lifetime in collection-route mode (see the
+    // header comment) but are still real dependencies for the root-mounted case's own lint correctness.
+  }, [scope, collectionId, reloadKey, initialToken]);
 
   const visibleTabs = useMemo(
     () => SCOPE_TABS.filter((t) => t.scope === "public" || (user !== null && (t.scope === "mine" || isFilesAdmin(user)))),
@@ -466,10 +495,9 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
     function onTabChange(event: Event) {
       const index = (event as CustomEvent<{ index: number }>).detail.index;
       const next = visibleTabs[index];
-      if (next) {
-        setScope(next.scope);
-        setCollectionId("");
-      }
+      // Tabs only ever render in root mode (see the JSX below), where collectionId is always "" - no
+      // collectionId reset needed here the way the pre-Wave-C version needed one.
+      if (next) setScope(next.scope);
     }
     el.addEventListener("mosni-tab-change", onTabChange);
     return () => el.removeEventListener("mosni-tab-change", onTabChange);
@@ -485,7 +513,7 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
 
   async function loadMore() {
     if (data === null || data.nextOffset === null || scope === null) return;
-    const res = await fetch(browseUrl(scope, collectionId, data.nextOffset), authHeaders(currentToken()));
+    const res = await fetch(browseUrl(scope, collectionId, data.nextOffset, initialToken), authHeaders(currentToken()));
     if (!res.ok) return;
     const next = (await res.json()) as BrowseResponse;
     setData((prev) =>
@@ -523,7 +551,9 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
 
   return (
     <div style={{ display: "grid", gap: "1rem" }}>
-      {authReady && visibleTabs.length > 1 && (
+      {/* Scope switching only makes sense in root mode - a collection-route mount is a fixed, specific
+          collection (see the header comment), not something to browse mine/public/all within. */}
+      {!isCollectionRoute && authReady && visibleTabs.length > 1 && (
         // D-112 (Wave 0) gave `<mosni-tab>` a write-through `label` setter, so this is ordinary JSX now -
         // no more building an HTML string for dangerouslySetInnerHTML. `key` still forces a fresh element
         // (and so a fresh one-time render() call) when the visible tab set itself changes, e.g. once auth
@@ -534,22 +564,6 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
             <mosni-tab key={tab.scope} label={tab.label} selected={scope === tab.scope} />
           ))}
         </mosni-tabs>
-      )}
-
-      {data && data.breadcrumb.length > 0 && (
-        <nav aria-label="Breadcrumb" style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
-          <button type="button" onClick={() => setCollectionId("")}>
-            Home
-          </button>
-          {data.breadcrumb.map((crumb) => (
-            <span key={crumb.id} style={{ display: "flex", gap: "0.35rem" }}>
-              /
-              <button type="button" onClick={() => setCollectionId(crumb.id)}>
-                {crumb.name}
-              </button>
-            </span>
-          ))}
-        </nav>
       )}
 
       <h2>Files and collections</h2>
@@ -577,6 +591,52 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
         <span className="spinner" role="status" aria-label="Loading" />
       ) : (
         <>
+          {/* C3: a PERMANENT root crumb (defect 8) - the old version gated the whole nav on
+              breadcrumb.length > 0, so the Home control lived inside the element you needed it to escape,
+              and the bar appeared/vanished as you moved, shifting the page. C4: ancestor crumbs are real
+              links (`.btn-ghost`, never a filled `<button>`); the current location is plain text, not a
+              control. previewUrl per crumb is server-built (D-100) - the client only ever extracts a
+              pathname from it, never constructs one. */}
+          <nav aria-label="Breadcrumb" style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap", alignItems: "center" }}>
+            {collectionId === "" ? (
+              <span aria-current="location">Home</span>
+            ) : (
+              <a
+                href="/"
+                className="btn-ghost"
+                onClick={(event) => {
+                  event.preventDefault();
+                  navigate("/");
+                }}
+              >
+                Home
+              </a>
+            )}
+            {data.breadcrumb.map((crumb, i) => {
+              const isCurrent = i === data.breadcrumb.length - 1;
+              const href = pathnameOf(crumb.previewUrl);
+              return (
+                <span key={crumb.id} style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                  <span aria-hidden="true">/</span>
+                  {isCurrent ? (
+                    <span aria-current="location">{crumb.name}</span>
+                  ) : (
+                    <a
+                      href={href}
+                      className="btn-ghost"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        navigate(href);
+                      }}
+                    >
+                      {crumb.name}
+                    </a>
+                  )}
+                </span>
+              );
+            })}
+          </nav>
+
           <table className="table interactive">
             <thead>
               <tr>
@@ -590,7 +650,13 @@ export function FileBrowser({ initialScope }: { initialScope?: Scope } = {}) {
             </thead>
             <tbody>
               {data.collections.map((row) => (
-                <CollectionRow key={row.id} row={row} user={user} onOpen={setCollectionId} onReload={reload} />
+                <CollectionRow
+                  key={row.id}
+                  row={row}
+                  user={user}
+                  onOpen={(opened) => navigate(pathnameOf(opened.previewUrl))}
+                  onReload={reload}
+                />
               ))}
               {data.files.map((row) => (
                 <FileRow key={row.id} row={row} user={user} onReload={reload} />
