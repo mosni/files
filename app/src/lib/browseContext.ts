@@ -36,3 +36,12 @@ export type BrowseResponse = {
   files: BrowseFile[];
   nextOffset: number | null;
 };
+
+// D-107/§1.2 of the E4.1 waves hand-off: what the SPA shell's embedded context carries when a `/f/*` or
+// `/t/<token>` document resolves to a collection rather than a file - `kind: "collection"` deliberately
+// can never collide with PreviewContext's own `kind` field (always "image" | "video" | "pdf" | "text" |
+// "other"), so the client can tell the two shapes apart from the same embedded <script id="preview-context">.
+export type CollectionLocation = {
+  kind: "collection";
+  collectionId: string;
+};

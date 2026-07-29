@@ -12,6 +12,7 @@
 import { renderToString } from "react-dom/server";
 import type { PreviewContext } from "../lib/previewContext.ts";
 import { describeFile } from "../lib/previewContext.ts";
+import type { CollectionLocation } from "../lib/browseContext.ts";
 
 const SITE_NAME = "Hannah's File Drop";
 
@@ -161,4 +162,37 @@ function EmbeddedContext({ ctx }: { ctx: PreviewContext }) {
 
 export function renderEmbeddedContext(ctx: PreviewContext): string {
   return renderToString(<EmbeddedContext ctx={ctx} />);
+}
+
+// D-107/§1.2: the collection counterpart of FullHead/MinimalHead above. No OG/JSON-LD unfurl richness -
+// that is out of E4.1's scope - just a real title and the same public/non-public robots split a file
+// gets. The name is safe to reveal here: by the time this renders, the caller (preview.ts) has already
+// gated the requester as authorized (owner/superuser/ACL-granted) or the collection is public, so showing
+// its own name back to the person who is allowed to see it leaks nothing new.
+function CollectionHead({ name, isPublic }: { name: string; isPublic: boolean }) {
+  return (
+    <>
+      <title>{`${name} · ${SITE_NAME}`}</title>
+      <meta name="robots" content={isPublic ? "index, follow" : "noindex, nofollow"} />
+    </>
+  );
+}
+
+export function renderCollectionHead(name: string, isPublic: boolean): string {
+  return renderToString(<CollectionHead name={name} isPublic={isPublic} />);
+}
+
+// Reuses the SAME #preview-context script id/type EmbeddedContext above uses (waves hand-off: "reuse the
+// existing mechanism, do not add a second one") - CollectionLocation's `kind: "collection"` is what lets
+// the client tell the two shapes apart from that one element.
+function EmbeddedCollectionLocation({ location }: { location: CollectionLocation }) {
+  const json = escapeScriptBody(JSON.stringify(location));
+  return (
+    // biome-ignore lint: same dangerouslySetInnerHTML requirement and escaping as EmbeddedContext above.
+    <script type="application/json" id="preview-context" dangerouslySetInnerHTML={{ __html: json }} />
+  );
+}
+
+export function renderEmbeddedCollectionLocation(location: CollectionLocation): string {
+  return renderToString(<EmbeddedCollectionLocation location={location} />);
 }

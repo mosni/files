@@ -7,7 +7,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import type { Claims } from "../lib/roles.ts";
 import { isSuperuser } from "../lib/roles.ts";
 import { generateId } from "../lib/ids.ts";
-import type { Protection } from "../lib/protection.ts";
+import { mostRestrictive, type Protection } from "../lib/protection.ts";
 import { mintUniqueToken } from "../lib/tokens.ts";
 import { deleteFile } from "./files.ts";
 import { getPool, isLinkTokenTaken } from "./db.ts";
@@ -83,6 +83,30 @@ export async function resolveCollectionById(id: string): Promise<CollectionRecor
   );
   const row = rows[0];
   return row === undefined ? null : rowToRecord(row);
+}
+
+// D-107/E4-COLLECTION-TOKEN-UNRESOLVED: the collection half of files.ts's resolveByToken - mirrors its
+// shape exactly (same null-on-miss contract), so a collection's /t/<token> share link has somewhere to
+// resolve to. Unlike a file, a collection has no bytes and nothing to stat() - the row itself is the
+// whole answer.
+export async function resolveCollectionByToken(token: string): Promise<CollectionRecord | null> {
+  const [rows] = await getPool().query<CollectionRow[]>(
+    `SELECT ${SELECT_COLUMNS} FROM collections WHERE link_token = ?`,
+    [token],
+  );
+  const row = rows[0];
+  return row === undefined ? null : rowToRecord(row);
+}
+
+// D-96 applied to a collection itself rather than to a file inside one: mirrors storage/files.ts's
+// resolveEffective, but protectionChain(record.id) already returns root-first levels DOWN TO AND
+// INCLUDING this collection's own row (see its doc comment above), so there is no separate "own level" to
+// fold in afterward the way a file's collectionId (its PARENT) requires.
+export type ResolvedCollection = CollectionRecord & { effectiveProtection: Protection };
+
+export async function resolveCollectionEffective(record: CollectionRecord): Promise<ResolvedCollection> {
+  const chain = await protectionChain(record.id);
+  return { ...record, effectiveProtection: mostRestrictive(chain) };
 }
 
 // The shared ancestor walk: root-first CollectionRecord[] from root down to (and including) this

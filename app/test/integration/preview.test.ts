@@ -18,6 +18,7 @@ import { initSpaShell } from "../../src/storage/spaShell.ts";
 import { makeTestConfig } from "../helpers/testConfig.ts";
 import type { Protection } from "../../src/lib/protection.ts";
 import type { PreviewContext } from "../../src/lib/previewContext.ts";
+import type { CollectionLocation } from "../../src/lib/browseContext.ts";
 
 const verifyMock = vi.mocked(verify);
 const FILES_HOST = "files.mosni.dev";
@@ -484,5 +485,199 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
     expect((await get(`/api/oembed?url=${encodeURIComponent(foreignUrl)}`)).statusCode).toBe(404);
 
     expect((await get("/api/oembed")).statusCode).toBe(404);
+  });
+
+  // --- E4.1 Wave A / D-107: a collection's own share link (closes E4-COLLECTION-TOKEN-UNRESOLVED) -------
+  //
+  // Token uniqueness is enforced across BOTH tables by storage/db.ts's isLinkTokenTaken (checked before
+  // this suite was written), so a real file/collection token collision cannot occur - "a file token wins"
+  // (§1.1) is defensive ordering in the dispatcher, not something a live collision test could exercise.
+
+  function embeddedLocationOf(body: string): CollectionLocation {
+    const match = /<script type="application\/json" id="preview-context">(.*?)<\/script>/.exec(body);
+    expect(match).not.toBeNull();
+    return JSON.parse(match![1]) as CollectionLocation;
+  }
+
+  describe("a collection's previewUrl resolves in both shapes (the test whose absence let this ship)", () => {
+    it("a public collection's /f/<path> 200s with an embedded CollectionLocation", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `pub-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "public",
+      });
+      const res = await get(`/f/${collection.name}`);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["content-type"]).toContain("text/html");
+      // React's renderToString HTML-escapes text content (the site name's apostrophe becomes &#x27;),
+      // so this checks for the title element rather than a literal "Hannah's" substring.
+      expect(res.body).toMatch(new RegExp(`<title>${collection.name} · Hannah&#x27;s File Drop</title>`));
+      const location = embeddedLocationOf(res.body);
+      expect(location).toEqual({ kind: "collection", collectionId: collection.id });
+    });
+
+    it("the SAME public collection's /t/<token> also 200s with the same CollectionLocation", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `pubtok-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "public",
+      });
+      const res = await get(`/t/${collection.linkToken}`);
+
+      expect(res.statusCode).toBe(200);
+      expect(embeddedLocationOf(res.body)).toEqual({ kind: "collection", collectionId: collection.id });
+    });
+
+    it("a nested collection resolves by its full path", async () => {
+      const top = await createCollection({
+        parentId: "",
+        name: `nest-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "public",
+      });
+      const child = await createCollection({
+        parentId: top.id,
+        name: "child",
+        ownerSub: "user:owner",
+        protection: "public",
+      });
+      const res = await get(`/f/${top.name}/child`);
+      expect(res.statusCode).toBe(200);
+      expect(embeddedLocationOf(res.body)).toEqual({ kind: "collection", collectionId: child.id });
+    });
+
+    it("an unknown collection path/token still 404s (no regression on the file-not-found case)", async () => {
+      expect((await get(`/f/never-${randomUUID()}`)).statusCode).toBe(404);
+      expect((await get(`/t/${randomUUID()}`)).statusCode).toBe(404);
+    });
+  });
+
+  // Mandatory, never-delete class (verification-concept.md): a secret collection's readable path 404s for
+  // everyone including its owner and a superuser; its /t/<token> still resolves; an anonymous request for
+  // ANY non-public collection 404s. Neither response leaks the collection name (D-100).
+  describe("collection effective-protection gating (D-96/D-99, mandatory/never-delete)", () => {
+    it("secret: 404 at /f/<path> for anonymous, the owner, AND a superuser - but /t/<token> resolves", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `secret-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "secret",
+      });
+
+      const anon = await get(`/f/${collection.name}`);
+      expect(anon.statusCode).toBe(404);
+      expect(anon.body).not.toContain(collection.name);
+
+      verifyMock.mockResolvedValue({ sub: "user:owner" } as never);
+      expect((await get(`/f/${collection.name}`, { authorization: "Bearer t" })).statusCode).toBe(404);
+
+      verifyMock.mockResolvedValue({ sub: "user:root", mosni_owner: true } as never);
+      expect((await get(`/f/${collection.name}`, { authorization: "Bearer t" })).statusCode).toBe(404);
+
+      const byToken = await get(`/t/${collection.linkToken}`);
+      expect(byToken.statusCode).toBe(200);
+      expect(embeddedLocationOf(byToken.body)).toEqual({ kind: "collection", collectionId: collection.id });
+    });
+
+    it("unlisted/private: anonymous 404s at the readable path (unlike a file, which reveals nothing but still 200s)", async () => {
+      for (const protection of ["unlisted", "private"] as const) {
+        const collection = await createCollection({
+          parentId: "",
+          name: `${protection}-${randomUUID()}`,
+          ownerSub: "user:owner",
+          protection,
+        });
+        const res = await get(`/f/${collection.name}`);
+        expect(res.statusCode).toBe(404);
+      }
+    });
+
+    it("private: the owner and a superuser CAN reach it at the readable path", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `priv-owner-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "private",
+      });
+
+      verifyMock.mockResolvedValue({ sub: "user:owner" } as never);
+      const ownerRes = await get(`/f/${collection.name}`, { authorization: "Bearer t" });
+      expect(ownerRes.statusCode).toBe(200);
+      expect(embeddedLocationOf(ownerRes.body)).toEqual({ kind: "collection", collectionId: collection.id });
+
+      verifyMock.mockResolvedValue({ sub: "user:root", mosni_owner: true } as never);
+      expect((await get(`/f/${collection.name}`, { authorization: "Bearer t" })).statusCode).toBe(200);
+    });
+
+    it("private: a signed-in stranger with no grant still 404s", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `priv-stranger-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "private",
+      });
+      verifyMock.mockResolvedValue({ sub: "user:stranger" } as never);
+      expect((await get(`/f/${collection.name}`, { authorization: "Bearer t" })).statusCode).toBe(404);
+    });
+
+    it("private: an ACL grant on the collection itself grants access (D-99)", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `priv-granted-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "private",
+      });
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 0)", [
+        collection.id,
+        "user:granted",
+      ]);
+      verifyMock.mockResolvedValue({ sub: "user:granted" } as never);
+      expect((await get(`/f/${collection.name}`, { authorization: "Bearer t" })).statusCode).toBe(200);
+    });
+
+    it("private: an ACL grant on an ANCESTOR collection pierces down (D-99)", async () => {
+      const top = await createCollection({
+        parentId: "",
+        name: `priv-anc-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "private",
+      });
+      const child = await createCollection({
+        parentId: top.id,
+        name: "child",
+        ownerSub: "user:owner",
+        protection: "private",
+      });
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 0)", [
+        top.id,
+        "user:granted",
+      ]);
+      verifyMock.mockResolvedValue({ sub: "user:granted" } as never);
+      const res = await get(`/f/${top.name}/child`, { authorization: "Bearer t" });
+      expect(res.statusCode).toBe(200);
+      expect(embeddedLocationOf(res.body)).toEqual({ kind: "collection", collectionId: child.id });
+    });
+
+    it("a collection nested under a secret ancestor also 404s at its own readable path (secret never resolves, D-96)", async () => {
+      const top = await createCollection({
+        parentId: "",
+        name: `sec-anc-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "secret",
+      });
+      const child = await createCollection({
+        parentId: top.id,
+        name: "child",
+        ownerSub: "user:owner",
+        protection: "public", // own level is public - the ANCESTOR's secret must still win (D-96)
+      });
+      expect((await get(`/f/${top.name}/child`)).statusCode).toBe(404);
+      // and never leaks the child's own name either
+      const res = await get(`/f/${top.name}/child`);
+      expect(res.body).not.toContain(child.name);
+    });
   });
 });

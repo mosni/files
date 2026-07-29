@@ -14,6 +14,7 @@ import { readablePathResolves } from "../lib/protection.ts";
 import { buildPreviewContext, previewKindFor, type PreviewContext } from "../lib/previewContext.ts";
 import { signDelivery } from "../lib/deliverySignature.ts";
 import { injectHead } from "../lib/shellHtml.ts";
+import type { CollectionLocation } from "../lib/browseContext.ts";
 import {
   hasAclGrant,
   resolveByNames,
@@ -22,9 +23,21 @@ import {
   type FileRecord,
   type ResolvedFile,
 } from "../storage/files.ts";
-import { collectionPath, hasAclGrantOnChain } from "../storage/collections.ts";
+import {
+  collectionPath,
+  hasAclGrantOnChain,
+  resolveCollectionByNames,
+  resolveCollectionByToken,
+  resolveCollectionEffective,
+  type ResolvedCollection,
+} from "../storage/collections.ts";
 import { getSpaShell } from "../storage/spaShell.ts";
-import { renderEmbeddedContext, renderPreviewHead } from "../views/PreviewHead.tsx";
+import {
+  renderCollectionHead,
+  renderEmbeddedCollectionLocation,
+  renderEmbeddedContext,
+  renderPreviewHead,
+} from "../views/PreviewHead.tsx";
 import { renderNotFoundPage } from "../views/NotFound.tsx";
 
 function send404(reply: FastifyReply): void {
@@ -40,6 +53,40 @@ async function resolveDocumentByNames(segments: readonly string[]): Promise<Reso
   if (record === null) return null;
   const resolved = await resolveEffective(record);
   if (!readablePathResolves(resolved.effectiveProtection)) return null;
+  return resolved;
+}
+
+// D-107/§1.2: authorization for a collection reached via its READABLE /f/ path - D-99's identity list
+// (owner, superuser, or an ACL grant anywhere on its own chain; hasAclGrantOnChain already checks the
+// collection's own row before walking up). Unlike a file's `private`, which still 200s an anonymous
+// requester a minimal, reveal-nothing shell, a collection route mounts the real browser and there is no
+// useful "reveal nothing" shell for it to hand back - so this gate decides at the document layer instead
+// of deferring to the API, and a non-public collection 404s outright for anyone not on that list.
+async function collectionDocumentAuthorized(
+  request: FastifyRequest,
+  config: Config,
+  resolved: ResolvedCollection,
+): Promise<boolean> {
+  if (resolved.effectiveProtection === "public") return true;
+  const claims = await claimsFromBearer(request, config.appOrigin);
+  if (claims === null) return false;
+  const isOwner = claims.sub === resolved.ownerSub;
+  return isOwner || isSuperuser(claims) || (await hasAclGrantOnChain(resolved.id, claims.sub));
+}
+
+// The collection counterpart of resolveDocumentByNames above, for a `/f/<...>` path that names a
+// collection rather than a file (E4-COLLECTION-TOKEN-UNRESOLVED's readable-path half). `secret` 404s for
+// everyone here, same as a file (D-59/D-99) - the token path below is the only way in for it.
+async function resolveDocumentCollectionByNames(
+  request: FastifyRequest,
+  config: Config,
+  segments: readonly string[],
+): Promise<ResolvedCollection | null> {
+  const record = await resolveCollectionByNames(segments);
+  if (record === null) return null;
+  const resolved = await resolveCollectionEffective(record);
+  if (!readablePathResolves(resolved.effectiveProtection)) return null;
+  if (!(await collectionDocumentAuthorized(request, config, resolved))) return null;
   return resolved;
 }
 
@@ -72,19 +119,44 @@ async function sendDocument(reply: FastifyReply, config: Config, record: Resolve
   reply.type("text/html; charset=utf-8").send(injectHead(getSpaShell(), head));
 }
 
+// D-107/§1.2: both /f/<...> and /t/<token> resolve to a collection id, and the SPA opens the browser
+// there - reusing the D-70 embedded-context splice (renderEmbeddedCollectionLocation), never a second
+// delivery mechanism.
+async function sendCollectionDocument(reply: FastifyReply, resolved: ResolvedCollection): Promise<void> {
+  const location: CollectionLocation = { kind: "collection", collectionId: resolved.id };
+  const head = renderCollectionHead(resolved.name, resolved.effectiveProtection === "public");
+  reply
+    .type("text/html; charset=utf-8")
+    .send(injectHead(getSpaShell(), head + renderEmbeddedCollectionLocation(location)));
+}
+
 export async function previewByPath(
-  _request: FastifyRequest,
+  request: FastifyRequest,
   reply: FastifyReply,
   config: Config,
   relPath: string,
 ): Promise<void> {
   const segments = safeSegments(relPath);
-  const record = segments === null ? null : await resolveDocumentByNames(segments);
-  if (record === null) {
+  if (segments === null) {
     send404(reply);
     return;
   }
-  await sendDocument(reply, config, record);
+
+  // §1.1: files-first resolution order - a file token/path always wins if the two namespaces ever
+  // collided (they don't in practice; link tokens and collection paths are distinct spaces).
+  const fileRecord = await resolveDocumentByNames(segments);
+  if (fileRecord !== null) {
+    await sendDocument(reply, config, fileRecord);
+    return;
+  }
+
+  const collectionRecord = await resolveDocumentCollectionByNames(request, config, segments);
+  if (collectionRecord !== null) {
+    await sendCollectionDocument(reply, collectionRecord);
+    return;
+  }
+
+  send404(reply);
 }
 
 export async function previewByToken(
@@ -93,12 +165,21 @@ export async function previewByToken(
   config: Config,
   token: string,
 ): Promise<void> {
-  const record = await resolveByToken(token);
-  if (record === null) {
-    send404(reply);
+  const fileRecord = await resolveByToken(token);
+  if (fileRecord !== null) {
+    await sendDocument(reply, config, await resolveEffective(fileRecord));
     return;
   }
-  await sendDocument(reply, config, await resolveEffective(record));
+
+  // A collection's own token bypasses the readable-path/authorization gate entirely, same as a file's -
+  // knowing the unguessable token IS the access grant (D-59/D-98). A `secret` collection resolves here.
+  const collectionRecord = await resolveCollectionByToken(token);
+  if (collectionRecord !== null) {
+    await sendCollectionDocument(reply, await resolveCollectionEffective(collectionRecord));
+    return;
+  }
+
+  send404(reply);
 }
 
 // Same grant rule controllers/delivery.ts's authorizePrivate uses (owner, superuser, an explicit ACL row

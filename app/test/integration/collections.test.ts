@@ -17,6 +17,8 @@ import {
   renameCollection,
   resolveCollectionById,
   resolveCollectionByNames,
+  resolveCollectionByToken,
+  resolveCollectionEffective,
   setCollectionProtection,
 } from "../../src/storage/collections.ts";
 import { claimFileRow, commitFileRow, diskRelPath, initFilesStorage, resolveById } from "../../src/storage/files.ts";
@@ -399,5 +401,54 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
     const mineList = await listCollectionsFor("user:list-a");
     expect(mineList.map((c) => c.id)).toContain(mine.id);
     expect(mineList.map((c) => c.id)).not.toContain(theirs.id);
+  });
+
+  // E4.1 Wave A / D-107: closes E4-COLLECTION-TOKEN-UNRESOLVED - the test whose absence let a
+  // collection's share link 404 in both shapes.
+  describe("resolveCollectionByToken (D-107)", () => {
+    it("resolves a collection by its link_token", async () => {
+      const collection = await createCollection({ parentId: "", name: `tok-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      expect(await resolveCollectionByToken(collection.linkToken)).toMatchObject({ id: collection.id });
+    });
+
+    it("returns null for a token that matches no collection", async () => {
+      expect(await resolveCollectionByToken(randomUUID())).toBeNull();
+    });
+  });
+
+  describe("resolveCollectionEffective (D-96 applied to a collection itself)", () => {
+    it("a root, public collection is effectively public", async () => {
+      const top = await createCollection({
+        parentId: "",
+        name: `eff-root-${randomUUID()}`,
+        ownerSub: "user:a",
+        protection: "public",
+      });
+      createdCollectionIds.push(top.id);
+      const resolved = await resolveCollectionEffective(top);
+      expect(resolved.effectiveProtection).toBe("public");
+    });
+
+    it("a collection stored looser than its parent is EFFECTIVELY as restrictive as the parent, without rewriting its own stored level", async () => {
+      const top = await createCollection({
+        parentId: "",
+        name: `eff-parent-${randomUUID()}`,
+        ownerSub: "user:a",
+        protection: "private",
+      });
+      createdCollectionIds.push(top.id);
+      const child = await createCollection({
+        parentId: top.id,
+        name: "child",
+        ownerSub: "user:a",
+        protection: "public",
+      });
+      createdCollectionIds.push(child.id);
+
+      const resolved = await resolveCollectionEffective(child);
+      expect(resolved.effectiveProtection).toBe("private");
+      expect(resolved.protection).toBe("public"); // the stored column is untouched (D-97)
+    });
   });
 });
