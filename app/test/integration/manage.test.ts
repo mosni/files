@@ -411,6 +411,29 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       asUser("user:someone-else");
       expect((await req("DELETE", `/api/collections/${collection.id}`, { token: "t" })).statusCode).toBe(404);
     });
+
+    // D-104: the browser's own confirmation must name the descendant count before the owner commits.
+    it("a dryRun request reports descendant counts and deletes nothing", async () => {
+      const top = await seedCollection("user:owner");
+      const child = await createCollection({ parentId: top.id, name: "child", ownerSub: "user:owner" });
+      createdCollectionIds.push(child.id);
+      await seedFile({ collectionId: top.id, ownerSub: "user:owner" });
+      await seedFile({ collectionId: child.id, ownerSub: "user:owner" });
+
+      asUser("user:owner");
+      const res = await req("DELETE", `/api/collections/${top.id}?dryRun=true`, { token: "t" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ collectionCount: 2, fileCount: 2 });
+      expect(await resolveCollectionById(top.id)).not.toBeNull();
+      expect(await resolveCollectionById(child.id)).not.toBeNull();
+    });
+
+    it("dryRun 404s for a non-owner same as a real delete would", async () => {
+      const collection = await seedCollection("user:owner");
+      asUser("user:someone-else");
+      const res = await req("DELETE", `/api/collections/${collection.id}?dryRun=true`, { token: "t" });
+      expect(res.statusCode).toBe(404);
+    });
   });
 
   describe("PATCH /api/files/:id", () => {

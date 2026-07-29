@@ -14,7 +14,8 @@ import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
 import { isFilesAdmin } from "../lib/roles.ts";
 import { buildCollectionPreviewUrl, buildFileUrls } from "../lib/fileUrls.ts";
-import { isListedFor, mostRestrictive, type Protection, type VisibilityReason } from "../lib/protection.ts";
+import { isListedFor, mostRestrictive, type Protection } from "../lib/protection.ts";
+import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../lib/browseContext.ts";
 import {
   collectionBreadcrumb,
   hasAclGrantOnChain,
@@ -33,39 +34,7 @@ import {
   type FileRecord,
 } from "../storage/files.ts";
 
-type Scope = "mine" | "public" | "all";
-
 const PAGE_SIZE = 100;
-
-type BrowseCollection = {
-  id: string;
-  name: string;
-  effectiveProtection: Protection;
-  defaultProtection: Protection;
-  reason: VisibilityReason;
-  previewUrl: string;
-};
-
-type BrowseFile = {
-  id: string;
-  name: string;
-  bytes: number;
-  createdAt: string;
-  effectiveProtection: Protection;
-  reason: VisibilityReason;
-  previewUrl: string;
-  directUrl: string;
-  width: number | null;
-  height: number | null;
-  durationSeconds: number | null;
-};
-
-type BrowseResponse = {
-  breadcrumb: { id: string; name: string }[];
-  collections: BrowseCollection[];
-  files: BrowseFile[];
-  nextOffset: number | null;
-};
 
 function isScope(value: unknown): value is Scope {
   return value === "mine" || value === "public" || value === "all";

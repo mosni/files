@@ -7,6 +7,7 @@ import { applyMigrations, closeDb, getPool, initDb } from "../../src/storage/db.
 import {
   canUploadTo,
   collectionPath,
+  countDescendants,
   createCollection,
   deleteCollectionRecursive,
   ensureDefaultCollection,
@@ -312,6 +313,45 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
       const { deletedFileIds } = await deleteCollectionRecursive(collection.id);
       expect(deletedFileIds).toEqual([]);
       expect(await resolveCollectionByNames([collection.name])).toBeNull();
+    });
+  });
+
+  describe("countDescendants (D-88/D-104) - the delete confirmation's count, without deleting anything", () => {
+    it("counts the collection itself, every nested collection and every file beneath them", async () => {
+      const top = await createCollection({ parentId: "", name: `count-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(top.id);
+      const child = await createCollection({ parentId: top.id, name: "child", ownerSub: "user:a" });
+      createdCollectionIds.push(child.id);
+
+      const claimed = await claimFileRow({
+        collectionId: child.id,
+        name: "counted.txt",
+        diskDir: "2026/07",
+        diskName: `${randomUUID()}-counted.txt`,
+        ownerSub: "user:a",
+        uploaderSub: "user:a",
+        protection: "unlisted",
+      });
+      // resolveById() below stat()s the real bytes and self-heals (deletes the row) if they're missing -
+      // matching deleteCollectionRecursive's own test just above, which writes them for the same reason.
+      const abs = path.join(root, ...diskRelPath(claimed).split("/"));
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, "bytes");
+      await commitFileRow(claimed.id, { bytes: 5, width: null, height: null, durationSeconds: null, textPreview: null });
+
+      const counts = await countDescendants(top.id);
+      expect(counts).toEqual({ collectionCount: 2, fileCount: 1 });
+
+      // Nothing was actually removed.
+      expect(await resolveCollectionById(top.id)).not.toBeNull();
+      expect(await resolveCollectionById(child.id)).not.toBeNull();
+      expect(await resolveById(claimed.id)).not.toBeNull();
+    });
+
+    it("a leaf collection with no children counts itself and zero files", async () => {
+      const leaf = await createCollection({ parentId: "", name: `count-leaf-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(leaf.id);
+      expect(await countDescendants(leaf.id)).toEqual({ collectionCount: 1, fileCount: 0 });
     });
   });
 

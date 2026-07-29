@@ -250,6 +250,20 @@ async function descendantCollectionIds(rootId: string): Promise<string[]> {
   return all;
 }
 
+// D-88/D-104: the count a recursive-delete confirmation names, computed WITHOUT deleting anything -
+// shares descendantCollectionIds with deleteCollectionRecursive below so the two can never disagree on
+// what "descendant" means. `collectionCount` includes the collection itself (matching what deleting it
+// actually removes), so a leaf collection with no children reports 1, not 0.
+export async function countDescendants(id: string): Promise<{ collectionCount: number; fileCount: number }> {
+  const collectionIds = await descendantCollectionIds(id);
+  const [fileRows] = await getPool().query<RowDataPacket[]>(
+    `SELECT COUNT(*) AS count FROM files WHERE collection_id IN (${collectionIds.map(() => "?").join(",")})`,
+    collectionIds,
+  );
+  const fileCount = Number((fileRows as { count: number }[])[0]?.count ?? 0);
+  return { collectionCount: collectionIds.length, fileCount };
+}
+
 // D-88: deleting a collection recursively deletes every descendant collection, file row and file's
 // bytes. One audit line per file is the CALLER's responsibility (controllers/manage.ts), which is why
 // this returns the deleted file ids rather than emitting audit events itself - storage stays I/O-free of

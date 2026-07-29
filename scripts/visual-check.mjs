@@ -58,9 +58,13 @@ async function collectionFor(conn, name, ownerSub) {
   const existing = collectionIdsByName.get(name);
   if (existing !== undefined) return existing;
   const id = newId();
+  // D-98: `link_token` defaults to '' and is uniquely indexed - every collection created by a repeat run
+  // of this script needs its own real token, or the second run's insert collides on the column's shared
+  // default (the same bug e2e/preview.spec.ts's seed() fixed).
+  const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
   await conn.execute(
-    "INSERT INTO collections (id, parent_id, name, owner_sub, default_protection) VALUES (?, '', ?, ?, 'unlisted')",
-    [id, name, ownerSub],
+    "INSERT INTO collections (id, parent_id, name, owner_sub, default_protection, link_token) VALUES (?, '', ?, ?, 'unlisted', ?)",
+    [id, name, ownerSub, linkToken],
   );
   collectionIdsByName.set(name, id);
   return id;
@@ -137,6 +141,49 @@ const owned = await seed(conn, {
   ownerSub: WRITER.sub,
 });
 
+// E4 session 020 (Waves D-F): the browser's own fixtures. `collectionFor`/`seed` above assume one flat
+// `vis-<run>/` collection and can't express a collection's OWN protection (D-95) or nesting beyond one
+// level, so these are raw inserts rather than reusing them.
+async function seedBrowserCollection({ parentId = "", name, ownerSub, protection = "unlisted" }) {
+  const id = newId();
+  const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
+  await conn.execute(
+    "INSERT INTO collections (id, parent_id, name, owner_sub, protection, default_protection, link_token) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [id, parentId, name, ownerSub, protection, protection, linkToken],
+  );
+  return id;
+}
+
+async function seedBrowserFile(collectionId, name, ownerSub, protection = "public") {
+  const fileId = newId();
+  const diskDir = "2026/07";
+  const diskName = `${fileId}-${name}`;
+  const abs = path.join(STORAGE_ROOT, diskDir, diskName);
+  await mkdir(path.dirname(abs), { recursive: true });
+  await writeFile(abs, "browser fixture bytes");
+  const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
+  await conn.execute(
+    `INSERT INTO files (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'committed', ?)`,
+    [fileId, collectionId, name, diskDir, diskName, 21, protection, linkToken, ownerSub],
+  );
+  return fileId;
+}
+
+// D-94: a small public tree, so an anonymous visitor's Browse tab has something to show. `browserNested`
+// is what the breadcrumb drill-down state navigates into.
+const browserRoot = await seedBrowserCollection({ name: `vis-${run}-public`, ownerSub: WRITER.sub, protection: "public" });
+await seedBrowserFile(browserRoot, "welcome.txt", WRITER.sub, "public");
+const browserNested = await seedBrowserCollection({ parentId: browserRoot, name: "nested", ownerSub: WRITER.sub, protection: "public" });
+await seedBrowserFile(browserNested, "deep-file.txt", WRITER.sub, "public");
+// A stranger's row inside the same public collection, so the admin all-files state shows a non-owner row.
+await seedBrowserFile(browserRoot, "someone-elses-file.txt", "user:visual-check-stranger", "unlisted");
+// WRITER's own collection with a nested child + files, for the recursive-delete confirmation state (D-104).
+const deletableTop = await seedBrowserCollection({ name: `vis-${run}-deletable`, ownerSub: WRITER.sub });
+const deletableChild = await seedBrowserCollection({ parentId: deletableTop, name: "child", ownerSub: WRITER.sub });
+await seedBrowserFile(deletableTop, "top-file.txt", WRITER.sub, "unlisted");
+await seedBrowserFile(deletableChild, "child-file.txt", WRITER.sub, "unlisted");
+
 await conn.end();
 
 // Stubs the auth SDK before any page script runs, so the SIGNED-IN drop zone can be rendered without a
@@ -150,6 +197,25 @@ const signedInAs = (claims) => `
     onChange: (cb) => cb(${JSON.stringify(claims)}),
     login: () => {}, logout: () => {},
     toast: (m) => { window.__lastToast = m; },
+  });
+`;
+
+// E4 session 020: an EXPLICIT signed-out stub, for states that must represent "no user" rather than just
+// omitting `init`. DropZone and FileBrowser both poll for `window.mosni` before deciding what to render
+// (anonymous or not) and never give up - production always gets there once auth.mosni.dev answers, but in
+// a sandbox where that domain (and ui.mosni.dev) fail TLS validation, `window.mosni` never appears without
+// SOME stub, and the page sits on its loading spinner forever. Discovered because "landing" (this repo's
+// oldest page state, session 010) has silently screenshotted a blank page every run since - nobody had
+// looked closely enough to notice a stuck spinner isn't a "signed out" view. Giving it this stub, rather
+// than leaving it broken, is what verification-concept.md's own rule asks for ("the finding is 'not ready'
+// - never a nicer presentation of it. Fix it.").
+const signedOut = `
+  window.mosni = Object.assign(window.mosni ?? {}, {
+    user: () => null,
+    token: () => null,
+    onChange: (cb) => cb(null),
+    login: () => {}, logout: () => {},
+    toast: () => {},
   });
 `;
 
@@ -175,9 +241,12 @@ const signedInAsReal = (claims, token) => `
 `;
 
 const uploadToken = await mintToken(WRITER.sub);
+// D-101: the admin/all-files gate needs BOTH roles - see lib/roles.ts's isFilesAdmin().
+const adminToken = await mintToken("user:visual-check-admin", "files:write,files:delete");
+const ADMIN = { sub: "user:visual-check-admin", name: "Admin", roles: ["files:write", "files:delete"] };
 
 const PAGES = [
-  { id: "landing", label: "Landing - signed out", url: "/", note: "The whole page when signed out (F5)" },
+  { id: "landing", label: "Landing - signed out", url: "/", note: "The whole page when signed out (F5)", init: signedOut },
   {
     id: "landing-dropzone",
     label: "Landing - signed in, the drop zone",
@@ -280,6 +349,90 @@ const PAGES = [
     interact: async (p) => {
       await p.waitForSelector("text=Delete file", { timeout: 10_000 }).catch(() => {});
       await p.locator("button", { hasText: "Delete file" }).click();
+      await p.waitForTimeout(150);
+    },
+  },
+  {
+    id: "browser-public-signed-out",
+    label: "Landing - browser section, signed out (public tree, D-94)",
+    url: "/",
+    note: "E4 Wave D: the anonymous Browse tree, below the drop zone (D-1/D-93). An explicit signed-out " +
+      "stub (see signedOut above) - an anonymous visitor's browse must never depend on the real auth SDK " +
+      "resolving, which this sandbox can't do anyway.",
+    init: signedOut,
+    interact: async (p) => {
+      await p.waitForSelector("text=welcome.txt", { timeout: 10_000 }).catch(() => {});
+    },
+  },
+  {
+    id: "browser-mine-signed-in",
+    label: "Landing - browser section, signed in (My files)",
+    url: "/",
+    note: "E4 Wave D: the default tab for a signed-in user - their own collections and files below the " +
+      "drop zone. A real Bearer, so the /api/browse fetch actually authorizes.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.waitForSelector("mosni-tabs", { timeout: 10_000 }).catch(() => {});
+      await p.waitForTimeout(500);
+    },
+  },
+  {
+    id: "browser-nested-breadcrumb",
+    label: "Landing - browser section, drilled into a nested collection (breadcrumb)",
+    url: "/",
+    note: "E4 Wave D: clicking into the public tree's nested collection and back out via the breadcrumb " +
+      "(D-102). Signed out - the public tree is what has the nesting fixture.",
+    init: signedOut,
+    interact: async (p) => {
+      // "nested" is a CHILD of the public root collection - drill into that first, or "nested" is never
+      // on screen to click and this hangs on Playwright's default 30s actionability timeout.
+      await p.waitForSelector(`text=vis-${run}-public`, { timeout: 10_000 }).catch(() => {});
+      await p.locator("button", { hasText: `vis-${run}-public` }).first().click();
+      await p.waitForSelector("text=nested", { timeout: 10_000 }).catch(() => {});
+      await p.locator("button", { hasText: "nested" }).first().click();
+      await p.waitForSelector("text=deep-file.txt", { timeout: 10_000 }).catch(() => {});
+      await p.waitForTimeout(200);
+    },
+  },
+  {
+    id: "browser-admin-all",
+    label: "Landing - browser section, admin All files view",
+    url: "/",
+    note: "D-101: reachable only by a caller holding both files:write and files:delete. Shows a stranger's " +
+      "row with the 'admin' visibility badge (D-103) alongside the admin's own ('own' takes precedence).",
+    init: signedInAsReal(ADMIN, adminToken),
+    interact: async (p) => {
+      await p.waitForSelector("mosni-tabs", { timeout: 10_000 }).catch(() => {});
+      // mosni-tabs only turns its <mosni-tab> children into a real clickable bar once mosnicat.js
+      // (ui.mosni.dev) upgrades the element - unreachable from this sandbox (same TLS-trust gap as
+      // auth.mosni.dev), so there is nothing here to click in THIS environment specifically. The tab-
+      // switching LOGIC itself (mosni-tab-change -> scope change) is exercised directly, without needing
+      // the chrome's real DOM, by FileBrowser.test.tsx - a short timeout here rather than the default 30s
+      // keeps a sandbox-only gap from stalling the whole run.
+      await p.locator("mosni-tabs button", { hasText: "All files" }).click({ timeout: 3_000 }).catch(() => {});
+      // The stranger's file is a CHILD of the public root collection - files never show at the pseudo-root.
+      // Best-effort past this point too: without a real tab click above, this sandbox is still on the
+      // admin's own "My files" default and neither locator will ever appear - that is a known, sandbox-
+      // only gap (see the comment above), not a product defect, and must not fail the whole run.
+      await p.waitForSelector(`text=vis-${run}-public`, { timeout: 10_000 }).catch(() => {});
+      await p.locator("button", { hasText: `vis-${run}-public` }).first().click({ timeout: 3_000 }).catch(() => {});
+      await p.waitForSelector("text=someone-elses-file.txt", { timeout: 10_000 }).catch(() => {});
+      await p.waitForTimeout(200);
+    },
+  },
+  {
+    id: "browser-collection-delete-confirm",
+    label: "Landing - browser section, the recursive collection-delete confirmation",
+    url: "/",
+    note: "D-104/D-88: recursive collection delete gets its own confirmation naming the descendant count - " +
+      "the most destructive operation in the app. This run only opens the confirmation (a dryRun fetch), " +
+      "it never clicks \"Yes, delete\", so the fixture survives for the next run.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.waitForSelector(`text=vis-${run}-deletable`, { timeout: 10_000 }).catch(() => {});
+      const row = p.locator("[data-row-id]", { hasText: `vis-${run}-deletable` });
+      await row.locator("button", { hasText: "Delete" }).click();
+      await p.waitForSelector("text=This can't be undone.", { timeout: 10_000 }).catch(() => {});
       await p.waitForTimeout(150);
     },
   },

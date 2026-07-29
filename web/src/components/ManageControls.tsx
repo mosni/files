@@ -6,18 +6,7 @@
 import { useState } from "react";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 import type { Protection } from "../../../app/src/lib/protection.ts";
-
-const PROTECTION_LEVELS: readonly Protection[] = ["public", "unlisted", "secret", "private"];
-
-// F2: mosni-chrome ships no select component - a native <select> inside the existing `.panel` (which
-// already styles the inputs it contains) is the F2-sanctioned choice; a reusable control is an upstream
-// mosni-chrome change under D-31, deliberately out of scope here.
-const PROTECTION_EXPLANATION: Record<Protection, string> = {
-  public: "Listed and visible to anyone, including search engines.",
-  unlisted: "Not listed, but the link works for anyone who has it.",
-  secret: "The readable link doesn't work - only the short token link does.",
-  private: "Only you, and anyone you've granted access, can open it - even with a link.",
-};
+import { ProtectionControl } from "./ProtectionControl.tsx";
 
 function authHeaders(): Record<string, string> {
   const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
@@ -57,7 +46,6 @@ export function ManageControls({
   const [name, setName] = useState(context.name);
   const [renaming, setRenaming] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
-  const [protection, setProtection] = useState<Protection>(context.protection);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -89,15 +77,11 @@ export function ManageControls({
     }
   }
 
-  async function changeProtection(next: Protection) {
-    const previous = protection;
-    setProtection(next);
+  async function changeProtection(next: Protection): Promise<boolean> {
     const res = await patchFile(context.id, { protection: next });
-    if (!res.ok) {
-      setProtection(previous); // the request failed - don't leave the control lying about the real state
-      return;
-    }
+    if (!res.ok) return false;
     onUpdate?.(await updatedContext(res, { ...context, protection: next }));
+    return true;
   }
 
   async function confirmDelete() {
@@ -113,28 +97,7 @@ export function ManageControls({
   }
 
   const protectionSelector = (
-    <div>
-      <label
-        htmlFor={`protection-select-${context.id}`}
-        style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.35rem", color: "var(--mosni-text-muted)" }}
-      >
-        Who can access this
-      </label>
-      <select
-        id={`protection-select-${context.id}`}
-        value={protection}
-        onChange={(event) => void changeProtection(event.target.value as Protection)}
-      >
-        {PROTECTION_LEVELS.map((level) => (
-          <option key={level} value={level}>
-            {level}
-          </option>
-        ))}
-      </select>
-      <p className="little-link" style={{ margin: "0.35rem 0 0" }}>
-        {PROTECTION_EXPLANATION[protection]}
-      </p>
-    </div>
+    <ProtectionControl id={context.id} protection={context.protection} onChange={changeProtection} />
   );
 
   if (compact) {

@@ -19,6 +19,7 @@ import { ownerContextFor } from "./preview.ts";
 import { emitAuditEvent } from "../storage/audit.ts";
 import {
   canUploadTo,
+  countDescendants,
   createCollection,
   deleteCollectionRecursive,
   listCollectionsFor,
@@ -252,6 +253,15 @@ export async function deleteCollectionHandler(
   const collection = await authorizeCollectionOwner(claims, id);
   if (collection === null) {
     reply.code(404).send();
+    return;
+  }
+
+  // D-104: the browser's recursive-delete confirmation names the descendant count before the owner
+  // commits to it - a dry run reports the same counts deleteCollectionRecursive would act on, without
+  // touching a row.
+  const query = request.query as { dryRun?: string };
+  if (query.dryRun !== undefined) {
+    reply.send(await countDescendants(id));
     return;
   }
 

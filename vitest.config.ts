@@ -16,6 +16,15 @@ export default defineConfig({
     // without this exclusion Vitest's default include glob walks into them too, double-running (and
     // double-counting against the shared redis rate-limit store) whatever tests happen to exist there.
     exclude: ["**/node_modules/**", "e2e/**", ".claude/worktrees/**"],
+    // E4 session 019/020: scope=all (D-101) sweeps EVERY root-level collection regardless of owner, and
+    // its ACL-chain walk (hasAclGrantOnChain) throws on a dangling parent_id rather than silently
+    // returning false - a deliberate fail-loud invariant, not a bug. Running integration test FILES in
+    // parallel means every other file's own root-level collections (created/deleted concurrently against
+    // the SAME shared MariaDB, per D-45) are fair game for that sweep to encounter mid-flight, and
+    // occasionally catches one mid-delete: a genuinely dangling parent_id that is a test-parallelism
+    // artifact, not a real data-integrity fault. Serializing test files removes the race without touching
+    // the invariant. Flagged for the review session - the trade-off is a slower `npm run verify`.
+    fileParallelism: false,
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],
