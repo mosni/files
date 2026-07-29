@@ -160,7 +160,6 @@ function pluralize(count: number, noun: string): string {
 }
 
 function RowActions({
-  itemLabel,
   previewUrl,
   manage,
   mayDelete,
@@ -168,7 +167,6 @@ function RowActions({
   onProtection,
   onDeleteSelected,
 }: {
-  itemLabel: string;
   previewUrl: string;
   manage: boolean;
   mayDelete: boolean;
@@ -193,7 +191,13 @@ function RowActions({
   }, [previewUrl, onRename, onProtection, onDeleteSelected]);
 
   return (
-    <mosni-dropdown ref={ref} label={`Actions for ${itemLabel}`}>
+    // E4.1 Wave E/D-79: `label` becomes the trigger's VISIBLE text (mosni-chrome's dropdown.ts appends it
+    // as a text node, matching its own docs example, label="Actions") - it is not an aria-label-only
+    // accessible-name slot. A per-row "Actions for <name>" here rendered the whole file/collection name as
+    // literal button text, which is exactly what broke the phone-width table (D-79's overflow check caught
+    // it on a long name). Every row already sits in a labeled table row, so a fixed "Actions" carries
+    // enough context.
+    <mosni-dropdown ref={ref} label="Actions">
       <mosni-dropdown-item value="copy">Copy link</mosni-dropdown-item>
       {manage && <mosni-dropdown-item value="rename">Rename</mosni-dropdown-item>}
       {manage && <mosni-dropdown-item value="protection">Protection</mosni-dropdown-item>}
@@ -240,14 +244,13 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
         <td>
           <a href={row.previewUrl}>{row.name}</a>
         </td>
-        <td>{humanSize(row.bytes)}</td>
-        <td>{formatUploadDate(row.createdAt)}</td>
+        <td className="table-col-secondary">{humanSize(row.bytes)}</td>
+        <td className="table-col-secondary">{formatUploadDate(row.createdAt)}</td>
         <td>
           <VisibilityIndicator reason={row.reason} />
         </td>
         <td>
           <RowActions
-            itemLabel={row.name}
             previewUrl={row.previewUrl}
             manage={manage}
             mayDelete={mayDelete}
@@ -352,14 +355,13 @@ function CollectionRow({
             {row.name}
           </button>
         </td>
-        <td>{"—" /* D-110: collections are not files - no size to show */}</td>
-        <td>{"—" /* BrowseCollection carries no date */}</td>
+        <td className="table-col-secondary">{"—" /* D-110: collections are not files - no size to show */}</td>
+        <td className="table-col-secondary">{"—" /* BrowseCollection carries no date */}</td>
         <td>
           <VisibilityIndicator reason={row.reason} />
         </td>
         <td>
           <RowActions
-            itemLabel={row.name}
             previewUrl={row.previewUrl}
             manage={manage}
             mayDelete={mayDelete}
@@ -637,32 +639,48 @@ export function FileBrowser({
             })}
           </nav>
 
-          <table className="table interactive">
-            <thead>
-              <tr>
-                <th scope="col" aria-label="Type" />
-                <th scope="col">Name</th>
-                <th scope="col">Size</th>
-                <th scope="col">Added</th>
-                <th scope="col" aria-label="Visibility" />
-                <th scope="col" aria-label="Actions" />
-              </tr>
-            </thead>
-            <tbody>
-              {data.collections.map((row) => (
-                <CollectionRow
-                  key={row.id}
-                  row={row}
-                  user={user}
-                  onOpen={(opened) => navigate(pathnameOf(opened.previewUrl))}
-                  onReload={reload}
-                />
-              ))}
-              {data.files.map((row) => (
-                <FileRow key={row.id} row={row} user={user} onReload={reload} />
-              ))}
-            </tbody>
-          </table>
+          {/* E4.1 Wave E/D-79: hiding .table-col-secondary columns (mosni-chrome) still left this
+              specific row (icon + name + visibility indicator + the Actions dropdown) ~46px over a
+              390px viewport - tighter padding closes that gap without touching mosni-chrome's default
+              (a first attempt at fixing this generically in mosni-chrome, by shrinking .table's own
+              default padding, was reverted: it changed default appearance for every consumer, not just
+              this table - see mosni-chrome's history). Scoped to .browse-table only. .table-scroll
+              (mosni-chrome, wrapping the table below) is the actual guarantee that this page can never
+              widen because of the table regardless of content - the padding here is just the common-case
+              polish that avoids a scrollbar existing at all for what this page currently shows. */}
+          <style>{`
+            @media (max-width: 480px) {
+              .browse-table th, .browse-table td { padding-left: 0.4rem; padding-right: 0.4rem; }
+            }
+          `}</style>
+          <div className="table-scroll">
+            <table className="table interactive browse-table">
+              <thead>
+                <tr>
+                  <th scope="col" aria-label="Type" />
+                  <th scope="col">Name</th>
+                  <th scope="col" className="table-col-secondary">Size</th>
+                  <th scope="col" className="table-col-secondary">Added</th>
+                  <th scope="col" aria-label="Visibility" />
+                  <th scope="col" aria-label="Actions" />
+                </tr>
+              </thead>
+              <tbody>
+                {data.collections.map((row) => (
+                  <CollectionRow
+                    key={row.id}
+                    row={row}
+                    user={user}
+                    onOpen={(opened) => navigate(pathnameOf(opened.previewUrl))}
+                    onReload={reload}
+                  />
+                ))}
+                {data.files.map((row) => (
+                  <FileRow key={row.id} row={row} user={user} onReload={reload} />
+                ))}
+              </tbody>
+            </table>
+          </div>
           {data.collections.length === 0 && data.files.length === 0 && <p>Nothing here yet.</p>}
           {data.nextOffset !== null && (
             <button type="button" onClick={() => void loadMore()}>

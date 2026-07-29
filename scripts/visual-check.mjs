@@ -186,18 +186,29 @@ async function seedBrowserFile(collectionId, name, ownerSub, protection = "publi
 }
 
 // D-94: a small public tree, so an anonymous visitor's Browse tab has something to show. `browserNested`
-// is what the breadcrumb drill-down state navigates into.
+// is what E4.1 Wave C's own collection page (/f/<path>) - not a client-side drill - renders its
+// breadcrumb for.
 const browserRoot = await seedBrowserCollection({ name: `vis-${run}-public`, ownerSub: WRITER.sub, protection: "public" });
 await seedBrowserFile(browserRoot, "welcome.txt", WRITER.sub, "public");
 const browserNested = await seedBrowserCollection({ parentId: browserRoot, name: "nested", ownerSub: WRITER.sub, protection: "public" });
 await seedBrowserFile(browserNested, "deep-file.txt", WRITER.sub, "public");
-// A stranger's row inside the same public collection, so the admin all-files state shows a non-owner row.
-await seedBrowserFile(browserRoot, "someone-elses-file.txt", "user:visual-check-stranger", "unlisted");
-// WRITER's own collection with a nested child + files, for the recursive-delete confirmation state (D-104).
+// WRITER's own collection with a nested child + files, for the recursive-delete confirmation state (D-104)
+// and E4.1 Wave B's row overflow menu.
 const deletableTop = await seedBrowserCollection({ name: `vis-${run}-deletable`, ownerSub: WRITER.sub });
 const deletableChild = await seedBrowserCollection({ parentId: deletableTop, name: "child", ownerSub: WRITER.sub });
 await seedBrowserFile(deletableTop, "top-file.txt", WRITER.sub, "unlisted");
 await seedBrowserFile(deletableChild, "child-file.txt", WRITER.sub, "unlisted");
+// E4.1 Wave E: a collection owned by neither WRITER nor the admin, unlisted so it is invisible under
+// scope=mine and scope=public alike - only scope=all's root listing (D-101) shows it, which is what
+// "browser-admin-all" now demonstrates. E4.1 Wave C fixed collection ROUTES (/f/<path>) to scope=public
+// always, so admin visibility can no longer be shown by drilling into a collection from the All files tab
+// (that navigates away from scope=all entirely) - it has to be a root-listing difference instead.
+const strangerCollection = await seedBrowserCollection({
+  name: `vis-${run}-stranger-owned`,
+  ownerSub: "user:visual-check-stranger",
+  protection: "unlisted",
+});
+await seedBrowserFile(strangerCollection, "someone-elses-file.txt", "user:visual-check-stranger", "unlisted");
 
 await conn.end();
 
@@ -238,9 +249,10 @@ const signedOut = `
 // seeded row: the compact preview card (finding 6), and E3's owner manage controls (D-89), which only
 // render once the client's own /api/preview fetch (carrying this Bearer) confirms isOwner. Same issuer
 // the e2e tier uses (mock-idp), reachable from this container the same way (docker-compose.verify.yml).
-async function mintToken(sub, roles = "files:write") {
+async function mintToken(sub, roles = "files:write", mosniOwner = false) {
   const idp = process.env.MOCK_IDP ?? "http://mock-idp:9000";
-  const res = await fetch(`${idp}/token?sub=${encodeURIComponent(sub)}&roles=${encodeURIComponent(roles)}`);
+  const qs = `sub=${encodeURIComponent(sub)}&roles=${encodeURIComponent(roles)}${mosniOwner ? "&mosni_owner=true" : ""}`;
+  const res = await fetch(`${idp}/token?${qs}`);
   if (!res.ok) throw new Error(`mock-idp mint failed: ${res.status}`);
   return (await res.json()).token;
 }
@@ -266,7 +278,9 @@ const PAGES = [
     id: "landing-dropzone",
     label: "Landing - signed in, the drop zone",
     url: "/",
-    note: "THE product surface (D-1). Never visually checked before this run.",
+    note: "THE product surface (D-1). E4.1 Wave D/D-114: the drop target and its Options now render as " +
+      "ONE panel, Options permanently expanded (no more <details> disclosure) - this state's the check " +
+      "for it, since the old collapsed-then-opened pair of states no longer applies.",
     init: signedInAs(WRITER),
   },
   {
@@ -330,18 +344,6 @@ const PAGES = [
     },
   },
   {
-    id: "landing-destination-picker",
-    label: "Landing - signed in, the Options disclosure expanded (destination picker)",
-    url: "/",
-    note: "G1/G2 (D-42/D-86): collapsed by default; this state opens it to show the collection select " +
-      "and the new-collection field. Must never be the DEFAULT state (D-1's fast path stays three actions).",
-    init: signedInAs(WRITER),
-    interact: async (p) => {
-      await p.locator("details summary").click();
-      await p.waitForTimeout(150);
-    },
-  },
-  {
     id: "preview-owner-controls",
     label: "Preview - owner, the manage controls (rename / protection / delete)",
     url: `/f/${owned.relPath}`,
@@ -393,45 +395,48 @@ const PAGES = [
   },
   {
     id: "browser-nested-breadcrumb",
-    label: "Landing - browser section, drilled into a nested collection (breadcrumb)",
-    url: "/",
-    note: "E4 Wave D: clicking into the public tree's nested collection and back out via the breadcrumb " +
-      "(D-102). Signed out - the public tree is what has the nesting fixture.",
+    label: "Collection page - a nested collection, opened cold (breadcrumb)",
+    url: `/f/vis-${run}-public/nested`,
+    note: "E4.1 Wave C (C2/C3/C4): a collection is now a real route, not a client-side drill - this opens " +
+      "the nested collection COLD, the way a shared link actually arrives. The breadcrumb (Home / " +
+      "vis-<run>-public / nested) must be present, with ancestor crumbs as links and 'nested' as plain " +
+      "text, not a control (defect 7/8). No drop zone or tabs on this page (D-107: collection routes are " +
+      "view-only) - that is the whole point of the redesign, not a bug in this check.",
     init: signedOut,
     interact: async (p) => {
-      // "nested" is a CHILD of the public root collection - drill into that first, or "nested" is never
-      // on screen to click and this hangs on Playwright's default 30s actionability timeout.
-      await p.waitForSelector(`text=vis-${run}-public`, { timeout: 10_000 }).catch(() => {});
-      await p.locator("button", { hasText: `vis-${run}-public` }).first().click();
-      await p.waitForSelector("text=nested", { timeout: 10_000 }).catch(() => {});
-      await p.locator("button", { hasText: "nested" }).first().click();
       await p.waitForSelector("text=deep-file.txt", { timeout: 10_000 }).catch(() => {});
-      await p.waitForTimeout(200);
+    },
+  },
+  {
+    id: "browser-row-overflow-menu",
+    label: "Landing - browser section, an opened row overflow menu",
+    url: "/",
+    note: "E4.1 Wave B/D-109: per-row actions (copy link, rename, protection, delete) live behind a " +
+      "trailing <mosni-dropdown>, not inline. This opens one on the signed-in owner's own row so every " +
+      "manage action is visible in the same shot.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.waitForSelector(`[data-row-id]:has-text("vis-${run}-deletable")`, { timeout: 10_000 }).catch(() => {});
+      const row = p.locator("[data-row-id]", { hasText: `vis-${run}-deletable` });
+      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
+      await p.waitForTimeout(150);
     },
   },
   {
     id: "browser-admin-all",
     label: "Landing - browser section, admin All files view",
     url: "/",
-    note: "D-101: reachable only by a caller holding both files:write and files:delete. Shows a stranger's " +
-      "row with the 'admin' visibility badge (D-103) alongside the admin's own ('own' takes precedence).",
+    note: "D-101: reachable only by a caller holding both files:write and files:delete. Shows a " +
+      "stranger-owned unlisted collection at root that scope=mine and scope=public alike would hide - " +
+      "E4.1 Wave C fixed collection ROUTES (/f/<path>) to scope=public always, so admin visibility can no " +
+      "longer be demonstrated by drilling INTO a collection from this tab (that navigates off scope=all " +
+      "entirely, onto that collection's own public-scoped page); the root listing is the only place " +
+      "scope=all's own breadth is still visible in the client.",
     init: signedInAsReal(ADMIN, adminToken),
     interact: async (p) => {
       await p.waitForSelector("mosni-tabs", { timeout: 10_000 }).catch(() => {});
-      // mosni-tabs only turns its <mosni-tab> children into a real clickable bar once mosnicat.js
-      // (ui.mosni.dev) upgrades the element - unreachable from this sandbox (same TLS-trust gap as
-      // auth.mosni.dev), so there is nothing here to click in THIS environment specifically. The tab-
-      // switching LOGIC itself (mosni-tab-change -> scope change) is exercised directly, without needing
-      // the chrome's real DOM, by FileBrowser.test.tsx - a short timeout here rather than the default 30s
-      // keeps a sandbox-only gap from stalling the whole run.
-      await p.locator("mosni-tabs button", { hasText: "All files" }).click({ timeout: 3_000 }).catch(() => {});
-      // The stranger's file is a CHILD of the public root collection - files never show at the pseudo-root.
-      // Best-effort past this point too: without a real tab click above, this sandbox is still on the
-      // admin's own "My files" default and neither locator will ever appear - that is a known, sandbox-
-      // only gap (see the comment above), not a product defect, and must not fail the whole run.
-      await p.waitForSelector(`text=vis-${run}-public`, { timeout: 10_000 }).catch(() => {});
-      await p.locator("button", { hasText: `vis-${run}-public` }).first().click({ timeout: 3_000 }).catch(() => {});
-      await p.waitForSelector("text=someone-elses-file.txt", { timeout: 10_000 }).catch(() => {});
+      await p.locator("mosni-tabs button", { hasText: "All files" }).click({ timeout: 5_000 }).catch(() => {});
+      await p.waitForSelector(`text=vis-${run}-stranger-owned`, { timeout: 10_000 }).catch(() => {});
       await p.waitForTimeout(200);
     },
   },
@@ -441,12 +446,14 @@ const PAGES = [
     url: "/",
     note: "D-104/D-88: recursive collection delete gets its own confirmation naming the descendant count - " +
       "the most destructive operation in the app. This run only opens the confirmation (a dryRun fetch), " +
-      "it never clicks \"Yes, delete\", so the fixture survives for the next run.",
+      "it never clicks \"Yes, delete\", so the fixture survives for the next run. E4.1 Wave B moved Delete " +
+      "behind the row's overflow menu (D-109) - open that first.",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
-      await p.waitForSelector(`text=vis-${run}-deletable`, { timeout: 10_000 }).catch(() => {});
+      await p.waitForSelector(`[data-row-id]:has-text("vis-${run}-deletable")`, { timeout: 10_000 }).catch(() => {});
       const row = p.locator("[data-row-id]", { hasText: `vis-${run}-deletable` });
-      await row.locator("button", { hasText: "Delete" }).click();
+      await row.locator("mosni-dropdown .dropdown-trigger").click();
+      await row.locator("mosni-dropdown-item", { hasText: "Delete" }).click();
       await p.waitForSelector("text=This can't be undone.", { timeout: 10_000 }).catch(() => {});
       await p.waitForTimeout(150);
     },
