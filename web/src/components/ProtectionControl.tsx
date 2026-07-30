@@ -8,9 +8,12 @@ import type { Protection } from "../../../app/src/lib/protection.ts";
 
 const PROTECTION_LEVELS: readonly Protection[] = ["public", "unlisted", "secret", "private"];
 
-// F2: mosni-chrome ships no select component - a native <select> inside the existing `.panel` (which
-// already styles the inputs it contains) is the F2-sanctioned choice; a reusable control is an upstream
-// mosni-chrome change under D-31, deliberately out of scope here.
+// F2: mosni-chrome ships no select component - a native <select> is the F2-sanctioned choice; a reusable
+// control is an upstream mosni-chrome change under D-31, deliberately out of scope here. E4.1 Wave E
+// findings (C5): the root wraps in className="field" so the select/label get mosni-chrome's input chrome
+// (`_field.scss`'s `.field :is(input, textarea, select)` + `.field select`'s chevron) independent of
+// whether an ancestor happens to be a `.panel` - E4.1 Wave B moved per-row controls into bare `<td>`s,
+// where this used to render unstyled.
 const PROTECTION_EXPLANATION: Record<Protection, string> = {
   public: "Listed and visible to anyone, including search engines.",
   unlisted: "Not listed, but the link works for anyone who has it.",
@@ -44,11 +47,8 @@ export function ProtectionControl({
   }
 
   return (
-    <div>
-      <label
-        htmlFor={`protection-select-${id}`}
-        style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.35rem", color: "var(--mosni-text-muted)" }}
-      >
+    <div className="field">
+      <label htmlFor={`protection-select-${id}`} className="field-label">
         Who can access this
       </label>
       <select

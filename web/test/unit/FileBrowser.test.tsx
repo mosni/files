@@ -38,6 +38,12 @@ async function selectRowAction(row: Element, value: string) {
   });
 }
 
+// E4.1 Wave E findings (C3): a real MouseEvent so isPlainLeftClick's modifier/button checks have
+// something to read - jsdom's synthetic click() doesn't set these unless asked to.
+function clickWith(el: Element, init: Partial<MouseEventInit> = {}) {
+  el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ...init }));
+}
+
 function makeCollection(overrides: Partial<BrowseCollection> = {}): BrowseCollection {
   return {
     id: "coll0000000000id",
@@ -99,7 +105,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.restoreAllMocks();
   });
 
-  it("signed out: fetches scope=public with no Bearer and renders collections then files", async () => {
+  it("signed out: fetches scope=visible with no Bearer and renders collections then files", async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => null,
       token: () => null,
@@ -121,7 +127,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     await flush();
 
     expect(fetchSpy).toHaveBeenCalledWith(
-      expect.stringContaining("/api/browse?scope=public"),
+      expect.stringContaining("/api/browse?scope=visible"),
       expect.not.objectContaining({ headers: expect.anything() }),
     );
     expect(container.textContent).toContain("Photos");
@@ -150,7 +156,75 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     );
   });
 
-  it("clicking a collection row navigates to its previewUrl's pathname (E4.1 Wave C, D-100: no URL construction)", async () => {
+  // D-116/D-121: exactly two tabs for every signed-in viewer including an admin, and the Browse tab
+  // issues the SAME scope=visible regardless of role - no client-side isFilesAdmin branch anywhere.
+  it.each([
+    ["a non-admin", { sub: "user:a", roles: ["files:write"] }],
+    ["an admin", { sub: "user:admin", roles: ["files:write", "files:delete"] }],
+  ])("exactly two tabs - My files / Browse - render for a signed-in viewer (%s), Browse issues scope=visible", async (_label, claims) => {
+    (window as unknown as { mosni: unknown }).mosni = {
+      user: () => claims,
+      token: () => "tok",
+      onChange: (cb: (u: unknown) => void) => cb(claims),
+    };
+    const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(makeResponse()));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+    });
+    await flush();
+
+    const tabs = container.querySelectorAll("mosni-tab");
+    expect(tabs).toHaveLength(2);
+    expect(Array.from(tabs).map((t) => t.getAttribute("label"))).toEqual(["My files", "Browse"]);
+    expect(Array.from(tabs).some((t) => t.getAttribute("label") === "All files")).toBe(false);
+
+    const tabsEl = container.querySelector("mosni-tabs")!;
+    await act(async () => {
+      tabsEl.dispatchEvent(new CustomEvent("mosni-tab-change", { detail: { index: 1 } }));
+      await flush();
+    });
+    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=visible"), expect.anything());
+  });
+
+  it("a signed-out visitor gets no tab bar and a scope=visible request", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
+    const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(makeResponse()));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+    });
+    await flush();
+
+    expect(container.querySelector("mosni-tabs")).toBeNull();
+    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=visible"), undefined);
+  });
+
+  // C4/D-121: a collection's name is a real <a href>, not a <button> with no href at all.
+  it("a collection row renders its name as a real <a href> carrying the pathname of its previewUrl, not a <button>", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(makeResponse({ collections: [makeCollection({ reason: "public", previewUrl: "https://files.mosni.dev/f/Photos" })] })),
+      ),
+    );
+
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+    });
+    await flush();
+
+    const row = container.querySelector("[data-row-id]")!;
+    const link = Array.from(row.querySelectorAll("a")).find((a) => a.textContent === "Photos") as HTMLAnchorElement;
+    expect(link).not.toBeUndefined();
+    expect(link.getAttribute("href")).toBe("/f/Photos");
+    expect(Array.from(row.querySelectorAll("button")).some((b) => b.textContent === "Photos")).toBe(false);
+  });
+
+  it("clicking a collection's name with a plain left click navigates to its previewUrl's pathname (E4.1 Wave C, D-100: no URL construction)", async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => null,
       token: () => null,
@@ -178,14 +252,55 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     });
     await flush();
 
-    const collectionButton = Array.from(container.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("Photos"),
-    ) as HTMLButtonElement;
+    const link = Array.from(container.querySelectorAll("a")).find((a) => a.textContent === "Photos") as HTMLAnchorElement;
     await act(async () => {
-      collectionButton.click();
+      clickWith(link);
       await flush();
     });
 
+    expect(locations.at(-1)).toBe("/f/Photos");
+  });
+
+  // C3/D-121: a modified or non-primary click on a collection name must not be swallowed - the browser's
+  // own open-in-new-tab/middle-click behaviour is the whole point of it being a real <a href>.
+  it("a ctrl-click and a middle-click on a collection name do not navigate() and do not preventDefault(); a plain left click does both", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(makeResponse({ collections: [makeCollection({ reason: "public", previewUrl: "https://files.mosni.dev/f/Photos" })] })),
+      ),
+    );
+
+    const locations: string[] = [];
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <FileBrowser />
+          <LocationSpy onLocation={(p) => locations.push(p)} />
+        </MemoryRouter>,
+      );
+    });
+    await flush();
+
+    const link = Array.from(container.querySelectorAll("a")).find((a) => a.textContent === "Photos") as HTMLAnchorElement;
+
+    const ctrlEvent = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ctrlKey: true });
+    const ctrlPrevented = !link.dispatchEvent(ctrlEvent);
+    await flush();
+    expect(ctrlPrevented).toBe(false); // preventDefault() was NOT called
+    expect(locations.at(-1)).not.toBe("/f/Photos");
+
+    const middleEvent = new MouseEvent("click", { bubbles: true, cancelable: true, button: 1 });
+    const middlePrevented = !link.dispatchEvent(middleEvent);
+    await flush();
+    expect(middlePrevented).toBe(false);
+    expect(locations.at(-1)).not.toBe("/f/Photos");
+
+    await act(async () => {
+      clickWith(link);
+      await flush();
+    });
     expect(locations.at(-1)).toBe("/f/Photos");
   });
 
@@ -237,7 +352,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(container.querySelector('mosni-tooltip[text="Public"] mosni-icon[name="globe"]')).not.toBeNull();
   });
 
-  it("owner row (reason=own) gets a Protection menu item and a Delete item; a non-owner row gets neither", async () => {
+  it("owner row (reason=own) gets a Protection menu item and a Delete item; a non-owner row gets neither, and the trigger's accessible name includes the row's name", async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => ({ sub: "user:a", roles: [] }),
       token: () => "tok",
@@ -274,11 +389,15 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(itemValues(theirsRow)).not.toEqual(expect.arrayContaining(["protection"]));
     expect(itemValues(theirsRow)).not.toEqual(expect.arrayContaining(["delete"]));
 
+    // C7: the row's trigger carries an accessible name that includes the row's own name.
+    expect(mineRow.querySelector("mosni-dropdown")?.getAttribute("label")).toBe("Actions for mine.png");
+    expect(theirsRow.querySelector("mosni-dropdown")?.getAttribute("label")).toBe("Actions for theirs.png");
+
     await selectRowAction(mineRow, "protection");
     expect(mineRow.parentElement!.querySelector("select")).not.toBeNull();
   });
 
-  it("a files:delete holder (not the owner) sees Delete on someone else's row in All files, but not Rename or Protection (D-115)", async () => {
+  it("a files:delete holder (not the owner) sees Delete on someone else's row in Browse, but not Rename or Protection (D-115)", async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => ({ sub: "user:admin", roles: ["files:delete"] }),
       token: () => "tok",
@@ -292,7 +411,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     );
 
     act(() => {
-      root.render(<MemoryRouter><FileBrowser initialScope="all" /></MemoryRouter>);
+      root.render(<MemoryRouter><FileBrowser initialScope="visible" /></MemoryRouter>);
     });
     await flush();
 
@@ -303,7 +422,23 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(values).not.toContain("protection");
   });
 
-  it("collection create form posts to /api/collections with the current collectionId as parentId and reloads", async () => {
+  // C7: every row's icon-only trigger, regardless of glyph, still opens the right menu - verifies the
+  // dropdown wiring survived the icon-only switch (mosnicat.js itself, and its rendered glyph, are Wave
+  // 0's job and covered there / by the D-79 visual check).
+  it("the row action trigger is icon-only, carrying more-vertical as its glyph", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ files: [makeFile({ reason: "public" })] }))));
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+    });
+    await flush();
+
+    const dropdown = container.querySelector("[data-row-id] mosni-dropdown")!;
+    expect(dropdown.getAttribute("icon-only")).toBe("more-vertical");
+  });
+
+  // D-118/C10: the permanent form is gone; a small button inserts a client-side-only placeholder row.
+  it('"New collection" renders no form until clicked; the placeholder row\'s confirm is disabled while empty; cancel issues no fetch; confirm POSTs and reloads', async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => ({ sub: "user:a", roles: ["files:write"] }),
       token: () => "tok",
@@ -321,15 +456,40 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     });
     await flush();
 
+    // No form, no placeholder input, until the button is clicked.
+    expect(container.querySelector('input[aria-label="New collection name"]')).toBeNull();
+    const newCollectionButton = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("New collection"),
+    ) as HTMLButtonElement;
+    expect(newCollectionButton).not.toBeUndefined();
+    expect(newCollectionButton.disabled).toBe(false);
+
+    act(() => newCollectionButton.click());
+
     const input = container.querySelector('input[aria-label="New collection name"]') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    const confirmButton = container.querySelector('button[aria-label="Create collection"]') as HTMLButtonElement;
+    expect(confirmButton.disabled).toBe(true); // empty name - disabled
+
+    // Cancel: no fetch at all.
+    const cancelButton = container.querySelector('button[aria-label="Cancel new collection"]') as HTMLButtonElement;
+    act(() => cancelButton.click());
+    expect(container.querySelector('input[aria-label="New collection name"]')).toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(1); // only the initial listing - cancel touched nothing
+
+    // Re-open, type a name, confirm becomes enabled, and confirming POSTs + reloads.
+    act(() => newCollectionButton.click());
+    const input2 = container.querySelector('input[aria-label="New collection name"]') as HTMLInputElement;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
     act(() => {
-      setter.call(input, "New");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
+      setter.call(input2, "New");
+      input2.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    const form = container.querySelector("form") as HTMLFormElement;
+    const confirmButton2 = container.querySelector('button[aria-label="Create collection"]') as HTMLButtonElement;
+    expect(confirmButton2.disabled).toBe(false);
+
     await act(async () => {
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      confirmButton2.click();
       await flush();
     });
 
@@ -342,6 +502,55 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
         body: JSON.stringify({ name: "New" }),
       }),
     );
+    expect(fetchSpy).toHaveBeenCalledTimes(3); // + the reload
+    expect(container.querySelector('input[aria-label="New collection name"]')).toBeNull(); // row closed
+  });
+
+  it("the New collection button is disabled while a placeholder row is already open", async () => {
+    (window as unknown as { mosni: unknown }).mosni = {
+      user: () => ({ sub: "user:a", roles: ["files:write"] }),
+      token: () => "tok",
+      onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write"] }),
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse())));
+
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+    });
+    await flush();
+
+    const newCollectionButton = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("New collection"),
+    ) as HTMLButtonElement;
+    act(() => newCollectionButton.click());
+    expect(newCollectionButton.disabled).toBe(true);
+  });
+
+  it("Escape on the placeholder row's name field cancels it without issuing a fetch", async () => {
+    (window as unknown as { mosni: unknown }).mosni = {
+      user: () => ({ sub: "user:a", roles: ["files:write"] }),
+      token: () => "tok",
+      onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write"] }),
+    };
+    const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(makeResponse()));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+    });
+    await flush();
+
+    const newCollectionButton = Array.from(container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("New collection"),
+    ) as HTMLButtonElement;
+    act(() => newCollectionButton.click());
+
+    const input = container.querySelector('input[aria-label="New collection name"]') as HTMLInputElement;
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    expect(container.querySelector('input[aria-label="New collection name"]')).toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(1); // only the initial listing
   });
 
   it("collection delete asks for a dryRun count first and only deletes for real after confirming", async () => {
@@ -426,17 +635,19 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     await flush();
     expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=mine"), expect.anything());
 
-    // Tab order is "My files" (0), "Browse" (1), "All files" absent (no admin role) - index 1 is public.
+    // Tab order is "My files" (0), "Browse" (1) - exactly two tabs now (D-116).
     const tabs = container.querySelector("mosni-tabs")!;
     await act(async () => {
       tabs.dispatchEvent(new CustomEvent("mosni-tab-change", { detail: { index: 1, label: "Browse" } }));
       await flush();
     });
 
-    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=public"), expect.anything());
+    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=visible"), expect.anything());
   });
 
-  it("rename: submits the new name to the row's own PATCH endpoint and reloads", async () => {
+  // C8: rename swaps the NAME CELL to an input, in place - no extra <tr>, and the actions cell swaps to
+  // confirm/cancel icon buttons.
+  it("rename: swaps the name cell to an input with no extra <tr>, submits the new name on confirm, and reloads", async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => ({ sub: "user:a", roles: [] }),
       token: () => "tok",
@@ -454,18 +665,61 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     });
     await flush();
 
+    const table = container.querySelector("table")!;
+    const rowCountBefore = table.querySelectorAll("tbody > tr").length;
+
     const row = container.querySelector("[data-row-id]")!;
     await selectRowAction(row, "rename");
 
+    expect(table.querySelectorAll("tbody > tr").length).toBe(rowCountBefore); // no extra <tr>
+    const input = container.querySelector('input[aria-label="New name"]') as HTMLInputElement;
+    expect(row.contains(input)).toBe(true); // the input lives INSIDE the same row
+
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    act(() => {
+      setter.call(input, "renamed.png");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const saveButton = row.querySelector('button[aria-label="Save name"]') as HTMLButtonElement;
+    await act(async () => {
+      saveButton.click();
+      await flush();
+    });
+
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      2,
+      "/api/files/file0000000000id",
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ name: "renamed.png" }) }),
+    );
+    expect(container.querySelector('input[aria-label="New name"]')).toBeNull(); // closed after save
+  });
+
+  it("rename: Enter submits from the keyboard, without clicking Save", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => ({ sub: "user:a" }), token: () => "tok", onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a" }) };
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] })))
+      .mockResolvedValueOnce(jsonResponse({ ...makeFile({ reason: "own" }), name: "renamed.png" }))
+      .mockResolvedValueOnce(jsonResponse(makeResponse({ files: [makeFile({ reason: "own", name: "renamed.png" })] })));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+    });
+    await flush();
+
+    const row = container.querySelector("[data-row-id]")!;
+    await selectRowAction(row, "rename");
     const input = container.querySelector('input[aria-label="New name"]') as HTMLInputElement;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
     act(() => {
       setter.call(input, "renamed.png");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    const form = Array.from(container.querySelectorAll("form")).find((f) => f.querySelector('input[aria-label="New name"]')) as HTMLFormElement;
+
     await act(async () => {
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
       await flush();
     });
 
@@ -476,7 +730,48 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     );
   });
 
-  it("rename: a collection row submits to its own PATCH endpoint, closes the panel, and reloads", async () => {
+  it("rename: Escape cancels without issuing a PATCH, and closes the input", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => ({ sub: "user:a" }), token: () => "tok", onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a" }) };
+    const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] })));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+    });
+    await flush();
+
+    const row = container.querySelector("[data-row-id]")!;
+    await selectRowAction(row, "rename");
+    const input = container.querySelector('input[aria-label="New name"]') as HTMLInputElement;
+
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+
+    expect(container.querySelector('input[aria-label="New name"]')).toBeNull();
+    expect(fetchSpy.mock.calls.filter((c) => c[1]?.method === "PATCH")).toHaveLength(0);
+  });
+
+  it("rename: the Cancel icon button also closes the field without issuing a PATCH", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => ({ sub: "user:a" }), token: () => "tok", onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a" }) };
+    const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] })));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+    });
+    await flush();
+
+    const row = container.querySelector("[data-row-id]")!;
+    await selectRowAction(row, "rename");
+    const cancelButton = row.querySelector('button[aria-label="Cancel rename"]') as HTMLButtonElement;
+    act(() => cancelButton.click());
+
+    expect(container.querySelector('input[aria-label="New name"]')).toBeNull();
+    expect(fetchSpy.mock.calls.filter((c) => c[1]?.method === "PATCH")).toHaveLength(0);
+  });
+
+  it("rename: a collection row submits to its own PATCH endpoint, closes, and reloads - no extra <tr>", async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => ({ sub: "user:a", roles: [] }),
       token: () => "tok",
@@ -494,8 +789,11 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     });
     await flush();
 
+    const table = container.querySelector("table")!;
+    const rowCountBefore = table.querySelectorAll("tbody > tr").length;
     const row = container.querySelector("[data-row-id]")!;
     await selectRowAction(row, "rename");
+    expect(table.querySelectorAll("tbody > tr").length).toBe(rowCountBefore);
 
     const input = container.querySelector('input[aria-label="New name"]') as HTMLInputElement;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
@@ -503,9 +801,9 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       setter.call(input, "Renamed");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    const form = Array.from(container.querySelectorAll("form")).find((f) => f.querySelector('input[aria-label="New name"]')) as HTMLFormElement;
+    const saveButton = row.querySelector('button[aria-label="Save name"]') as HTMLButtonElement;
     await act(async () => {
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      saveButton.click();
       await flush();
     });
 
@@ -518,10 +816,10 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(container.querySelector('input[aria-label="New name"]')).toBeNull(); // the panel closed
   });
 
-  // C3: a PERMANENT root crumb - always present, even at "/" itself (where it reads as plain text, not a
-  // link, since it IS the current location). C4: ancestor crumbs are real links; the deepest/current one
-  // is plain text, never a control.
-  it("breadcrumb: Home is permanent; ancestor crumbs are links; the deepest crumb is not interactive", async () => {
+  // C2/C3/D-121: every breadcrumb crumb - Home, every ancestor, AND the current location - is a real
+  // <a href>. A ctrl-click / middle-click on any of them must not navigate() or preventDefault(); a plain
+  // left click does both.
+  it("breadcrumb: every crumb including the current location is an <a> with a non-empty href", async () => {
     (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
     vi.stubGlobal(
       "fetch",
@@ -541,9 +839,6 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     act(() => {
       root.render(
         <MemoryRouter>
-          {/* A non-root breadcrumb only happens for a collection-route mount (Preview.tsx passes
-              initialCollectionId) - a root mount's collectionId never changes after mount (E4.1 Wave C:
-              drilling is a real navigation, not local state), so it can never be "not at root" itself. */}
           <FileBrowser initialCollectionId="child-id" />
           <LocationSpy onLocation={(p) => locations.push(p)} />
         </MemoryRouter>,
@@ -551,97 +846,99 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     });
     await flush();
 
-    // Home is a LINK here (we are not at root - there is a breadcrumb).
-    const home = Array.from(container.querySelectorAll("a")).find((a) => a.textContent === "Home") as HTMLAnchorElement;
-    expect(home).not.toBeUndefined();
+    const nav = container.querySelector('nav[aria-label="Breadcrumb"]')!;
+    const home = Array.from(nav.querySelectorAll("a")).find((a) => a.textContent === "Home") as HTMLAnchorElement;
+    const rootLink = Array.from(nav.querySelectorAll("a")).find((a) => a.textContent === "Root") as HTMLAnchorElement;
+    const childLink = Array.from(nav.querySelectorAll("a")).find((a) => a.textContent === "Child") as HTMLAnchorElement;
 
-    // "Root" (ancestor) is a link; "Child" (current/deepest) is plain text, not any kind of control.
-    const rootLink = Array.from(container.querySelectorAll("a")).find((a) => a.textContent === "Root") as HTMLAnchorElement;
-    expect(rootLink).not.toBeUndefined();
+    for (const link of [home, rootLink, childLink]) {
+      expect(link).not.toBeUndefined();
+      expect(link.getAttribute("href")).toBeTruthy();
+    }
+    expect(home.getAttribute("href")).toBe("/");
     expect(rootLink.getAttribute("href")).toBe("/f/Root");
-    expect(Array.from(container.querySelectorAll("a, button")).some((el) => el.textContent === "Child")).toBe(false);
-    expect(container.textContent).toContain("Child");
+    expect(childLink.getAttribute("href")).toBe("/f/Root/Child");
+    expect(childLink.getAttribute("aria-current")).toBe("location");
+    // no non-anchor control anywhere in the breadcrumb (the old plain-text current crumb is gone, AC9 struck)
+    expect(nav.querySelectorAll("button, span[role]").length).toBe(0);
 
     await act(async () => {
-      rootLink.click();
+      clickWith(rootLink);
       await flush();
     });
-    // The crumb's own onClick preventDefault()s the real <a> navigation and calls useNavigate() instead,
-    // landing exactly on the crumb's own previewUrl pathname (D-100) rather than a client-constructed one.
     expect(locations.at(-1)).toBe("/f/Root");
 
     await act(async () => {
-      home.click();
+      clickWith(childLink);
+      await flush();
+    });
+    expect(locations.at(-1)).toBe("/f/Root/Child");
+
+    await act(async () => {
+      clickWith(home);
       await flush();
     });
     expect(locations.at(-1)).toBe("/");
   });
 
-  it("breadcrumb: at root, Home reads as plain text (the current location), not a link", async () => {
+  it("breadcrumb: a ctrl-click and a middle-click on a crumb do not navigate() and do not preventDefault(); a plain left click does both", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          makeResponse({
+            breadcrumb: [{ id: "root-id", name: "Root", previewUrl: "https://files.mosni.dev/f/Root" }],
+          }),
+        ),
+      ),
+    );
+
+    const locations: string[] = [];
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <FileBrowser initialCollectionId="root-id" />
+          <LocationSpy onLocation={(p) => locations.push(p)} />
+        </MemoryRouter>,
+      );
+    });
+    await flush();
+
+    const rootLink = Array.from(container.querySelectorAll("a")).find((a) => a.textContent === "Root") as HTMLAnchorElement;
+
+    const ctrlEvent = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ctrlKey: true });
+    const ctrlPrevented = !rootLink.dispatchEvent(ctrlEvent);
+    expect(ctrlPrevented).toBe(false);
+
+    const middleEvent = new MouseEvent("click", { bubbles: true, cancelable: true, button: 1 });
+    const middlePrevented = !rootLink.dispatchEvent(middleEvent);
+    expect(middlePrevented).toBe(false);
+
+    await act(async () => {
+      clickWith(rootLink);
+      await flush();
+    });
+    expect(locations.at(-1)).toBe("/f/Root");
+  });
+
+  it("breadcrumb: at root, Home is still an <a href='/'> carrying aria-current=location", async () => {
     (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse())));
 
     act(() => {
       root.render(
         <MemoryRouter>
-          <FileBrowser initialScope="public" />
+          <FileBrowser initialScope="visible" />
         </MemoryRouter>,
       );
     });
     await flush();
 
-    expect(Array.from(container.querySelectorAll("a")).some((a) => a.textContent === "Home")).toBe(false);
-    expect(container.textContent).toContain("Home");
-  });
-
-  it("rename: cancelling closes the field without issuing a PATCH", async () => {
-    (window as unknown as { mosni: unknown }).mosni = { user: () => ({ sub: "user:a" }), token: () => "tok", onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a" }) };
-    const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] })));
-    vi.stubGlobal("fetch", fetchSpy);
-
-    act(() => {
-      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
-    });
-    await flush();
-
-    const row = container.querySelector("[data-row-id]")!;
-    await selectRowAction(row, "rename");
-    // Scoped to the rename form itself - the row's (always-present-but-closed, per jsdom's lack of
-    // mosni-modal upgrade) delete-confirmation modal has its own "Cancel" button too.
-    const renameForm = Array.from(container.querySelectorAll("form")).find((f) =>
-      f.querySelector('input[aria-label="New name"]'),
-    )!;
-    const cancelButton = Array.from(renameForm.querySelectorAll("button")).find((b) => b.textContent === "Cancel") as HTMLButtonElement;
-    act(() => cancelButton.click());
-
-    expect(container.querySelector('input[aria-label="New name"]')).toBeNull();
-    expect(fetchSpy.mock.calls.filter((c) => c[1]?.method === "PATCH")).toHaveLength(0);
-  });
-
-  it("collection delete: Cancel on the descendant-count confirmation deletes nothing", async () => {
-    (window as unknown as { mosni: unknown }).mosni = { user: () => ({ sub: "user:a" }), token: () => "tok", onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a" }) };
-    const fetchSpy = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse(makeResponse({ collections: [makeCollection({ reason: "own" })] })))
-      .mockResolvedValueOnce(jsonResponse({ collectionCount: 1, fileCount: 0 }));
-    vi.stubGlobal("fetch", fetchSpy);
-
-    act(() => {
-      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
-    });
-    await flush();
-
-    const row = container.querySelector("[data-row-id]")!;
-    await selectRowAction(row, "delete");
-    expect(row.querySelector("mosni-modal")?.getAttribute("heading")).toBe('Delete "Photos"?');
-
-    const cancelButton = Array.from(row.querySelectorAll("button")).find((b) => b.textContent === "Cancel") as HTMLButtonElement;
-    await act(async () => {
-      cancelButton.click();
-      await flush();
-    });
-
-    expect(fetchSpy.mock.calls.filter((c) => c[1]?.method === "DELETE" && !String(c[0]).includes("dryRun"))).toHaveLength(0);
+    const home = Array.from(container.querySelectorAll("a")).find((a) => a.textContent === "Home") as HTMLAnchorElement;
+    expect(home).not.toBeUndefined();
+    expect(home.getAttribute("href")).toBe("/");
+    expect(home.getAttribute("aria-current")).toBe("location");
   });
 
   it("a failed protection PATCH on a file row does not reload the listing", async () => {
@@ -672,7 +969,42 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(select.value).toBe("unlisted"); // reverted
   });
 
-  it("the public scope shows no collection-create form even when signed in as an admin browsing scope=public", async () => {
+  // C5: the protection control renders inside a .field wrapper (mosni-chrome's input chrome), independent
+  // of any .panel ancestor - Wave B moved this into a bare <td>, where it used to render unstyled.
+  it("the protection control renders inside a .field wrapper", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => ({ sub: "user:a" }), token: () => "tok", onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a" }) };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] }))));
+
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+    });
+    await flush();
+
+    const row = container.querySelector("[data-row-id]")!;
+    await selectRowAction(row, "protection");
+
+    const select = container.querySelector("select") as HTMLSelectElement;
+    expect(select.closest(".field")).not.toBeNull();
+  });
+
+  // C5: the rename input renders inside a .field wrapper too.
+  it("the rename input renders inside a .field wrapper", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => ({ sub: "user:a" }), token: () => "tok", onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a" }) };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] }))));
+
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+    });
+    await flush();
+
+    const row = container.querySelector("[data-row-id]")!;
+    await selectRowAction(row, "rename");
+
+    const input = container.querySelector('input[aria-label="New name"]') as HTMLInputElement;
+    expect(input.closest(".field")).not.toBeNull();
+  });
+
+  it("Browse (scope=visible) shows no collection-create button, even for a signed-in admin", async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => ({ sub: "user:a", roles: ["files:write", "files:delete"] }),
       token: () => "tok",
@@ -681,11 +1013,11 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse())));
 
     act(() => {
-      root.render(<MemoryRouter><FileBrowser initialScope="public" /></MemoryRouter>);
+      root.render(<MemoryRouter><FileBrowser initialScope="visible" /></MemoryRouter>);
     });
     await flush();
 
-    expect(container.querySelector('input[aria-label="New collection name"]')).toBeNull();
+    expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("New collection"))).toBe(false);
   });
 
   // E4.1 Wave B: the listing becomes one real <table> (D-108, AC1) with the six columns §2/B1 lists, one
@@ -767,9 +1099,8 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(writeText).toHaveBeenCalledWith("https://files.mosni.dev/f/x.png");
   });
 
-  // Defect 13: the listing has its own heading, so it no longer reads as an unlabelled continuation of
-  // the drop zone above it.
-  it("the listing has its own section heading", async () => {
+  // D-117: the heading is removed entirely, not moved (strikes E4.1's Wave B5).
+  it("no <h2>Files and collections</h2> is rendered anywhere", async () => {
     (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse())));
     act(() => {
@@ -777,12 +1108,12 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     });
     await flush();
 
-    expect(container.querySelector("h2")?.textContent).toBeTruthy();
+    expect(container.querySelector("h2")).toBeNull();
   });
 
   // E4.1 Wave C: mounted via pages/Preview.tsx on a collection route (D-107 client half).
   describe("initialCollectionId / initialToken (collection-route mount)", () => {
-    it("fetches scope=public for the given collectionId, never mine/all, regardless of who is signed in", async () => {
+    it("fetches scope=visible for the given collectionId, never mine, regardless of who is signed in", async () => {
       (window as unknown as { mosni: unknown }).mosni = {
         user: () => ({ sub: "user:a", roles: ["files:write", "files:delete"] }),
         token: () => "tok",
@@ -801,7 +1132,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       await flush();
 
       expect(fetchSpy).toHaveBeenCalledWith(
-        expect.stringMatching(/^\/api\/browse\?scope=public&collectionId=coll-x/),
+        expect.stringMatching(/^\/api\/browse\?scope=visible&collectionId=coll-x/),
         expect.anything(),
       );
     });
@@ -824,7 +1155,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining("token=secrettoken123"), undefined);
     });
 
-    it("renders no scope-switcher tabs and no create-collection form on a collection-route mount", async () => {
+    it("renders no scope-switcher tabs and no create-collection button on a collection-route mount", async () => {
       (window as unknown as { mosni: unknown }).mosni = {
         user: () => ({ sub: "user:a", roles: ["files:write"] }),
         token: () => "tok",
@@ -842,7 +1173,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       await flush();
 
       expect(container.querySelector("mosni-tabs")).toBeNull();
-      expect(container.querySelector('input[aria-label="New collection name"]')).toBeNull();
+      expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("New collection"))).toBe(false);
     });
   });
 });

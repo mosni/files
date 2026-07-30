@@ -1,9 +1,13 @@
 // E4 waves D: the file browser. Renders BELOW the drop zone on `/` (D-1, D-93) - never above it, and
 // never gating it: this component manages its own auth subscription independently of DropZone's, so an
-// anonymous visitor's public browse (D-94) is never blocked behind DropZone's own signed-out gate.
+// anonymous visitor's browse (D-94) is never blocked behind DropZone's own signed-out gate.
 //
-// Three scopes share one endpoint (§1.4): "mine" (own things, Bearer required), "public" (the anonymous
-// tree, D-94), "all" (the D-101 admin gate). A `mosni-tabs` switcher lives inside this section (D-93/D-102).
+// D-116 (E4.1 Wave E findings): two scopes share one endpoint (§1.1) - "mine" (own things, Bearer
+// required) and "visible" (everything THIS VIEWER can see: public for anonymous, public ∪ own ∪ granted
+// signed in, everything for an admin because they ARE an admin). This is ONE contract decided
+// server-side; the client sends the same scope for every viewer and branches on role nowhere - there is
+// no client-side isFilesAdmin check anywhere in this file. A `mosni-tabs` switcher lives inside this
+// section (D-93/D-102).
 //
 // E4.1 Wave B: the listing is a real `<table>` (D-108), one row per item; per-row actions (copy link,
 // rename, protection, delete) live behind a trailing `<mosni-dropdown>` overflow menu (D-109) instead of
@@ -11,15 +15,22 @@
 // `<mosni-tab>`/`<mosni-dropdown>` be written as ordinary JSX props below - see mosnicat.md.
 //
 // E4.1 Wave C (D-107 client half): mounted two ways now. On `/` with no `initialCollectionId`, this owns
-// its own scope (mine/public/all) exactly as before. Mounted by pages/Preview.tsx on `/f/*`/`/t/:token`
-// with a server-RESOLVED `initialCollectionId`, it shows that one collection under scope=public only (the
-// scope E4.1 Wave C extended to also authorize an owner/superuser/ACL-grant/token viewer, not just a
-// literally-public chain - see controllers/browse.ts) and never switches scope or drills via local state:
-// every collection click is a REAL navigation (`useNavigate`), and `pages/Preview.tsx` remounts this
-// component fresh (via `key`) once it re-resolves a different collection - see that file's comment.
+// its own scope (mine/visible) exactly as before. Mounted by pages/Preview.tsx on `/f/*`/`/t/:token` with
+// a server-RESOLVED `initialCollectionId`, it shows that one collection under scope=visible only (the
+// scope that also authorizes an owner/superuser/admin/ACL-grant/token viewer, not just a literally-public
+// chain - see controllers/browse.ts) and never switches scope or drills via local state: every collection
+// click is a REAL navigation (`useNavigate`), and `pages/Preview.tsx` remounts this component fresh (via
+// `key`) once it re-resolves a different collection - see that file's comment.
+//
+// E4.1 Wave E findings, Wave C: breadcrumb crumbs (including the current location) and a collection's
+// name are real `<a href>`s, never a control with no href (D-121) - copy-link-address, open-in-new-tab
+// and refresh only work on a real anchor. `isPlainLeftClick` below guards every one of them so a
+// modifier/middle click is left to the browser instead of being swallowed by `preventDefault()`. Rename
+// is inline name-cell editing (C8) instead of an expanded row; "New collection" is a button that inserts
+// a client-side-only placeholder row (C10, D-118) instead of a permanent form.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { can, isSuperuser, isFilesAdmin, type Claims } from "../../../app/src/lib/roles.ts";
+import { can, isSuperuser, type Claims } from "../../../app/src/lib/roles.ts";
 import type { Protection, VisibilityReason } from "../../../app/src/lib/protection.ts";
 import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../../../app/src/lib/browseContext.ts";
 import { formatUploadDate, humanSize } from "../../../app/src/lib/previewContext.ts";
@@ -55,10 +66,11 @@ declare module "react" {
   }
 }
 
+// D-116: exactly two tabs, always. "Browse" means scope=visible for every viewer - an admin sees more
+// INSIDE it because the server knows they are an admin, never because a third tab exists.
 const SCOPE_TABS: { scope: Scope; label: string }[] = [
   { scope: "mine", label: "My files" },
-  { scope: "public", label: "Browse" },
-  { scope: "all", label: "All files" },
+  { scope: "visible", label: "Browse" },
 ];
 
 const TABLE_COLUMN_COUNT = 6; // icon, name, size, added, visibility, actions - the colSpan an expanded row panel needs
@@ -88,6 +100,13 @@ function pathnameOf(absoluteUrl: string): string {
   return new URL(absoluteUrl).pathname;
 }
 
+// D-121 (E4.1 Wave E findings, C3): a modified or non-primary click is the browser's to handle -
+// preventDefault() here would silently break open-in-new-tab, which is half the reason breadcrumb crumbs
+// and a collection's name are real <a href>s at all. Used on every such link.
+function isPlainLeftClick(event: React.MouseEvent): boolean {
+  return !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.button === 0;
+}
+
 function currentToken(): string | null {
   return typeof window.mosni !== "undefined" ? window.mosni.token() : null;
 }
@@ -110,56 +129,78 @@ async function copyLinkToClipboard(url: string): Promise<void> {
   }
 }
 
-// D-104: reused by both a file row and a collection row - `patchUrl` is the only thing that differs. Now
-// always rendered already in "editing" shape (Wave B4) - the dropdown's "Rename" item is what opens it;
-// this component no longer owns its own open/closed toggle.
-function RenameForm({
-  patchUrl,
-  name,
-  onRenamed,
-  onCancel,
-}: {
-  patchUrl: string;
-  name: string;
-  onRenamed: () => void;
-  onCancel: () => void;
-}) {
-  const [value, setValue] = useState(name);
-
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    if (value.trim().length === 0 || value === name) return;
-    const res = await fetch(patchUrl, {
-      method: "PATCH",
-      headers: jsonHeaders(currentToken()),
-      body: JSON.stringify({ name: value }),
-    });
-    if (res.ok) onRenamed();
-  }
-
-  return (
-    <form onSubmit={(e) => void submit(e)} style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
-      <label htmlFor="row-rename-input" className="little-link">
-        New name
-      </label>
-      <input id="row-rename-input" type="text" aria-label="New name" value={value} onChange={(e) => setValue(e.target.value)} />
-      <button type="submit" className="btn-sm">
-        Save
-      </button>
-      <button type="button" className="btn-ghost btn-sm" onClick={onCancel}>
-        Cancel
-      </button>
-    </form>
-  );
-}
-
 type RowPanel = "rename" | "protection" | null;
 
 function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
+// C8/C10 (E4.1 Wave E findings): the confirm/cancel pair for both inline rename and the new-collection
+// placeholder row - same shape (two `btn-icon` buttons, check/x), different accessible names and,
+// for the create case, a disabled state while the name is empty.
+function IconConfirmCancel({
+  onConfirm,
+  onCancel,
+  confirmDisabled,
+  confirmLabel,
+  cancelLabel,
+}: {
+  onConfirm: () => void;
+  onCancel: () => void;
+  confirmDisabled?: boolean;
+  confirmLabel: string;
+  cancelLabel: string;
+}) {
+  return (
+    <>
+      <button type="button" className="btn-icon" aria-label={confirmLabel} disabled={confirmDisabled} onClick={onConfirm}>
+        <mosni-icon name="check" size="16" />
+      </button>
+      <button type="button" className="btn-icon" aria-label={cancelLabel} onClick={onCancel}>
+        <mosni-icon name="x" size="16" />
+      </button>
+    </>
+  );
+}
+
+// C8: the shared inline rename input - lives in the NAME cell while a row is being renamed. Value/onChange
+// are lifted to the row component (FileRow/CollectionRow) so the confirm button in the ACTIONS cell can
+// submit the same value. Enter submits, Escape cancels - there is no <form> spanning the two cells.
+function RenameInput({
+  value,
+  onChange,
+  onSubmit,
+  onCancel,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="field" style={{ marginBottom: 0 }}>
+      <input
+        aria-label="New name"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            onSubmit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            onCancel();
+          }
+        }}
+        // eslint-disable-next-line jsx-a11y/no-autofocus -- opening rename should focus the field it just revealed
+        autoFocus
+      />
+    </div>
+  );
+}
+
 function RowActions({
+  name,
   previewUrl,
   manage,
   mayDelete,
@@ -167,6 +208,7 @@ function RowActions({
   onProtection,
   onDeleteSelected,
 }: {
+  name: string;
   previewUrl: string;
   manage: boolean;
   mayDelete: boolean;
@@ -191,13 +233,12 @@ function RowActions({
   }, [previewUrl, onRename, onProtection, onDeleteSelected]);
 
   return (
-    // E4.1 Wave E/D-79: `label` becomes the trigger's VISIBLE text (mosni-chrome's dropdown.ts appends it
-    // as a text node, matching its own docs example, label="Actions") - it is not an aria-label-only
-    // accessible-name slot. A per-row "Actions for <name>" here rendered the whole file/collection name as
-    // literal button text, which is exactly what broke the phone-width table (D-79's overflow check caught
-    // it on a long name). Every row already sits in a labeled table row, so a fixed "Actions" carries
-    // enough context.
-    <mosni-dropdown ref={ref} label="Actions">
+    // E4.1 Wave E findings (C7, finding 3): icon-only (Wave 0.3) - just the ⋮ glyph, no visible text and
+    // no chevron, so the trigger is no longer the second-widest thing in the row. `label` is no longer
+    // visible text once icon-only is set, so it becomes the trigger's aria-label instead - safe to make
+    // it per-row again ("Actions for <name>") since nothing renders it as literal button text anymore
+    // (the old fixed "Actions" existed ONLY to avoid that - see D-79's phone-width finding).
+    <mosni-dropdown ref={ref} icon-only="more-vertical" label={`Actions for ${name}`}>
       <mosni-dropdown-item value="copy">Copy link</mosni-dropdown-item>
       {manage && <mosni-dropdown-item value="rename">Rename</mosni-dropdown-item>}
       {manage && <mosni-dropdown-item value="protection">Protection</mosni-dropdown-item>}
@@ -212,9 +253,33 @@ function RowActions({
 
 function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; onReload: () => void }) {
   const [panel, setPanel] = useState<RowPanel>(null);
+  const [renameValue, setRenameValue] = useState(row.name);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const manage = canManage(row.reason, user);
   const mayDelete = canDelete(row.reason, user);
+
+  function startRename() {
+    setRenameValue(row.name);
+    setPanel("rename");
+  }
+
+  function cancelRename() {
+    setPanel(null);
+  }
+
+  // C8: unchanged guard from the old RenameForm - empty, whitespace-only, or unchanged is a no-op.
+  async function submitRename() {
+    if (renameValue.trim().length === 0 || renameValue === row.name) return;
+    const res = await fetch(`/api/files/${row.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders(currentToken()),
+      body: JSON.stringify({ name: renameValue }),
+    });
+    if (res.ok) {
+      setPanel(null);
+      onReload();
+    }
+  }
 
   async function changeProtection(next: Protection): Promise<boolean> {
     const res = await fetch(`/api/files/${row.id}`, {
@@ -242,7 +307,13 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
           <mosni-icon name="file" size="18" />
         </td>
         <td>
-          <a href={row.previewUrl}>{row.name}</a>
+          {/* Hannah's call: leave a FILE's name as a full-page link - opening a file is a full page load,
+              unlike a collection's client-side navigation (C4). Do not "align" the two. */}
+          {panel === "rename" ? (
+            <RenameInput value={renameValue} onChange={setRenameValue} onSubmit={() => void submitRename()} onCancel={cancelRename} />
+          ) : (
+            <a href={row.previewUrl}>{row.name}</a>
+          )}
         </td>
         <td className="table-col-secondary">{humanSize(row.bytes)}</td>
         <td className="table-col-secondary">{formatUploadDate(row.createdAt)}</td>
@@ -250,14 +321,24 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
           <VisibilityIndicator reason={row.reason} />
         </td>
         <td>
-          <RowActions
-            previewUrl={row.previewUrl}
-            manage={manage}
-            mayDelete={mayDelete}
-            onRename={() => setPanel("rename")}
-            onProtection={() => setPanel("protection")}
-            onDeleteSelected={() => setDeleteOpen(true)}
-          />
+          {panel === "rename" ? (
+            <IconConfirmCancel
+              onConfirm={() => void submitRename()}
+              onCancel={cancelRename}
+              confirmLabel="Save name"
+              cancelLabel="Cancel rename"
+            />
+          ) : (
+            <RowActions
+              name={row.name}
+              previewUrl={row.previewUrl}
+              manage={manage}
+              mayDelete={mayDelete}
+              onRename={startRename}
+              onProtection={() => setPanel("protection")}
+              onDeleteSelected={() => setDeleteOpen(true)}
+            />
+          )}
           <mosni-modal heading={`Delete "${row.name}"?`} open={deleteOpen}>
             <p>This can&apos;t be undone.</p>
             <button slot="footer" type="button" className="btn-ghost" onClick={() => setDeleteOpen(false)}>
@@ -269,21 +350,6 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
           </mosni-modal>
         </td>
       </tr>
-      {panel === "rename" && (
-        <tr>
-          <td colSpan={TABLE_COLUMN_COUNT}>
-            <RenameForm
-              patchUrl={`/api/files/${row.id}`}
-              name={row.name}
-              onRenamed={() => {
-                setPanel(null);
-                onReload();
-              }}
-              onCancel={() => setPanel(null)}
-            />
-          </td>
-        </tr>
-      )}
       {panel === "protection" && (
         <tr>
           <td colSpan={TABLE_COLUMN_COUNT}>
@@ -307,10 +373,33 @@ function CollectionRow({
   onReload: () => void;
 }) {
   const [panel, setPanel] = useState<RowPanel>(null);
+  const [renameValue, setRenameValue] = useState(row.name);
   const [pending, setPending] = useState<{ collectionCount: number; fileCount: number } | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const manage = canManage(row.reason, user);
   const mayDelete = canDelete(row.reason, user);
+
+  function startRename() {
+    setRenameValue(row.name);
+    setPanel("rename");
+  }
+
+  function cancelRename() {
+    setPanel(null);
+  }
+
+  async function submitRename() {
+    if (renameValue.trim().length === 0 || renameValue === row.name) return;
+    const res = await fetch(`/api/collections/${row.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders(currentToken()),
+      body: JSON.stringify({ name: renameValue }),
+    });
+    if (res.ok) {
+      setPanel(null);
+      onReload();
+    }
+  }
 
   async function changeProtection(next: Protection): Promise<boolean> {
     const res = await fetch(`/api/collections/${row.id}`, {
@@ -351,9 +440,23 @@ function CollectionRow({
           <mosni-icon name="folder" size="18" />
         </td>
         <td>
-          <button type="button" className="btn-ghost" onClick={() => onOpen(row)}>
-            {row.name}
-          </button>
+          {panel === "rename" ? (
+            <RenameInput value={renameValue} onChange={setRenameValue} onSubmit={() => void submitRename()} onCancel={cancelRename} />
+          ) : (
+            // C4 (D-121): a real <a href>, not a <button> - copy-link-address, open-in-new-tab and
+            // refresh only work on a real anchor. No .btn-ghost: a bare <a> renders plain purple already
+            // (matching the breadcrumbs and FileRow's own name link).
+            <a
+              href={pathnameOf(row.previewUrl)}
+              onClick={(event) => {
+                if (!isPlainLeftClick(event)) return;
+                event.preventDefault();
+                onOpen(row);
+              }}
+            >
+              {row.name}
+            </a>
+          )}
         </td>
         <td className="table-col-secondary">{"—" /* D-110: collections are not files - no size to show */}</td>
         <td className="table-col-secondary">{"—" /* BrowseCollection carries no date */}</td>
@@ -361,14 +464,24 @@ function CollectionRow({
           <VisibilityIndicator reason={row.reason} />
         </td>
         <td>
-          <RowActions
-            previewUrl={row.previewUrl}
-            manage={manage}
-            mayDelete={mayDelete}
-            onRename={() => setPanel("rename")}
-            onProtection={() => setPanel("protection")}
-            onDeleteSelected={() => void requestDelete()}
-          />
+          {panel === "rename" ? (
+            <IconConfirmCancel
+              onConfirm={() => void submitRename()}
+              onCancel={cancelRename}
+              confirmLabel="Save name"
+              cancelLabel="Cancel rename"
+            />
+          ) : (
+            <RowActions
+              name={row.name}
+              previewUrl={row.previewUrl}
+              manage={manage}
+              mayDelete={mayDelete}
+              onRename={startRename}
+              onProtection={() => setPanel("protection")}
+              onDeleteSelected={() => void requestDelete()}
+            />
+          )}
           <mosni-modal
             heading={`Delete "${row.name}"?`}
             open={deleteOpen}
@@ -395,21 +508,6 @@ function CollectionRow({
           </mosni-modal>
         </td>
       </tr>
-      {panel === "rename" && (
-        <tr>
-          <td colSpan={TABLE_COLUMN_COUNT}>
-            <RenameForm
-              patchUrl={`/api/collections/${row.id}`}
-              name={row.name}
-              onRenamed={() => {
-                setPanel(null);
-                onReload();
-              }}
-              onCancel={() => setPanel(null)}
-            />
-          </td>
-        </tr>
-      )}
       {panel === "protection" && (
         <tr>
           <td colSpan={TABLE_COLUMN_COUNT}>
@@ -434,10 +532,13 @@ export function FileBrowser({
   const collectionId = initialCollectionId ?? "";
   const [user, setUser] = useState<MosniUser>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [scope, setScope] = useState<Scope | null>(isCollectionRoute ? "public" : (initialScope ?? null));
+  const [scope, setScope] = useState<Scope | null>(isCollectionRoute ? "visible" : (initialScope ?? null));
   const [data, setData] = useState<BrowseResponse | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [newCollectionName, setNewCollectionName] = useState("");
+  // C10/D-118: the "New collection" button inserts this CLIENT-SIDE-ONLY placeholder row; no server call
+  // happens until confirm, and cancel touches nothing.
+  const [creatingCollection, setCreatingCollection] = useState(false);
   const tabsRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -463,12 +564,12 @@ export function FileBrowser({
     };
   }, []);
 
-  // Default scope, once we know who is looking: an anonymous visitor starts on the public tree (D-94);
+  // Default scope, once we know who is looking: an anonymous visitor starts on Browse (D-94/D-116);
   // anyone signed in starts on their own things. `initialScope` (used by tests, and available to a future
   // caller) skips this and is never overridden afterward.
   useEffect(() => {
     if (initialScope !== undefined || !authReady || scope !== null) return;
-    setScope(user !== null ? "mine" : "public");
+    setScope(user !== null ? "mine" : "visible");
   }, [initialScope, authReady, user, scope]);
 
   useEffect(() => {
@@ -486,10 +587,10 @@ export function FileBrowser({
     // header comment) but are still real dependencies for the root-mounted case's own lint correctness.
   }, [scope, collectionId, reloadKey, initialToken]);
 
-  const visibleTabs = useMemo(
-    () => SCOPE_TABS.filter((t) => t.scope === "public" || (user !== null && (t.scope === "mine" || isFilesAdmin(user)))),
-    [user],
-  );
+  // D-116: Browse is always shown; My files only once signed in. No isFilesAdmin branch, and no role
+  // branch of any kind - an admin sees the exact same two tabs as everyone else and sees more INSIDE
+  // Browse because the server, not this filter, knows they are an admin.
+  const visibleTabs = useMemo(() => SCOPE_TABS.filter((t) => t.scope === "visible" || user !== null), [user]);
 
   useEffect(() => {
     const el = tabsRef.current;
@@ -530,8 +631,9 @@ export function FileBrowser({
     );
   }
 
-  async function submitCreateCollection(event: React.FormEvent) {
-    event.preventDefault();
+  // C10/D-118: no name reaches the API empty - the confirm button is disabled while trimmed is empty
+  // (below), and this guard is the same one belt-and-braces check submitRename() etc. already use.
+  async function submitCreateCollection() {
     const name = newCollectionName.trim();
     if (name.length === 0) return;
     const res = await fetch("/api/collections", {
@@ -541,8 +643,14 @@ export function FileBrowser({
     });
     if (res.ok) {
       setNewCollectionName("");
+      setCreatingCollection(false);
       reload();
     }
+  }
+
+  function cancelCreateCollection() {
+    setNewCollectionName("");
+    setCreatingCollection(false);
   }
 
   if (scope === null) {
@@ -554,7 +662,7 @@ export function FileBrowser({
   return (
     <div style={{ display: "grid", gap: "1rem" }}>
       {/* Scope switching only makes sense in root mode - a collection-route mount is a fixed, specific
-          collection (see the header comment), not something to browse mine/public/all within. */}
+          collection (see the header comment), not something to browse mine/visible within. */}
       {!isCollectionRoute && authReady && visibleTabs.length > 1 && (
         // D-112 (Wave 0) gave `<mosni-tab>` a write-through `label` setter, so this is ordinary JSX now -
         // no more building an HTML string for dangerouslySetInnerHTML. `key` still forces a fresh element
@@ -568,72 +676,64 @@ export function FileBrowser({
         </mosni-tabs>
       )}
 
-      <h2>Files and collections</h2>
+      {/* C9/D-117: the "Files and collections" heading is removed entirely, not moved. */}
 
       {canCreateHere && (
-        <form onSubmit={(e) => void submitCreateCollection(e)} className="panel" style={{ display: "flex", gap: "0.5rem" }}>
-          <label htmlFor="new-collection-name-input" className="little-link">
-            New collection name
-          </label>
-          <input
-            id="new-collection-name-input"
-            type="text"
-            aria-label="New collection name"
-            placeholder="New collection name"
-            value={newCollectionName}
-            onChange={(e) => setNewCollectionName(e.target.value)}
-          />
-          <button type="submit" className="btn">
-            Create collection
-          </button>
-        </form>
+        <button
+          type="button"
+          className="btn-sm"
+          disabled={creatingCollection}
+          onClick={() => {
+            setNewCollectionName("");
+            setCreatingCollection(true);
+          }}
+        >
+          <mosni-icon name="plus" size="16" /> New collection
+        </button>
       )}
 
       {data === null ? (
         <span className="spinner" role="status" aria-label="Loading" />
       ) : (
         <>
-          {/* C3: a PERMANENT root crumb (defect 8) - the old version gated the whole nav on
+          {/* C2/C3 (D-121): a PERMANENT root crumb (defect 8) - the old version gated the whole nav on
               breadcrumb.length > 0, so the Home control lived inside the element you needed it to escape,
-              and the bar appeared/vanished as you moved, shifting the page. C4: ancestor crumbs are real
-              links (`.btn-ghost`, never a filled `<button>`); the current location is plain text, not a
-              control. previewUrl per crumb is server-built (D-100) - the client only ever extracts a
-              pathname from it, never constructs one. */}
+              and the bar appeared/vanished as you moved, shifting the page. EVERY crumb, including the
+              current location, is now a real <a href> (no .btn-ghost - a bare <a> already renders plain
+              purple with no border, per mosni-chrome's base link rule) so copy-link-address, open-in-
+              new-tab and refresh all work; `isPlainLeftClick` guards every one of them so a modifier or
+              middle click is left to the browser instead of being swallowed. previewUrl per crumb is
+              server-built (D-100) - the client only ever extracts a pathname from it, never constructs
+              one. */}
           <nav aria-label="Breadcrumb" style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap", alignItems: "center" }}>
-            {collectionId === "" ? (
-              <span aria-current="location">Home</span>
-            ) : (
-              <a
-                href="/"
-                className="btn-ghost"
-                onClick={(event) => {
-                  event.preventDefault();
-                  navigate("/");
-                }}
-              >
-                Home
-              </a>
-            )}
+            <a
+              href="/"
+              aria-current={collectionId === "" ? "location" : undefined}
+              onClick={(event) => {
+                if (!isPlainLeftClick(event)) return;
+                event.preventDefault();
+                navigate("/");
+              }}
+            >
+              Home
+            </a>
             {data.breadcrumb.map((crumb, i) => {
               const isCurrent = i === data.breadcrumb.length - 1;
               const href = pathnameOf(crumb.previewUrl);
               return (
                 <span key={crumb.id} style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
                   <span aria-hidden="true">/</span>
-                  {isCurrent ? (
-                    <span aria-current="location">{crumb.name}</span>
-                  ) : (
-                    <a
-                      href={href}
-                      className="btn-ghost"
-                      onClick={(event) => {
-                        event.preventDefault();
-                        navigate(href);
-                      }}
-                    >
-                      {crumb.name}
-                    </a>
-                  )}
+                  <a
+                    href={href}
+                    aria-current={isCurrent ? "location" : undefined}
+                    onClick={(event) => {
+                      if (!isPlainLeftClick(event)) return;
+                      event.preventDefault();
+                      navigate(href);
+                    }}
+                  >
+                    {crumb.name}
+                  </a>
                 </span>
               );
             })}
@@ -649,6 +749,7 @@ export function FileBrowser({
               widen because of the table regardless of content - the padding here is just the common-case
               polish that avoids a scrollbar existing at all for what this page currently shows. */}
           <style>{`
+            .browse-table td { white-space: nowrap; }
             @media (max-width: 480px) {
               .browse-table th, .browse-table td { padding-left: 0.4rem; padding-right: 0.4rem; }
             }
@@ -666,6 +767,46 @@ export function FileBrowser({
                 </tr>
               </thead>
               <tbody>
+                {creatingCollection && (
+                  <tr>
+                    <td>
+                      <mosni-icon name="folder" size="18" />
+                    </td>
+                    <td>
+                      <div className="field" style={{ marginBottom: 0 }}>
+                        <input
+                          aria-label="New collection name"
+                          placeholder="New collection"
+                          value={newCollectionName}
+                          onChange={(e) => setNewCollectionName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              void submitCreateCollection();
+                            } else if (e.key === "Escape") {
+                              e.preventDefault();
+                              cancelCreateCollection();
+                            }
+                          }}
+                          // eslint-disable-next-line jsx-a11y/no-autofocus -- opening the row should focus the field it just revealed
+                          autoFocus
+                        />
+                      </div>
+                    </td>
+                    <td className="table-col-secondary">—</td>
+                    <td className="table-col-secondary">—</td>
+                    <td />
+                    <td>
+                      <IconConfirmCancel
+                        onConfirm={() => void submitCreateCollection()}
+                        onCancel={cancelCreateCollection}
+                        confirmDisabled={newCollectionName.trim().length === 0}
+                        confirmLabel="Create collection"
+                        cancelLabel="Cancel new collection"
+                      />
+                    </td>
+                  </tr>
+                )}
                 {data.collections.map((row) => (
                   <CollectionRow
                     key={row.id}

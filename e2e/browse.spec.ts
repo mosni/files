@@ -101,8 +101,10 @@ test("anonymous browse (D-94): a published collection is shown, an unpublished o
 
   await page.goto(`${FILES_ORIGIN}/`);
 
-  await expect(page.getByRole("button", { name: `pub-${run}` })).toBeVisible({ timeout: 10_000 });
-  await expect(page.getByRole("button", { name: `unpub-${run}` })).toHaveCount(0);
+  // E4.1 Wave E findings (C4/D-121): a collection's name is a real <a href>, not a <button> - only a
+  // real anchor supports copy-link-address/open-in-new-tab/refresh.
+  await expect(page.getByRole("link", { name: `pub-${run}` })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole("link", { name: `unpub-${run}` })).toHaveCount(0);
 });
 
 test("a signed-in owner's \"My files\" tab shows their own collection and file", async ({ page, request }) => {
@@ -129,7 +131,7 @@ test("a signed-in owner's \"My files\" tab shows their own collection and file",
 
   // D-80: the pseudo-root never holds files directly - the file only appears once drilled into its
   // collection (breadcrumb drill-down, D-102).
-  const collectionButton = page.getByRole("button", { name: `mine-${run}` });
+  const collectionButton = page.getByRole("link", { name: `mine-${run}` });
   await expect(collectionButton).toBeVisible({ timeout: 10_000 });
   await collectionButton.click();
   await expect(page.getByText("my-file.txt")).toBeVisible({ timeout: 10_000 });
@@ -166,7 +168,7 @@ test("the link offered for a file gated only by its collection contains no colle
 
   await page.goto(`${FILES_ORIGIN}/`);
   // D-80: drill into the gating collection first - the pseudo-root never lists files directly.
-  const collectionButton = page.getByRole("button", { name: `gate-${run}` });
+  const collectionButton = page.getByRole("link", { name: `gate-${run}` });
   await expect(collectionButton).toBeVisible({ timeout: 10_000 });
   await collectionButton.click();
   await expect(page.getByText("gated.txt")).toBeVisible({ timeout: 10_000 });

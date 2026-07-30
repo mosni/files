@@ -353,7 +353,7 @@ describe("PreviewPage", () => {
       return { ok: true, json: () => Promise.resolve({ breadcrumb: [], collections: [], files: [], nextOffset: null }) };
     }
 
-    it("mounts FileBrowser (not PreviewCard) from an embedded CollectionLocation, with zero round trips for the target itself", () => {
+    it("mounts FileBrowser (not PreviewCard) from an embedded CollectionLocation, with zero round trips for the target itself", async () => {
       embedCollection("coll-abc");
       const fetchSpy = vi.fn().mockImplementation((url: string) =>
         url.startsWith("/api/browse") ? Promise.resolve(browseResponse()) : Promise.reject(new Error("unexpected fetch")),
@@ -361,10 +361,11 @@ describe("PreviewPage", () => {
       vi.stubGlobal("fetch", fetchSpy);
 
       renderAt("/f/Photos");
+      await flush();
 
       // No /api/preview round trip for the TARGET itself - only FileBrowser's own /api/browse call.
       expect(fetchSpy).not.toHaveBeenCalledWith(expect.stringContaining("/api/preview"), expect.anything());
-      expect(container.textContent).toContain("Files and collections"); // FileBrowser's own heading
+      expect(container.querySelector('nav[aria-label="Breadcrumb"]')).not.toBeNull(); // FileBrowser mounted
       expect(container.querySelector(".copy-field-primary")).toBeNull(); // not a PreviewCard
     });
 
@@ -383,7 +384,7 @@ describe("PreviewPage", () => {
 
       await flush();
 
-      expect(container.textContent).toContain("Files and collections");
+      expect(container.querySelector('nav[aria-label="Breadcrumb"]')).not.toBeNull(); // FileBrowser mounted
       expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining("collectionId=coll-vac"), undefined);
     });
 
@@ -417,7 +418,7 @@ describe("PreviewPage", () => {
       renderNavigating("/f/first.png", "/f/Photos");
       await flush();
 
-      expect(container.textContent).toContain("Files and collections");
+      expect(container.querySelector('nav[aria-label="Breadcrumb"]')).not.toBeNull(); // FileBrowser mounted
       expect(container.querySelector("img")).toBeNull();
     });
   });
