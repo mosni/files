@@ -9,9 +9,7 @@ import { CopyLink } from "./CopyLink.tsx";
 import { ManageControls } from "./ManageControls.tsx";
 
 const FIT: React.CSSProperties = { maxWidth: "100%", height: "auto", display: "block" };
-const FIT_COMPACT: React.CSSProperties = { maxWidth: "100%", maxHeight: "320px", height: "auto", width: "auto", display: "block" };
 const FRAME: React.CSSProperties = { width: "100%", height: "min(70vh, 640px)", border: 0, display: "block" };
-const FRAME_COMPACT: React.CSSProperties = { width: "100%", height: "min(40vh, 320px)", border: 0, display: "block" };
 
 // Wrapper glue for <mosni-code> (the friction D-8 predicted for React + custom elements). The element's
 // render() reads this.textContent and then WIPES its own children to rebuild them - so it must already
@@ -33,10 +31,7 @@ function CodeBlock({ text, language }: { text: string; language?: string }) {
   return <div ref={hostRef} />;
 }
 
-function renderMedia(ctx: PreviewContext, compact: boolean) {
-  const fit = compact ? FIT_COMPACT : FIT;
-  const frame = compact ? FRAME_COMPACT : FRAME;
-
+function renderMedia(ctx: PreviewContext) {
   // "other", or an explicitly non-inline type (e.g. a disallowed extension): the download card.
   if (ctx.kind === "other" || !ctx.inline) {
     return (
@@ -57,14 +52,14 @@ function renderMedia(ctx: PreviewContext, compact: boolean) {
           alt={ctx.name}
           width={ctx.width ?? undefined}
           height={ctx.height ?? undefined}
-          style={fit}
+          style={FIT}
         />
       );
     case "video":
       // Plain <video controls> - not Vidstack, that's E5's (out of scope here).
-      return <video src={ctx.directUrl} controls style={fit} />;
+      return <video src={ctx.directUrl} controls style={FIT} />;
     case "pdf":
-      return <iframe src={ctx.directUrl} title={ctx.name} style={frame} />;
+      return <iframe src={ctx.directUrl} title={ctx.name} style={FRAME} />;
     case "text":
       // The design system's own code block, not an iframe to dl. (Hannah, session 010). This renders the
       // snippet already captured at ingest into the context (D-74's text_preview), so it costs no extra
@@ -73,14 +68,17 @@ function renderMedia(ctx: PreviewContext, compact: boolean) {
       return ctx.textPreview ? (
         <CodeBlock text={ctx.textPreview} />
       ) : (
-        <iframe src={ctx.directUrl} title={ctx.name} style={frame} />
+        <iframe src={ctx.directUrl} title={ctx.name} style={FRAME} />
       );
     default:
       return null;
   }
 }
 
-export function PreviewCard({ context, compact = false }: { context: PreviewContext; compact?: boolean }) {
+// D-122 (E4.1 live-testing findings, Wave E): the `compact` variant this component once had for the
+// upload-completion card is gone - that consumer is UploadStack.tsx now, and this was its only caller.
+// This stays the preview PAGE's own renderer (AC6 stands).
+export function PreviewCard({ context }: { context: PreviewContext }) {
   // Local, editable copy: ManageControls updates it optimistically on a successful rename/protection
   // change so the page reflects the new state with no extra round trip. Reset whenever the PARENT hands
   // in a genuinely new context (a real navigation, or Preview.tsx's owner-status refetch) rather than one
@@ -91,25 +89,22 @@ export function PreviewCard({ context, compact = false }: { context: PreviewCont
   return (
     // minmax(0, 1fr): see Preview.tsx - a grid item's automatic minimum size is its content, and a long
     // URL / wide image in a non-shrinking column would push the page wider than the viewport.
-    <div style={{ display: "grid", gap: compact ? "0.75rem" : "1.25rem", gridTemplateColumns: "minmax(0, 1fr)" }}>
+    <div style={{ display: "grid", gap: "1.25rem", gridTemplateColumns: "minmax(0, 1fr)" }}>
       <div>
-        <h1 style={{ margin: 0, fontSize: compact ? "1.1rem" : undefined }}>{ctx.name}</h1>
+        <h1 style={{ margin: 0 }}>{ctx.name}</h1>
         <p className="little-link" style={{ margin: "0.25rem 0 0" }}>
           {ctx.sizeLabel}
           {ctx.width !== null && ctx.height !== null ? ` · ${ctx.width}×${ctx.height}` : ""}
         </p>
       </div>
-      {!compact && ctx.isOwner && (
+      {ctx.isOwner && (
         <div className="panel">
           <p>You own this file ({ctx.protection}).</p>
         </div>
       )}
-      {renderMedia(ctx, compact)}
+      {renderMedia(ctx)}
       <CopyLink previewUrl={ctx.previewUrl} directUrl={ctx.directUrl} />
-      {/* D-89: full rename/protection/delete on the file's own page; the compact upload-completion card
-          gets only the protection selector (F3) - and only ever for the owner, so D-1's fast path never
-          grows a step for anyone else. */}
-      {ctx.isOwner && <ManageControls context={ctx} compact={compact} onUpdate={setCtx} />}
+      {ctx.isOwner && <ManageControls context={ctx} onUpdate={setCtx} />}
     </div>
   );
 }

@@ -34,6 +34,9 @@ import { can, isSuperuser, type Claims } from "../../../app/src/lib/roles.ts";
 import type { Protection, VisibilityReason } from "../../../app/src/lib/protection.ts";
 import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../../../app/src/lib/browseContext.ts";
 import { formatUploadDate, humanSize } from "../../../app/src/lib/previewContext.ts";
+import { toastMutationFailure } from "../lib/mutationError.ts";
+import { fetchCollections, type CollectionOption } from "../lib/collections.ts";
+import { DropZone } from "./DropZone.tsx";
 import { ProtectionControl } from "./ProtectionControl.tsx";
 import { VisibilityIndicator } from "./VisibilityIndicator.tsx";
 
@@ -135,6 +138,62 @@ function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
+// G3 (E4.1 live-testing findings, Wave G): move, shared between a file row (PATCH .../collectionId) and a
+// collection row (PATCH .../parentId) - the modal itself doesn't care which. Options are Root plus the
+// caller's own collections (GET /api/collections, extracted to web/src/lib/collections.ts). For a
+// collection row, the destination list is NOT filtered client-side to exclude the row itself or its
+// descendants - the server already rejects that (Wave C3's 400 invalid_destination), surfaced through
+// toastMutationFailure, rather than a client-side tree walk duplicating that check. Not drag-and-drop (Q6).
+function MoveModal({
+  itemName,
+  open,
+  destination,
+  onDestinationChange,
+  collections,
+  onConfirm,
+  onCancel,
+}: {
+  itemName: string;
+  open: boolean;
+  destination: string;
+  onDestinationChange: (id: string) => void;
+  collections: CollectionOption[];
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  // Rendered only while open (unlike the Delete modal elsewhere in this file, which stays mounted with
+  // `open` toggled) - a second always-mounted <select> would collide with every existing "the select"
+  // query the protection control's own tests already rely on, and there is nothing here worth keeping
+  // warm in the background the way Delete's dry-run count is.
+  if (!open) return <mosni-modal heading={`Move "${itemName}"`} open={false} />;
+
+  return (
+    <mosni-modal heading={`Move "${itemName}"`} open={open}>
+      <div className="field" style={{ marginBottom: 0 }}>
+        <label htmlFor={`move-destination-${itemName}`}>Destination</label>
+        <select
+          id={`move-destination-${itemName}`}
+          value={destination}
+          onChange={(event) => onDestinationChange(event.target.value)}
+        >
+          <option value="">Root</option>
+          {collections.map((collection) => (
+            <option key={collection.id} value={collection.id}>
+              {collection.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <button slot="footer" type="button" className="btn-ghost" onClick={onCancel}>
+        Cancel
+      </button>
+      <button slot="footer" type="button" className="btn" onClick={onConfirm}>
+        Move
+      </button>
+    </mosni-modal>
+  );
+}
+
 // C8/C10 (E4.1 Wave E findings): the confirm/cancel pair for both inline rename and the new-collection
 // placeholder row - same shape (two `btn-icon` buttons, check/x), different accessible names and,
 // for the create case, a disabled state while the name is empty.
@@ -206,6 +265,7 @@ function RowActions({
   mayDelete,
   onRename,
   onProtection,
+  onMove,
   onDeleteSelected,
 }: {
   name: string;
@@ -214,6 +274,7 @@ function RowActions({
   mayDelete: boolean;
   onRename: () => void;
   onProtection: () => void;
+  onMove: () => void;
   onDeleteSelected: () => void;
 }) {
   const ref = useRef<HTMLElement>(null);
@@ -226,11 +287,12 @@ function RowActions({
       if (value === "copy") void copyLinkToClipboard(previewUrl);
       else if (value === "rename") onRename();
       else if (value === "protection") onProtection();
+      else if (value === "move") onMove();
       else if (value === "delete") onDeleteSelected();
     }
     el.addEventListener("mosni-dropdown-select", onSelect);
     return () => el.removeEventListener("mosni-dropdown-select", onSelect);
-  }, [previewUrl, onRename, onProtection, onDeleteSelected]);
+  }, [previewUrl, onRename, onProtection, onMove, onDeleteSelected]);
 
   return (
     // E4.1 Wave E findings (C7, finding 3): icon-only (Wave 0.3) - just the ⋮ glyph, no visible text and
@@ -242,6 +304,8 @@ function RowActions({
       <mosni-dropdown-item value="copy">Copy link</mosni-dropdown-item>
       {manage && <mosni-dropdown-item value="rename">Rename</mosni-dropdown-item>}
       {manage && <mosni-dropdown-item value="protection">Protection</mosni-dropdown-item>}
+      {/* G3 (E4.1 live-testing findings): gated on `manage`, same as rename/protection. */}
+      {manage && <mosni-dropdown-item value="move">Move</mosni-dropdown-item>}
       {mayDelete && (
         <mosni-dropdown-item value="delete" variant="danger">
           Delete
@@ -255,8 +319,37 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
   const [panel, setPanel] = useState<RowPanel>(null);
   const [renameValue, setRenameValue] = useState(row.name);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveDestination, setMoveDestination] = useState("");
+  const [moveCollections, setMoveCollections] = useState<CollectionOption[]>([]);
+  const [moveCollectionsLoaded, setMoveCollectionsLoaded] = useState(false);
   const manage = canManage(row.reason, user);
   const mayDelete = canDelete(row.reason, user);
+
+  function openMove() {
+    setMoveDestination("");
+    setMoveOpen(true);
+    if (!moveCollectionsLoaded) {
+      setMoveCollectionsLoaded(true);
+      void fetchCollections(currentToken()).then(setMoveCollections);
+    }
+  }
+
+  // G3: the destination list is not filtered client-side (a file has no descendants to worry about, but
+  // consistency with CollectionRow's move matters more than the extra few bytes of unfiltered options).
+  async function submitMove() {
+    const res = await fetch(`/api/files/${row.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders(currentToken()),
+      body: JSON.stringify({ collectionId: moveDestination }),
+    });
+    if (res.ok) {
+      setMoveOpen(false);
+      onReload();
+    } else {
+      await toastMutationFailure(res);
+    }
+  }
 
   function startRename() {
     setRenameValue(row.name);
@@ -278,6 +371,8 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
     if (res.ok) {
       setPanel(null);
       onReload();
+    } else {
+      await toastMutationFailure(res);
     }
   }
 
@@ -287,7 +382,10 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
       headers: jsonHeaders(currentToken()),
       body: JSON.stringify({ protection: next }),
     });
-    if (!res.ok) return false;
+    if (!res.ok) {
+      await toastMutationFailure(res);
+      return false;
+    }
     onReload();
     return true;
   }
@@ -336,6 +434,7 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
               mayDelete={mayDelete}
               onRename={startRename}
               onProtection={() => setPanel("protection")}
+              onMove={openMove}
               onDeleteSelected={() => setDeleteOpen(true)}
             />
           )}
@@ -348,6 +447,15 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
               Yes, delete
             </button>
           </mosni-modal>
+          <MoveModal
+            itemName={row.name}
+            open={moveOpen}
+            destination={moveDestination}
+            onDestinationChange={setMoveDestination}
+            collections={moveCollections}
+            onConfirm={() => void submitMove()}
+            onCancel={() => setMoveOpen(false)}
+          />
         </td>
       </tr>
       {panel === "protection" && (
@@ -376,8 +484,38 @@ function CollectionRow({
   const [renameValue, setRenameValue] = useState(row.name);
   const [pending, setPending] = useState<{ collectionCount: number; fileCount: number } | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveDestination, setMoveDestination] = useState("");
+  const [moveCollections, setMoveCollections] = useState<CollectionOption[]>([]);
+  const [moveCollectionsLoaded, setMoveCollectionsLoaded] = useState(false);
   const manage = canManage(row.reason, user);
   const mayDelete = canDelete(row.reason, user);
+
+  function openMove() {
+    setMoveDestination("");
+    setMoveOpen(true);
+    if (!moveCollectionsLoaded) {
+      setMoveCollectionsLoaded(true);
+      void fetchCollections(currentToken()).then(setMoveCollections);
+    }
+  }
+
+  // G3: the destination list is NOT filtered client-side to exclude this collection's own descendants -
+  // the server rejects that (Wave C3's 400 invalid_destination), surfaced through toastMutationFailure,
+  // rather than a client-side tree walk duplicating the server's own check.
+  async function submitMove() {
+    const res = await fetch(`/api/collections/${row.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders(currentToken()),
+      body: JSON.stringify({ parentId: moveDestination }),
+    });
+    if (res.ok) {
+      setMoveOpen(false);
+      onReload();
+    } else {
+      await toastMutationFailure(res);
+    }
+  }
 
   function startRename() {
     setRenameValue(row.name);
@@ -398,6 +536,8 @@ function CollectionRow({
     if (res.ok) {
       setPanel(null);
       onReload();
+    } else {
+      await toastMutationFailure(res);
     }
   }
 
@@ -407,7 +547,10 @@ function CollectionRow({
       headers: jsonHeaders(currentToken()),
       body: JSON.stringify({ protection: next }),
     });
-    if (!res.ok) return false;
+    if (!res.ok) {
+      await toastMutationFailure(res);
+      return false;
+    }
     onReload();
     return true;
   }
@@ -479,6 +622,7 @@ function CollectionRow({
               mayDelete={mayDelete}
               onRename={startRename}
               onProtection={() => setPanel("protection")}
+              onMove={openMove}
               onDeleteSelected={() => void requestDelete()}
             />
           )}
@@ -506,6 +650,15 @@ function CollectionRow({
               Yes, delete
             </button>
           </mosni-modal>
+          <MoveModal
+            itemName={row.name}
+            open={moveOpen}
+            destination={moveDestination}
+            onDestinationChange={setMoveDestination}
+            collections={moveCollections}
+            onConfirm={() => void submitMove()}
+            onCancel={() => setMoveOpen(false)}
+          />
         </td>
       </tr>
       {panel === "protection" && (
@@ -573,7 +726,14 @@ export function FileBrowser({
   }, [initialScope, authReady, user, scope]);
 
   useEffect(() => {
-    if (scope === null) return;
+    // D-123 (E4.1 live-testing findings, Wave D, finding 5): gated on authReady too, not just `scope !==
+    // null`. On a collection-route mount `scope` is `"visible"` from the very first render (see the
+    // header comment), so without this gate the fetch fired before auth existed and its anonymous result
+    // was never replaced - "Browse is empty until you switch tabs and back" was exactly that: switching
+    // tabs changes `scope` twice, forcing the refetch this gate now makes unnecessary. `authReady` is a
+    // monotonic boolean, unlike `user` (a fresh reference on every SDK callback) - adding `user` instead
+    // would refetch the whole listing repeatedly rather than exactly once when auth resolves.
+    if (scope === null || !authReady) return;
     let cancelled = false;
     void fetch(browseUrl(scope, collectionId, 0, initialToken), authHeaders(currentToken()))
       .then((res) => (res.ok ? (res.json() as Promise<BrowseResponse>) : null))
@@ -585,7 +745,7 @@ export function FileBrowser({
     };
     // collectionId/initialToken are fixed for this component's lifetime in collection-route mode (see the
     // header comment) but are still real dependencies for the root-mounted case's own lint correctness.
-  }, [scope, collectionId, reloadKey, initialToken]);
+  }, [scope, collectionId, reloadKey, initialToken, authReady]);
 
   // D-116: Browse is always shown; My files only once signed in. No isFilesAdmin branch, and no role
   // branch of any kind - an admin sees the exact same two tabs as everyone else and sees more INSIDE
@@ -627,6 +787,7 @@ export function FileBrowser({
             collections: [...prev.collections, ...next.collections],
             files: [...prev.files, ...next.files],
             nextOffset: next.nextOffset,
+            canUpload: next.canUpload,
           },
     );
   }
@@ -645,6 +806,8 @@ export function FileBrowser({
       setNewCollectionName("");
       setCreatingCollection(false);
       reload();
+    } else {
+      await toastMutationFailure(res);
     }
   }
 
@@ -705,6 +868,14 @@ export function FileBrowser({
         <span className="spinner" role="status" aria-label="Loading" />
       ) : (
         <>
+          {/* G2 (E4.1 live-testing findings, Wave G, finding 11): a minimal upload box on a collection
+              page - ONLY when the server said this viewer may upload here (`canUpload`, Wave C4). The
+              client never infers upload rights from the user object (D-116's lesson: the server decides).
+              D-107 originally made collection routes view-only by design; D-129 changes that deliberately
+              - noted here so a future session does not "restore" the read-only rule. */}
+          {isCollectionRoute && data.canUpload && (
+            <DropZone compact fixedCollectionId={collectionId} onUploadComplete={reload} />
+          )}
           {/* C2/C3 (D-121): a PERMANENT root crumb (defect 8) - the old version gated the whole nav on
               breadcrumb.length > 0, so the Home control lived inside the element you needed it to escape,
               and the bar appeared/vanished as you moved, shifting the page. EVERY crumb, including the

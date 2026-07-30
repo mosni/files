@@ -52,6 +52,33 @@ export function PreviewPage() {
   const [state, setState] = useState<PageState>(() =>
     embeddedRef.current ? stateFromTarget(embeddedRef.current) : { status: "loading" },
   );
+  // D-123 (E4.1 live-testing findings, Wave D, finding 3): on a COLD load `window.mosni.token()` returns
+  // null before the auth SDK has resolved, so the Bearer re-fetch below used to be skipped outright and
+  // isOwner stayed false forever - the protection control was never missing, it was never asked for.
+  // Same subscribe() shape as DropZone.tsx: poll until window.mosni exists, then subscribe for good.
+  const [authReady, setAuthReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+
+    function subscribe() {
+      if (typeof window.mosni === "undefined") {
+        pollTimer = setTimeout(subscribe, 50);
+        return;
+      }
+      window.mosni.onChange(() => {
+        if (cancelled) return;
+        setAuthReady(true);
+      });
+    }
+    subscribe();
+
+    return () => {
+      cancelled = true;
+      if (pollTimer) clearTimeout(pollTimer);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,7 +127,10 @@ export function PreviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [location.pathname]);
+    // D-123: authReady is added deliberately - on a cold load the first run of this effect has no token
+    // yet (hadEmbedded's guard returns without fetching), and once the SDK resolves this effect must
+    // re-run so window.mosni.token() is read again, this time with a real value.
+  }, [location.pathname, authReady]);
 
   if (state.status === "loading") {
     return <span className="spinner" role="status" aria-label="Loading" />;

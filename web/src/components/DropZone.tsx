@@ -12,9 +12,9 @@ import { useEffect, useRef, useState } from "react";
 import * as tus from "tus-js-client";
 import { can, type Claims } from "../../../app/src/lib/roles.ts";
 import { UPLOAD_CHUNK_SIZE } from "../../../app/src/lib/uploadConfig.ts";
-import { humanSize, type PreviewContext } from "../../../app/src/lib/previewContext.ts";
-import { CopyLink } from "./CopyLink.tsx";
-import { PreviewCard } from "./PreviewCard.tsx";
+import { toastMutationFailure } from "../lib/mutationError.ts";
+import { fetchCollections, type CollectionOption } from "../lib/collections.ts";
+import { UploadStack, type FileUpload, type UploadState } from "./UploadStack.tsx";
 
 type MosniUser = Claims | null;
 type MosniToastOptions = { variant?: "success" | "error" | "info" };
@@ -42,17 +42,6 @@ declare module "react" {
     }
   }
 }
-
-type UploadState =
-  | { status: "uploading"; progress: number; loaded: number; total: number }
-  | { status: "done"; previewUrl: string; directUrl?: string; context: PreviewContext | null }
-  | { status: "error"; message: string };
-
-type FileUpload = {
-  id: string;
-  name: string;
-  state: UploadState;
-};
 
 let nextUploadId = 0;
 
@@ -87,42 +76,16 @@ function uploadableFiles(dataTransfer: DataTransfer): { files: File[]; rejected:
   return { files, rejected };
 }
 
-// Upgrades a completed row from bare links to the compact preview card (finding 6). Best-effort: a
-// failed or unreadable fetch just leaves the row on its CopyLink fallback, never blocks completion.
-async function fetchPreviewContext(previewUrl: string, token: string | null): Promise<PreviewContext | null> {
-  try {
-    const pathname = new URL(previewUrl).pathname; // "/f/<path>" or "/t/<token>"
-    const res = await fetch(`/api/preview${pathname}`, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
-    if (!res.ok) return null;
-    return (await res.json()) as PreviewContext;
-  } catch {
-    return null;
-  }
-}
-
-type CollectionOption = { id: string; name: string };
-
 function authHeaders(token: string | null): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-async function fetchCollections(token: string | null): Promise<CollectionOption[]> {
-  try {
-    const res = await fetch("/api/collections", { headers: authHeaders(token) });
-    if (!res.ok) return [];
-    const body: unknown = await res.json();
-    // D2 (Wave D) calls this unconditionally on mount rather than behind a disclosure the caller opted
-    // into, so a malformed/unexpected response must degrade to "no collections" rather than crash the
-    // whole panel - never block the fast path over a destination-picker fetch (D-1).
-    return Array.isArray(body) ? (body as CollectionOption[]) : [];
-  } catch {
-    return [];
-  }
-}
-
 // G2: creates the typed-in collection name on demand, so a chosen destination is resolved to an id
 // before any file starts uploading. Returns null (falls back to the caller's default, server-side) on
-// any failure - a bad destination must never turn "drop a file" into an error dialog (D-1).
+// any failure - a bad destination must never turn "drop a file" into an error dialog (D-1). D-128 (E4.1
+// live-testing findings, Wave F): the fallback stays for a TRANSIENT failure, but a 400/409 specifically
+// (a name failing safeSegment(), or a root name colliding with a reserved one) now toasts why, instead of
+// silently landing the drop somewhere the user did not choose.
 async function createCollection(token: string | null, name: string): Promise<string | null> {
   try {
     const res = await fetch("/api/collections", {
@@ -130,7 +93,10 @@ async function createCollection(token: string | null, name: string): Promise<str
       headers: { "Content-Type": "application/json", ...authHeaders(token) },
       body: JSON.stringify({ name }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      await toastMutationFailure(res);
+      return null;
+    }
     return ((await res.json()) as CollectionOption).id;
   } catch {
     return null;
@@ -165,7 +131,7 @@ function startUpload(
           previewUrl: string;
           directUrl?: string;
         };
-        onUpdate({ status: "done", previewUrl, directUrl, context: null });
+        onUpdate({ status: "done", previewUrl, directUrl });
       } catch {
         onUpdate({ status: "error", message: "upload finished but the server response was unreadable" });
       }
@@ -177,7 +143,17 @@ function startUpload(
   upload.start();
 }
 
-export function DropZone() {
+// D-129 (E4.1 live-testing findings, Wave G): a compact, fixed-destination mode for a collection page's
+// own upload box (finding 11) - reuses this component rather than building a second control (Q5). In
+// compact mode the Options block does not render at all (there is nothing to pick: the destination is
+// fixed), and startUploads uploads straight into `fixedCollectionId`, skipping the destination-picker
+// state and the createCollection step entirely. Everything else - drag handling, the folder/empty-file
+// guard, the upload machinery, the floating stack - is shared, unchanged.
+export function DropZone({
+  compact = false,
+  fixedCollectionId,
+  onUploadComplete,
+}: { compact?: boolean; fixedCollectionId?: string; onUploadComplete?: () => void } = {}) {
   const [user, setUser] = useState<MosniUser>(null);
   const [authReady, setAuthReady] = useState(false);
   const [uploads, setUploads] = useState<FileUpload[]>([]);
@@ -266,25 +242,35 @@ export function DropZone() {
 
   // D2/D-114: Options has no disclosure to open anymore, so its data loads once eligibility is known
   // instead of on a toggle event. `loadCollectionsOnce`'s own `collectionsLoaded` guard keeps this to
-  // exactly one fetch even though `user` can change reference as auth resolves.
+  // exactly one fetch even though `user` can change reference as auth resolves. G1: a compact mount never
+  // renders Options at all, so there is nothing for this list to feed - skip the fetch entirely.
   useEffect(() => {
-    if (user !== null && can(user, "files:write")) loadCollectionsOnce();
-  }, [user]);
+    if (!compact && user !== null && can(user, "files:write")) loadCollectionsOnce();
+  }, [compact, user]);
 
   function updateUpload(id: string, state: UploadState) {
     setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, state } : u)));
+    // G2: a collection-page mount reloads its FileBrowser listing on completion, so the new file appears
+    // with no page refresh. A no-op for the root-mounted `/` drop zone, which has no listing to refresh.
+    if (state.status === "done") onUploadComplete?.();
   }
 
   async function startUploads(files: File[]) {
     if (files.length === 0) return;
     const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
 
-    // A typed-in new-collection name takes priority over a selected existing one; resolved to an id ONCE
-    // per batch, before any file starts, so every dropped file in this batch lands in the same place.
-    let destination = destinationCollectionId || null;
-    if (newCollectionName.trim().length > 0) {
-      destination = await createCollection(token, newCollectionName.trim());
-      setNewCollectionName("");
+    // G1: a compact mount has nothing to pick - the destination is fixed, and there is no picker state
+    // (destinationCollectionId/newCollectionName) to read at all.
+    let destination = fixedCollectionId ?? null;
+    if (!compact) {
+      // A typed-in new-collection name takes priority over a selected existing one; resolved to an id
+      // ONCE per batch, before any file starts, so every dropped file in this batch lands in the same
+      // place.
+      destination = destinationCollectionId || null;
+      if (newCollectionName.trim().length > 0) {
+        destination = await createCollection(token, newCollectionName.trim());
+        setNewCollectionName("");
+      }
     }
 
     // Each file gets its own tus.Upload and its own row - multi-file grouping into a single shared link
@@ -297,13 +283,12 @@ export function DropZone() {
       ]);
       startUpload(file, token, chunkSize, destination, (state) => {
         updateUpload(id, state);
-        if (state.status === "done") {
-          void fetchPreviewContext(state.previewUrl, token).then((context) => {
-            if (context) updateUpload(id, { ...state, context });
-          });
-        }
       });
     });
+  }
+
+  function dismissUpload(id: string) {
+    setUploads((prev) => prev.filter((u) => u.id !== id));
   }
 
   function loadCollectionsOnce() {
@@ -407,11 +392,13 @@ export function DropZone() {
             void startUploads(files);
           }}
           // D1: the dashed rectangle is now the drop target's permanent resting state (previously only a
-          // hover affordance) - hovering just accents it further, it never starts undecorated.
+          // hover affordance) - hovering just accents it further, it never starts undecorated. G1: smaller
+          // padding in compact mode - a collection page's upload box is a secondary affordance, not `/`'s
+          // primary one.
           style={{
             border: "3px dashed var(--mosni-border-muted)",
             borderRadius: "8px",
-            padding: "3rem 1.5rem",
+            padding: compact ? "1.25rem 1rem" : "3rem 1.5rem",
             textAlign: "center",
             cursor: "pointer",
             ...(zoneHover
@@ -423,7 +410,7 @@ export function DropZone() {
               : undefined),
           }}
         >
-          Drop files here, or click to choose
+          {compact ? "Drop files here" : "Drop files here, or click to choose"}
           <input
             ref={inputRef}
             type="file"
@@ -443,73 +430,48 @@ export function DropZone() {
 
         {/* G1 (D-42/D-86, amended by D-114): expanded rather than behind a disclosure - D3's check is
             that this adds no REQUIRED step: a user who ignores it entirely still does exactly
-            open → drop → copy, with the default destination unchanged. */}
-        <div style={{ display: "grid", gap: "0.75rem" }}>
-          <h2 style={{ margin: 0, fontSize: "1rem" }}>Options</h2>
-          <div>
-            <label htmlFor="destination-select" style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.35rem", color: "var(--mosni-text-muted)" }}>
-              Upload into
-            </label>
-            <select
-              id="destination-select"
-              value={destinationCollectionId}
-              onChange={(event) => setDestinationCollectionId(event.target.value)}
-            >
-              <option value="">Default</option>
-              {collections.map((collection) => (
-                <option key={collection.id} value={collection.id}>
-                  {collection.name}
-                </option>
-              ))}
-            </select>
+            open → drop → copy, with the default destination unchanged. Does not render at all in compact
+            mode (G1) - there is nothing to pick, the destination is fixed. */}
+        {!compact && (
+          <div style={{ display: "grid", gap: "0.75rem" }}>
+            <h2 style={{ margin: 0, fontSize: "1rem" }}>Options</h2>
+            <div>
+              <label htmlFor="destination-select" style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.35rem", color: "var(--mosni-text-muted)" }}>
+                Upload into
+              </label>
+              <select
+                id="destination-select"
+                value={destinationCollectionId}
+                onChange={(event) => setDestinationCollectionId(event.target.value)}
+              >
+                <option value="">Default</option>
+                {collections.map((collection) => (
+                  <option key={collection.id} value={collection.id}>
+                    {collection.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="new-collection-name" style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.35rem", color: "var(--mosni-text-muted)" }}>
+                Or create a new collection
+              </label>
+              <input
+                id="new-collection-name"
+                type="text"
+                placeholder="New collection name"
+                value={newCollectionName}
+                onChange={(event) => setNewCollectionName(event.target.value)}
+              />
+            </div>
           </div>
-          <div>
-            <label htmlFor="new-collection-name" style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.35rem", color: "var(--mosni-text-muted)" }}>
-              Or create a new collection
-            </label>
-            <input
-              id="new-collection-name"
-              type="text"
-              placeholder="New collection name"
-              value={newCollectionName}
-              onChange={(event) => setNewCollectionName(event.target.value)}
-            />
-          </div>
-        </div>
+        )}
       </div>
 
-      {uploads.map((upload) => {
-        // The compact card renders the filename itself, as its own <h1>. Keeping the row label as well
-        // printed every completed upload's name twice (review session 013, visible in production) - so
-        // the label only stands in while there is no card: uploading, error, and the CopyLink fallback.
-        const cardShown = upload.state.status === "done" && upload.state.context !== null;
-        return (
-        <div className="panel" key={upload.id}>
-          {!cardShown && <p style={{ marginTop: 0 }}>{upload.name}</p>}
-          {upload.state.status === "uploading" && (
-            <>
-              <div className="progress-label">
-                <span>
-                  {humanSize(upload.state.loaded)} / {humanSize(upload.state.total)}
-                </span>
-                <span>{upload.state.progress}%</span>
-              </div>
-              <div
-                className="progress"
-                style={{ "--progress": `${upload.state.progress}%` } as React.CSSProperties}
-              />
-            </>
-          )}
-          {upload.state.status === "done" &&
-            (upload.state.context ? (
-              <PreviewCard context={upload.state.context} compact />
-            ) : (
-              <CopyLink previewUrl={upload.state.previewUrl} directUrl={upload.state.directUrl} />
-            ))}
-          {upload.state.status === "error" && <p role="alert">Upload failed: {upload.state.message}</p>}
-        </div>
-        );
-      })}
+      {/* D-122 (E4.1 live-testing findings, Wave E, findings 1/2): upload progress/completion is a
+          floating bottom-right stack, not inline panels - one element per file, staying until dismissed
+          or its "view" link is clicked. */}
+      <UploadStack uploads={uploads} onDismiss={dismissUpload} />
     </div>
   );
 }

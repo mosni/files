@@ -43,31 +43,6 @@ vi.mock("tus-js-client", () => {
 });
 
 import { DropZone } from "../../src/components/DropZone.tsx";
-import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
-
-function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
-  return {
-    id: "file0000000000id",
-    collectionId: "coll000000000000",
-    name: "hello.txt",
-    path: "hello.txt",
-    bytes: 5,
-    sizeLabel: "5 B",
-    protection: "public",
-    createdAt: "2026-07-21T00:00:00.000Z",
-    previewUrl: "https://files.mosni.dev/abc",
-    directUrl: "https://dl.mosni.dev/abc",
-    kind: "image",
-    mimeType: "image/png",
-    inline: true,
-    width: null,
-    height: null,
-    durationSeconds: null,
-    textPreview: null,
-    isOwner: false,
-    ...overrides,
-  };
-}
 
 // Flushes every pending microtask (fetch → res.json() → setState is two awaits deep) by yielding to a
 // real macrotask - more robust than a fixed number of `await Promise.resolve()` hops.
@@ -232,10 +207,10 @@ describe("DropZone", () => {
     expect(mosni.toast).toHaveBeenCalledWith(expect.stringContaining("testfolder"), { variant: "error" });
   });
 
-  it("hands off to CopyLink immediately, then upgrades to a compact preview card once /api/preview resolves (F1/F4, finding 6)", async () => {
+  // D-122 (E4.1 live-testing findings, Wave E, findings 1/2): completion is a floating stack element, not
+  // a compact PreviewCard - no /api/preview round trip happens any more (fetchPreviewContext is gone).
+  it("a completed upload renders a 'view' link and a copy-direct-link button, never a PreviewCard (D-122)", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
-    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(makeContext()) });
-    vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
       root.render(<DropZone />);
@@ -257,23 +232,21 @@ describe("DropZone", () => {
     });
 
     expect(container.querySelector(".progress")).toBeNull();
-    expect(container.querySelector("button.copy-field-btn-primary")).not.toBeNull();
+    // No PreviewCard: no <h1> title, no CopyLink share-field markup.
+    expect(container.querySelector("h1")).toBeNull();
+    expect(container.querySelector(".copy-field-primary")).toBeNull();
 
-    await flush();
-
-    expect(fetchSpy).toHaveBeenCalledWith("/api/preview/abc", { headers: { Authorization: "Bearer test-token" } });
-    expect(container.querySelector("img")).not.toBeNull();
-    expect(container.querySelector("button.copy-field-btn-primary")).not.toBeNull();
-    // The card renders the filename as its own <h1>; the row label must not print it a second time
-    // (review session 013 - this shipped as a visible duplicate on every completed upload).
-    expect(container.textContent?.match(/hello\.txt/g) ?? []).toHaveLength(1);
-    expect(container.querySelector("h1")?.textContent).toBe("hello.txt");
+    const viewLink = container.querySelector("a") as HTMLAnchorElement;
+    expect(viewLink).not.toBeNull();
+    expect(viewLink.textContent).toBe("view");
+    expect(viewLink.getAttribute("href")).toBe("https://files.mosni.dev/abc");
+    expect(container.textContent).toContain("hello.txt");
   });
 
-  it("falls back to bare CopyLink when /api/preview fails after completion (finding 6 fallback)", async () => {
+  it("the copy-direct-link button writes directUrl to the clipboard and toasts", async () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
-    const fetchSpy = vi.fn().mockResolvedValue({ ok: false });
-    vi.stubGlobal("fetch", fetchSpy);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
 
     act(() => {
       root.render(<DropZone />);
@@ -281,25 +254,63 @@ describe("DropZone", () => {
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
-
     act(() => {
       uploadInstances[0].options.onSuccess?.({
         lastResponse: {
           getBody: () =>
-            JSON.stringify({
-              previewUrl: "https://files.mosni.dev/abc",
-              directUrl: "https://dl.mosni.dev/abc",
-            }),
+            JSON.stringify({ previewUrl: "https://files.mosni.dev/abc", directUrl: "https://dl.mosni.dev/abc" }),
         },
       });
     });
 
-    await flush();
+    const copyButton = container.querySelector('button[aria-label^="Copy direct link"]') as HTMLButtonElement;
+    expect(copyButton).not.toBeNull();
+    await act(async () => {
+      copyButton.click();
+      await Promise.resolve();
+    });
 
-    expect(container.querySelector("button.copy-field-btn-primary")).not.toBeNull();
-    expect(container.querySelector("img")).toBeNull();
-    // No card, so the row label is what names the file - it must still be there in the fallback.
-    expect(container.textContent).toContain("hello.txt");
+    expect(writeText).toHaveBeenCalledWith("https://dl.mosni.dev/abc");
+    const mosni = (window as unknown as { mosni: { toast: ReturnType<typeof vi.fn> } }).mosni;
+    expect(mosni.toast).toHaveBeenCalledWith("Link copied", { variant: "success" });
+  });
+
+  it("dismissing a completed upload's stack element removes only that element", () => {
+    installMockMosni({ sub: "user:1", roles: ["files:write"] });
+
+    act(() => {
+      root.render(<DropZone />);
+    });
+
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    dropFile(input, new File(["one"], "one.txt", { type: "text/plain" }));
+    dropFile(input, new File(["two"], "two.txt", { type: "text/plain" }));
+    expect(uploadInstances).toHaveLength(2);
+
+    act(() => {
+      uploadInstances[0].options.onSuccess?.({
+        lastResponse: {
+          getBody: () => JSON.stringify({ previewUrl: "https://files.mosni.dev/one", directUrl: "https://dl.mosni.dev/one" }),
+        },
+      });
+      uploadInstances[1].options.onSuccess?.({
+        lastResponse: {
+          getBody: () => JSON.stringify({ previewUrl: "https://files.mosni.dev/two", directUrl: "https://dl.mosni.dev/two" }),
+        },
+      });
+    });
+
+    expect(container.textContent).toContain("one.txt");
+    expect(container.textContent).toContain("two.txt");
+
+    const dismissButtons = container.querySelectorAll('button[aria-label^="Dismiss"]');
+    expect(dismissButtons).toHaveLength(2);
+    act(() => {
+      (dismissButtons[0] as HTMLButtonElement).click();
+    });
+
+    expect(container.textContent).not.toContain("one.txt");
+    expect(container.textContent).toContain("two.txt");
   });
 
   // A2's guard (hand-off acceptance criterion 2) shipped in session 012 with no test at all. The failure
@@ -559,6 +570,37 @@ describe("DropZone", () => {
         filename: "hello.txt",
         destinationCollectionId: "coll-new",
       });
+    });
+
+    // D-128 (E4.1 live-testing findings, Wave F/E2 item 4): a 400 specifically now toasts why, instead of
+    // the fully-silent fallback every other failure keeps (D-1: a drop must never become an error dialog).
+    it("a 400 rejecting the new-collection name toasts the reason, still falls back to the default", async () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({ ok: false, status: 400, json: () => Promise.resolve({ error: "invalid_name" }) }),
+      );
+
+      act(() => {
+        root.render(<DropZone />);
+      });
+
+      const nameInput = container.querySelector("#new-collection-name") as HTMLInputElement;
+      act(() => {
+        setNativeInputValue(nameInput, "a/b");
+        nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+
+      const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+      await act(async () => {
+        dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
+        await flush();
+      });
+
+      expect(uploadInstances).toHaveLength(1);
+      expect(uploadInstances[0].options.metadata).toEqual({ filename: "hello.txt" });
+      const mosni = (window as unknown as { mosni: { toast: ReturnType<typeof vi.fn> } }).mosni;
+      expect(mosni.toast).toHaveBeenCalledWith(expect.stringContaining("can't be used"), { variant: "error" });
     });
 
     it("a failed new-collection creation falls back to the default rather than blocking the upload", async () => {

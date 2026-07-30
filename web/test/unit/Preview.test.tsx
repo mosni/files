@@ -40,6 +40,18 @@ function embedContext(ctx: PreviewContext) {
   document.head.appendChild(script);
 }
 
+// D-123 (E4.1 live-testing findings, Wave D): both PreviewPage and FileBrowser now subscribe to
+// window.mosni.onChange to know when auth has genuinely RESOLVED (not just "no embedded target"), the
+// same fix DropZone.tsx already had - a real production visit always has the SDK script tag, even an
+// anonymous one, so `onChange` firing (even with a null user) is what "ready" means. `token` defaults to
+// null (anonymous but ready) since most of this file's fixtures are about anonymous/public targets.
+function installMosni(token: string | null = null) {
+  (window as unknown as { mosni: unknown }).mosni = {
+    token: () => token,
+    onChange: (cb: (user: unknown) => void) => cb(null),
+  };
+}
+
 // Flushes every pending microtask (fetch → res.json() → setState is two awaits deep) by yielding to a
 // real macrotask - more robust than a fixed number of `await Promise.resolve()` hops.
 async function flush() {
@@ -145,7 +157,7 @@ describe("PreviewPage", () => {
   });
 
   it("sends a Bearer header when window.mosni has a token, for both routed shapes", async () => {
-    (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
+    installMosni("test-token");
     const ctx = makeContext({ path: "t/abc12" });
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(ctx) });
     vi.stubGlobal("fetch", fetchSpy);
@@ -182,7 +194,7 @@ describe("PreviewPage", () => {
   });
 
   it("never blanks an already-rendered embedded context when the background refetch fails", async () => {
-    (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
+    installMosni("test-token");
     embedContext(makeContext());
     const fetchSpy = vi.fn().mockRejectedValue(new Error("network down"));
     vi.stubGlobal("fetch", fetchSpy);
@@ -246,7 +258,7 @@ describe("PreviewPage", () => {
   });
 
   it("picks up the true isOwner from a background refetch when a Bearer is available", async () => {
-    (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
+    installMosni("test-token");
     embedContext(makeContext({ isOwner: false }));
     const refreshed = makeContext({ isOwner: true });
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(refreshed) });
@@ -354,6 +366,7 @@ describe("PreviewPage", () => {
     }
 
     it("mounts FileBrowser (not PreviewCard) from an embedded CollectionLocation, with zero round trips for the target itself", async () => {
+      installMosni();
       embedCollection("coll-abc");
       const fetchSpy = vi.fn().mockImplementation((url: string) =>
         url.startsWith("/api/browse") ? Promise.resolve(browseResponse()) : Promise.reject(new Error("unexpected fetch")),
@@ -370,6 +383,7 @@ describe("PreviewPage", () => {
     });
 
     it("resolves a collection via the API when there is no embedded target (client-side navigation)", async () => {
+      installMosni();
       const fetchSpy = vi.fn().mockImplementation((url: string) => {
         if (url === "/api/preview/f/Vacation") {
           return Promise.resolve({ ok: true, json: () => Promise.resolve({ kind: "collection", collectionId: "coll-vac" }) });
@@ -389,6 +403,7 @@ describe("PreviewPage", () => {
     });
 
     it("resolves via /t/:token too, and threads the token through to FileBrowser's own browse fetch", async () => {
+      installMosni();
       const fetchSpy = vi.fn().mockImplementation((url: string) => {
         if (url === "/api/preview/t/sec12") {
           return Promise.resolve({ ok: true, json: () => Promise.resolve({ kind: "collection", collectionId: "coll-sec" }) });
@@ -405,6 +420,7 @@ describe("PreviewPage", () => {
     });
 
     it("a client-side navigation from a file to a collection swaps PreviewCard for FileBrowser", async () => {
+      installMosni();
       embedContext(makeContext({ name: "first.png", previewUrl: "https://files.mosni.dev/f/first.png" }));
       const fetchSpy = vi.fn().mockImplementation((url: string) => {
         if (url === "/api/preview/f/Photos") {

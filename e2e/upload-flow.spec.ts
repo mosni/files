@@ -297,20 +297,19 @@ test("the three-action path in a real browser: drop a file, get a link", async (
     buffer: Buffer.from(body),
   });
 
-  // The share field only appears once the upload really completed and the server returned its URLs.
-  const shareInput = page.locator(".copy-field-primary input");
-  await expect(shareInput).toBeVisible({ timeout: 30_000 });
+  // D-122 (E4.1 live-testing findings, Wave E): completion is a floating bottom-right stack element, one
+  // per file - a "view" link (to the preview page) and a copy-direct-link icon button, not a compact
+  // PreviewCard/CopyLink pair. It only appears once the upload really completed and the server returned
+  // its URLs.
+  const stackItem = page.locator(".panel", { hasText: filename });
+  const viewLink = stackItem.locator("a", { hasText: "view" });
+  await expect(viewLink).toBeVisible({ timeout: 30_000 });
 
-  const shareUrl = await shareInput.inputValue();
+  const shareUrl = await viewLink.getAttribute("href");
   expect(shareUrl).toContain(filename);
 
-  // E2-UPLOAD-FIXES finding 6: the row upgrades from bare links to a compact preview card once the
-  // client's own /api/preview fetch resolves - assert the card's own heading, which the bare CopyLink
-  // fallback never renders (only its <p> row label does, before the card lands).
-  await expect(page.locator("h1", { hasText: filename })).toBeVisible({ timeout: 10_000 });
-
   // And the link it just handed the user actually resolves.
-  const preview = await request.get(`${FILES_ORIGIN}${new URL(shareUrl).pathname}`, {
+  const preview = await request.get(`${FILES_ORIGIN}${new URL(shareUrl!).pathname}`, {
     headers: { host: FILES_HOST },
   });
   expect(preview.status(), "the copied link must work").toBe(200);

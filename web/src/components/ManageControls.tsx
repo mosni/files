@@ -6,6 +6,7 @@
 import { useState } from "react";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 import type { Protection } from "../../../app/src/lib/protection.ts";
+import { toastMutationFailure } from "../lib/mutationError.ts";
 import { ProtectionControl } from "./ProtectionControl.tsx";
 
 function authHeaders(): Record<string, string> {
@@ -79,7 +80,10 @@ export function ManageControls({
 
   async function changeProtection(next: Protection): Promise<boolean> {
     const res = await patchFile(context.id, { protection: next });
-    if (!res.ok) return false;
+    if (!res.ok) {
+      await toastMutationFailure(res);
+      return false;
+    }
     onUpdate?.(await updatedContext(res, { ...context, protection: next }));
     return true;
   }

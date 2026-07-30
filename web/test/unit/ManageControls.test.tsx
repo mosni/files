@@ -164,6 +164,32 @@ describe("ManageControls (D-89: rename, protection, delete - owner-only)", () =>
     expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ protection: "private" }));
   });
 
+  // D-128 (E4.1 live-testing findings, Wave F): PICKER-SILENT-400 instance 1 - a rejected protection
+  // change now toasts why, in addition to ProtectionControl's own silent revert.
+  it("a 400 on a protection change toasts the reason", async () => {
+    const toast = vi.fn();
+    (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token", toast };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 400, json: () => Promise.resolve({ error: "below_parent_protection" }) }),
+    );
+    const ctx = makeContext({ protection: "unlisted" });
+
+    act(() => {
+      root.render(<ManageControls context={ctx} />);
+    });
+
+    const select = container.querySelector("select") as HTMLSelectElement;
+    await act(async () => {
+      setNativeInputValue(select, "public");
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      await flush();
+    });
+
+    expect(select.value).toBe("unlisted"); // reverted
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("stricter"), { variant: "error" });
+  });
+
   // Review session 017: the PATCH response carries the whole updated context, and it must be applied
   // wholesale. Patching only the field we sent left CopyLink showing the URL the change had just retired
   // - most visibly on a switch to `secret`, where both links move onto /t/<token>, and on a switch to

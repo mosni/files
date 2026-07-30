@@ -79,12 +79,13 @@ function makeResponse(overrides: Partial<BrowseResponse> = {}): BrowseResponse {
     collections: [],
     files: [],
     nextOffset: null,
+    canUpload: false,
     ...overrides,
   };
 }
 
-function jsonResponse(body: unknown, ok = true) {
-  return { ok, status: ok ? 200 : 404, json: () => Promise.resolve(body) };
+function jsonResponse(body: unknown, ok = true, status = ok ? 200 : 404) {
+  return { ok, status, json: () => Promise.resolve(body) };
 }
 
 let container: HTMLDivElement;
@@ -941,12 +942,18 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(home.getAttribute("aria-current")).toBe("location");
   });
 
-  it("a failed protection PATCH on a file row does not reload the listing", async () => {
-    (window as unknown as { mosni: unknown }).mosni = { user: () => ({ sub: "user:a" }), token: () => "tok", onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a" }) };
+  it("a failed protection PATCH on a file row does not reload the listing, and toasts why (D-128)", async () => {
+    const toast = vi.fn();
+    (window as unknown as { mosni: unknown }).mosni = {
+      user: () => ({ sub: "user:a" }),
+      token: () => "tok",
+      onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a" }),
+      toast,
+    };
     const fetchSpy = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] })))
-      .mockResolvedValueOnce(jsonResponse({ error: "below_parent_protection" }, false));
+      .mockResolvedValueOnce(jsonResponse({ error: "below_parent_protection" }, false, 400));
     vi.stubGlobal("fetch", fetchSpy);
 
     act(() => {
@@ -967,6 +974,9 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
 
     expect(fetchSpy).toHaveBeenCalledTimes(2); // the initial listing + the failed PATCH - no reload fetch followed
     expect(select.value).toBe("unlisted"); // reverted
+    // D-128 (E4.1 live-testing findings, Wave F): PICKER-SILENT-400 instance 2 - the reason is stated,
+    // not just a silent revert. Names the parent collection's relationship, not just "failed".
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("stricter"), { variant: "error" });
   });
 
   // C5: the protection control renders inside a .field wrapper (mosni-chrome's input chrome), independent
@@ -1174,6 +1184,177 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
 
       expect(container.querySelector("mosni-tabs")).toBeNull();
       expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("New collection"))).toBe(false);
+    });
+  });
+
+  // G3/G4 (E4.1 live-testing findings, Wave G, finding 12): move in the row overflow menu.
+  describe("Move (G3)", () => {
+    function installMosni() {
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles: ["files:write"] }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write"] }),
+        toast: vi.fn(),
+      };
+    }
+
+    it("the Move item appears only for a manageable row", async () => {
+      installMosni();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          jsonResponse(
+            makeResponse({
+              files: [makeFile({ id: "mine", reason: "own" }), makeFile({ id: "theirs", reason: "public" })],
+            }),
+          ),
+        ),
+      );
+
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+      });
+      await flush();
+
+      const rows = container.querySelectorAll("[data-row-id]");
+      const ownRow = Array.from(rows).find((r) => r.getAttribute("data-row-id") === "mine")!;
+      const strangerRow = Array.from(rows).find((r) => r.getAttribute("data-row-id") === "theirs")!;
+      expect(ownRow.querySelector('mosni-dropdown-item[value="move"]')).not.toBeNull();
+      expect(strangerRow.querySelector('mosni-dropdown-item[value="move"]')).toBeNull();
+    });
+
+    it("the picker lists Root plus the caller's collections; confirming PATCHes collectionId and reloads", async () => {
+      installMosni();
+      const fetchSpy = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] })))
+        .mockResolvedValueOnce(jsonResponse([{ id: "dest-1", name: "Vacation" }]))
+        .mockResolvedValueOnce(jsonResponse({}))
+        .mockResolvedValueOnce(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] })));
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+      });
+      await flush();
+
+      const row = container.querySelector("[data-row-id]")!;
+      await selectRowAction(row, "move");
+      await flush();
+
+      const select = container.querySelector("select") as HTMLSelectElement;
+      expect(Array.from(select.options).map((o) => ({ value: o.value, text: o.textContent }))).toEqual([
+        { value: "", text: "Root" },
+        { value: "dest-1", text: "Vacation" },
+      ]);
+
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!;
+      await act(async () => {
+        setter.call(select, "dest-1");
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+
+      const confirmButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Move")!;
+      await act(async () => {
+        confirmButton.click();
+        await flush();
+      });
+
+      expect(fetchSpy).toHaveBeenNthCalledWith(
+        3,
+        expect.stringContaining("/api/files/"),
+        expect.objectContaining({ method: "PATCH", body: JSON.stringify({ collectionId: "dest-1" }) }),
+      );
+      expect(fetchSpy).toHaveBeenCalledTimes(4); // initial listing + collections + PATCH + reload
+    });
+
+    it("a 400 on move toasts the reason and leaves the row in place", async () => {
+      installMosni();
+      const fetchSpy = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] })))
+        .mockResolvedValueOnce(jsonResponse([]))
+        .mockResolvedValueOnce(jsonResponse({ error: "below_parent_protection" }, false, 400));
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+      });
+      await flush();
+
+      const row = container.querySelector("[data-row-id]")!;
+      await selectRowAction(row, "move");
+      await flush();
+
+      const confirmButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Move")!;
+      await act(async () => {
+        confirmButton.click();
+        await flush();
+      });
+
+      expect(fetchSpy).toHaveBeenCalledTimes(3); // no reload fetch followed the failed PATCH
+      const mosni = (window as unknown as { mosni: { toast: ReturnType<typeof vi.fn> } }).mosni;
+      expect(mosni.toast).toHaveBeenCalledWith(expect.stringContaining("stricter"), { variant: "error" });
+    });
+  });
+
+  // G2/G4: the compact collection-page upload box - server-decided (`canUpload`), never inferred from
+  // the user object.
+  describe("compact collection-page upload box (G2)", () => {
+    it("renders only on a collection route, and only when the server says canUpload is true", async () => {
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles: ["files:write"] }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write"] }),
+      };
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ canUpload: true }))));
+
+      act(() => {
+        root.render(
+          <MemoryRouter>
+            <FileBrowser initialCollectionId="coll-x" />
+          </MemoryRouter>,
+        );
+      });
+      await flush();
+
+      expect(container.textContent).toContain("Drop files here");
+    });
+
+    it("does not render when canUpload is false, even on a collection route", async () => {
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles: [] }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: [] }),
+      };
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ canUpload: false }))));
+
+      act(() => {
+        root.render(
+          <MemoryRouter>
+            <FileBrowser initialCollectionId="coll-x" />
+          </MemoryRouter>,
+        );
+      });
+      await flush();
+
+      expect(container.textContent).not.toContain("Drop files here");
+    });
+
+    it("never renders on the root-mounted browser, even if canUpload were somehow true", async () => {
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles: ["files:write"] }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write"] }),
+      };
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ canUpload: true }))));
+
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+      });
+      await flush();
+
+      expect(container.textContent).not.toContain("Drop files here");
     });
   });
 });
