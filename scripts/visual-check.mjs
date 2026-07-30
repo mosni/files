@@ -399,8 +399,10 @@ const PAGES = [
     url: `/f/vis-${run}-public/nested`,
     note: "E4.1 Wave C (C2/C3/C4): a collection is now a real route, not a client-side drill - this opens " +
       "the nested collection COLD, the way a shared link actually arrives. The breadcrumb (Home / " +
-      "vis-<run>-public / nested) must be present, with ancestor crumbs as links and 'nested' as plain " +
-      "text, not a control (defect 7/8). No drop zone or tabs on this page (D-107: collection routes are " +
+      "vis-<run>-public / nested) must be present. D-121 (E4.1 Wave E findings) STRUCK the old rule that " +
+      "the current crumb be plain text: EVERY crumb, 'nested' included, is now a plain purple <a href> " +
+      "with no border - a bordered pill, or a non-link current crumb, is the defect now. No drop zone or " +
+      "tabs on this page (D-107: collection routes are " +
       "view-only) - that is the whole point of the redesign, not a bug in this check.",
     init: signedOut,
     interact: async (p) => {
@@ -423,20 +425,72 @@ const PAGES = [
     },
   },
   {
-    id: "browser-admin-all",
-    label: "Landing - browser section, admin All files view",
+    id: "browser-admin-browse",
+    label: "Landing - browser section, an admin's Browse tab (D-116)",
     url: "/",
-    note: "D-101: reachable only by a caller holding both files:write and files:delete. Shows a " +
-      "stranger-owned unlisted collection at root that scope=mine and scope=public alike would hide - " +
-      "E4.1 Wave C fixed collection ROUTES (/f/<path>) to scope=public always, so admin visibility can no " +
-      "longer be demonstrated by drilling INTO a collection from this tab (that navigates off scope=all " +
-      "entirely, onto that collection's own public-scoped page); the root listing is the only place " +
-      "scope=all's own breadth is still visible in the client.",
+    note: "D-116 REPLACED this state's predecessor (browser-admin-all). There is no longer an 'All files' " +
+      "tab to click: scope=all and scope=public were deleted, and Browse means scope=visible for EVERY " +
+      "viewer. What this shot proves is that an admin sees the same two tabs as anyone else (My files / " +
+      "Browse) and nonetheless sees a stranger-owned unlisted collection at root INSIDE Browse - i.e. the " +
+      "breadth comes from the server knowing they are an admin, not from a special tab. A third tab " +
+      "appearing here, or the stranger-owned row being absent, is a real defect.",
     init: signedInAsReal(ADMIN, adminToken),
     interact: async (p) => {
       await p.waitForSelector("mosni-tabs", { timeout: 10_000 }).catch(() => {});
-      await p.locator("mosni-tabs button", { hasText: "All files" }).click({ timeout: 5_000 }).catch(() => {});
+      await p.locator("mosni-tabs button", { hasText: "Browse" }).click({ timeout: 5_000 }).catch(() => {});
       await p.waitForSelector(`text=vis-${run}-stranger-owned`, { timeout: 10_000 }).catch(() => {});
+      await p.waitForTimeout(200);
+    },
+  },
+  {
+    id: "browser-row-rename-inline",
+    label: "Landing - browser section, inline rename open on a row",
+    url: "/",
+    note: "E4.1 Wave E findings C8 (finding 10): rename edits the NAME CELL in place - an input in the " +
+      "name column plus check/x icon buttons where the row's actions normally sit - instead of the old " +
+      "expanded <tr> below the row. This state did not exist before, which is exactly why finding 10 " +
+      "could only ever be verified in code. The input must carry the design system's input chrome (it is " +
+      "wrapped in .field, C5's same fix) - an unstyled native input here is the defect.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.waitForSelector(`[data-row-id]:has-text("vis-${run}-deletable")`, { timeout: 10_000 }).catch(() => {});
+      const row = p.locator("[data-row-id]", { hasText: `vis-${run}-deletable` });
+      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
+      await row.locator("mosni-dropdown-item", { hasText: "Rename" }).click({ timeout: 5_000 }).catch(() => {});
+      await p.waitForTimeout(200);
+    },
+  },
+  {
+    id: "browser-new-collection-placeholder",
+    label: "Landing - browser section, the new-collection placeholder row",
+    url: "/",
+    note: "E4.1 Wave E findings C10/D-118 (finding 12): the permanent bordered create-collection form is " +
+      "gone; 'New collection' is a button that inserts a client-side-only placeholder row at the top of " +
+      "the table. The input starts EMPTY with placeholder text, and the confirm (check) button is " +
+      "DISABLED until a name is typed - both are visible in this shot and both are the decision D-118 " +
+      "recorded. No server call has happened at this point.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.waitForSelector("mosni-tabs", { timeout: 10_000 }).catch(() => {});
+      await p.locator("button", { hasText: "New collection" }).first().click({ timeout: 5_000 }).catch(() => {});
+      await p.waitForTimeout(200);
+    },
+  },
+  {
+    id: "browser-row-protection-panel",
+    label: "Landing - browser section, a row's protection panel open",
+    url: "/",
+    note: "E4.1 Wave E findings C5 (finding 8): ProtectionControl relied on being rendered inside a " +
+      ".panel for its native <select>'s styling, and E4.1 Wave B moved it into a bare <td>, so it " +
+      "rendered completely unstyled. It is now wrapped in mosni-chrome's .field, which styles a " +
+      "descendant select independent of .panel. No visual-check state opened this panel before, which is " +
+      "why finding 8 was code-only. An unstyled browser-default select here is the defect.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.waitForSelector(`[data-row-id]:has-text("vis-${run}-deletable")`, { timeout: 10_000 }).catch(() => {});
+      const row = p.locator("[data-row-id]", { hasText: `vis-${run}-deletable` });
+      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
+      await row.locator("mosni-dropdown-item", { hasText: "Protection" }).click({ timeout: 5_000 }).catch(() => {});
       await p.waitForTimeout(200);
     },
   },

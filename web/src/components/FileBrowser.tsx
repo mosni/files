@@ -679,9 +679,18 @@ export function FileBrowser({
       {/* C9/D-117: the "Files and collections" heading is removed entirely, not moved. */}
 
       {canCreateHere && (
+        // D-118 asks for a MINIMAL button. Two things are load-bearing here and both were wrong in the
+        // first pass (caught by the D-79 check, not by any test - it rendered as a full-width filled
+        // purple bar, the loudest element on the page, i.e. the exact opposite of the decision):
+        //   - `btn-ghost` is required, not just `btn-sm`. mosni-chrome's `_button.scss` styles the BARE
+        //     `button` element selector, so a `<button>` with no variant is a filled purple primary with
+        //     no opt-out (D-111's root cause). `btn-sm` only shrinks the padding; it does not un-fill it.
+        //   - `justifySelf: "start"` is required because this element's parent is `display: grid`, whose
+        //     default `justify-items: stretch` makes any child span the full column width.
         <button
           type="button"
-          className="btn-sm"
+          className="btn-ghost btn-sm"
+          style={{ justifySelf: "start", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
           disabled={creatingCollection}
           onClick={() => {
             setNewCollectionName("");
