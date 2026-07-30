@@ -135,7 +135,7 @@ describe("DropZone", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders the login button when signed out (F5)", () => {
+  it("renders a login-only panel when signed out - the login button and nothing else (D-120)", () => {
     installMockMosni(null);
 
     act(() => {
@@ -144,6 +144,16 @@ describe("DropZone", () => {
 
     expect(container.querySelector("mosni-login-button")).not.toBeNull();
     expect(container.querySelector('input[type="file"]')).toBeNull();
+    // D-120: "dedicated log in panel that's only for log in, no other text" - no heading, no drop
+    // target, no copy of any kind. <mosni-login-button> is the ONLY sign-in affordance in the app, so
+    // the panel must never be emptied down to nothing (§0.4.1 of the hand-off).
+    expect(container.querySelector("h1")).toBeNull();
+    expect(container.textContent).not.toContain("Send a file");
+    expect(container.textContent).not.toContain("Sign in to upload");
+    const panel = container.querySelector(".panel");
+    expect(panel).not.toBeNull();
+    expect(panel?.children).toHaveLength(1);
+    expect(panel?.firstElementChild?.tagName.toLowerCase()).toBe("mosni-login-button");
   });
 
   it("renders a plain no-access message when signed in without files:write (F5)", () => {

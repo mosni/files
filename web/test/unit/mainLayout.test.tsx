@@ -66,7 +66,9 @@ describe("main.tsx's \"/\" composition: DropZone then FileBrowser, never reorder
     // components' internal markup, so this test survives either one's DOM changing shape later.
     expect(container.children.length).toBe(2);
     const [first, second] = Array.from(container.children);
-    expect(first!.querySelector("h1")?.textContent).toBe("Send a file"); // the drop zone, signed out
+    // D-120: signed out, the drop zone is a login-only panel - no heading, just the login control.
+    expect(first!.querySelector("h1")).toBeNull();
+    expect(first!.querySelector("mosni-login-button")).not.toBeNull();
     expect(second!.querySelector("h1")).toBeNull(); // the browser section has no heading of its own here
     expect(first!.compareDocumentPosition(second!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });

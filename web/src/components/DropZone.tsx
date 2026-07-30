@@ -325,13 +325,16 @@ export function DropZone() {
     return <span className="spinner" role="status" aria-label="Loading" />;
   }
 
-  // Signed out this is the WHOLE page (E4 adds the browser), so it needs to say what the app is rather
-  // than stranding a lone button in the corner - which is exactly how it read before session 010.
+  // D-120 (E4.1 Wave E findings, finding 5): signed out, this is a DEDICATED login-only panel - Hannah's
+  // call, verbatim: "dedicated log in panel that's only for log in, no other text." No heading, no copy,
+  // no drop target - the browser below the drop zone (D-93) already shows what the app is for an
+  // anonymous visitor, so this panel's only job is to offer sign-in.
+  // Landmine: <mosni-login-button /> is the ONLY sign-in affordance in the entire app (verified by grep
+  // during E4.1 Wave E findings planning) - this panel may be emptied of copy but must NEVER be removed
+  // or replaced with nothing, or an anonymous visitor has no way to sign in at all.
   if (user === null) {
     return (
       <div className="panel">
-        <h1 style={{ marginTop: 0 }}>Send a file</h1>
-        <p>Drop a file, get a link. Sign in to upload.</p>
         <mosni-login-button />
       </div>
     );
