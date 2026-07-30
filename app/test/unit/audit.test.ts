@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatAuditLine, type AuditEvent, type WriteAction } from "../../src/lib/audit.ts";
+import { actorLabel, formatAuditLine, type AuditEvent, type WriteAction } from "../../src/lib/audit.ts";
 
 const base = (overrides: Partial<AuditEvent> & Pick<AuditEvent, "action">): AuditEvent => ({
   actor: "hannah",
@@ -56,5 +56,22 @@ describe("formatAuditLine()", () => {
   it("omits optional fields cleanly - no stray parentheses or commas", () => {
     const line = formatAuditLine(base({ action: "delete" }));
     expect(line).toBe('hannah deleted "photo.png"');
+  });
+});
+
+describe("actorLabel()", () => {
+  // The audit channel is an internal ops Discord channel, not public - unlike the default collection name
+  // (controllers/upload.ts), showing the sub here is not a privacy leak, just less readable than a name.
+  it("prefers the name claim when present", () => {
+    expect(actorLabel({ sub: "google:138543663", name: "Hannah" })).toBe("Hannah");
+  });
+
+  it("falls back to sub when there is no name claim", () => {
+    expect(actorLabel({ sub: "google:138543663" })).toBe("google:138543663");
+  });
+
+  it("falls back to sub when name is blank or not a string", () => {
+    expect(actorLabel({ sub: "eve:123", name: "   " })).toBe("eve:123");
+    expect(actorLabel({ sub: "eve:123", name: 42 })).toBe("eve:123");
   });
 });

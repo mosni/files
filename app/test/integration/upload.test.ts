@@ -17,17 +17,18 @@ vi.mock("../../src/auth/verify.ts", () => ({ verify: vi.fn() }));
 import { verify } from "../../src/auth/verify.ts";
 import { registerUploadRoutes } from "../../src/routes/upload.ts";
 import type { Config } from "../../src/config.ts";
-import { applySchema, closeDb, getPool, initDb } from "../../src/storage/db.ts";
-import { initFilesStorage, resolveByPath } from "../../src/storage/files.ts";
+import { applyMigrations, closeDb, getPool, initDb } from "../../src/storage/db.ts";
+import { diskRelPath, initFilesStorage, resolveByNames } from "../../src/storage/files.ts";
+import { createCollection, listCollectionsFor, type CollectionRecord } from "../../src/storage/collections.ts";
 
 const verifyMock = vi.mocked(verify);
 
-describe("routes/upload.ts - tus upload (D1-D3)", () => {
+describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => {
   let root: string;
   let app: FastifyInstance;
   let redis: Redis;
   let config: Config;
-  const createdFolders: string[] = [];
+  const createdOwnerSubs: string[] = [];
 
   beforeAll(async () => {
     initDb({
@@ -37,7 +38,7 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
       password: process.env.DB_PASS ?? "filespass",
       database: process.env.DB_NAME ?? "files",
     });
-    await applySchema();
+    await applyMigrations();
 
     root = await mkdtemp(path.join(os.tmpdir(), "upload-test-"));
     initFilesStorage(root);
@@ -54,6 +55,8 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
       storageRoot: root,
       tusTempDir: path.join(root, ".tus"),
       port: 0,
+      deliverySigningSecret: "upload-test-secret",
+      deliveryUrlTtlSeconds: 300,
     };
 
     app = Fastify({ logger: false });
@@ -70,11 +73,17 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
 
   afterEach(async () => {
     vi.mocked(verify).mockReset();
-    while (createdFolders.length > 0) {
-      const folder = createdFolders.pop()!;
-      // Files are path-keyed now (no collections table) - clean up everything under the uploader's folder.
-      await getPool().query("DELETE FROM file_acl WHERE path LIKE ?", [`${folder}/%`]);
-      await getPool().query("DELETE FROM files WHERE path LIKE ?", [`${folder}/%`]);
+    while (createdOwnerSubs.length > 0) {
+      const ownerSub = createdOwnerSubs.pop()!;
+      const [collectionRows] = await getPool().query("SELECT id FROM collections WHERE owner_sub = ?", [ownerSub]);
+      for (const row of collectionRows as { id: string }[]) {
+        const [fileRows] = await getPool().query("SELECT id FROM files WHERE collection_id = ?", [row.id]);
+        for (const fileRow of fileRows as { id: string }[]) {
+          await getPool().query("DELETE FROM file_acl WHERE file_id = ?", [fileRow.id]);
+          await getPool().query("DELETE FROM files WHERE id = ?", [fileRow.id]);
+        }
+        await getPool().query("DELETE FROM collections WHERE id = ?", [row.id]);
+      }
     }
   });
 
@@ -99,12 +108,6 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
   // fetch cannot exercise a host-constrained route at all. Real sockets and a real request/response
   // still matter here - tus is bridged via reply.hijack() onto the raw streams, which app.inject()
   // does not model.
-  //
-  // The connection ALWAYS goes to this suite's own listener; only the path is taken from `url`. tus
-  // builds its Location header from the request's Host, which is now `files.mosni.dev`, so following it
-  // literally would send the test out to the real internet - exactly the escape the D-70 e2e run hit
-  // with dl.mosni.dev. Splitting "where to connect" from "what Host to claim" is what nginx does in
-  // production anyway.
   function request(
     url: string,
     options: { method: string; headers: Record<string, string>; body?: Buffer },
@@ -139,8 +142,17 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
     });
   }
 
-  function mockAuthorizedAs(sub: string): void {
-    verifyMock.mockResolvedValue({ sub, roles: ["files:write"] } as never);
+  function mockAuthorizedAs(sub: string, extra: Record<string, unknown> = {}): void {
+    verifyMock.mockResolvedValue({ sub, roles: ["files:write"], ...extra } as never);
+  }
+
+  // Session 016: the default collection's name is no longer derived from `sub` (a privacy leak), so tests
+  // can no longer guess it - look it up by owner instead. Each test below uses a fresh randomUUID() sub
+  // with no other root-level collection of its own, so there is exactly one to find.
+  async function defaultCollectionFor(sub: string): Promise<CollectionRecord> {
+    const collection = (await listCollectionsFor(sub)).find((c) => c.parentId === "");
+    if (collection === undefined) throw new Error(`defaultCollectionFor: no root collection found for ${sub}`);
+    return collection;
   }
 
   function encodeMetadata(fields: Record<string, string>): string {
@@ -185,9 +197,6 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
   }
 
   it("is not throttled by the global 100/min rate limit (D1's dedicated 600/min scope)", async () => {
-    // OPTIONS requests need no auth (tus capability discovery) and hit no filesystem/DB, so this stays
-    // cheap while still exercising the same encapsulated Fastify scope every other tus request goes
-    // through. More than the global 100/min limit, well under the dedicated 600/min one.
     const responses = await Promise.all(
       Array.from({ length: 105 }, () =>
         request(`${baseUrl()}/api/upload`, {
@@ -216,12 +225,10 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
     expect(res.status).toBe(401);
   });
 
-  it("completes the full tus lifecycle (create -> offset -> resume -> completion) and returns preview/direct URLs", async () => {
+  it("completes the full tus lifecycle (create -> offset -> resume -> completion), lands committed, and returns preview/direct URLs", async () => {
     const uploaderSub = `user:${randomUUID()}`;
     mockAuthorizedAs(uploaderSub);
-    // The default collection this upload lands in is named from the sub (no preferred name given) -
-    // track it for cleanup.
-    createdFolders.push(uploaderSub);
+    createdOwnerSubs.push(uploaderSub);
 
     const content = Buffer.from("hello from the tus lifecycle test");
     const createRes = await createUpload(uploaderSub, content.length, {
@@ -253,19 +260,33 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
     expect(patch2.status).toBe(200);
 
     const body = (await patch2.json()) as { previewUrl: string; directUrl: string };
-    // unlisted (the default) resolves at the readable /f/<path> preview and plain dl path, not a token.
+    // unlisted (the collection's default_protection) resolves at the readable /f/<path> preview and
+    // plain dl path, not a token.
     expect(body.previewUrl).toContain("files.mosni.dev/f/");
     expect(body.directUrl).toContain("dl.mosni.dev/");
-    expect(body.previewUrl).toContain(encodeURIComponent(uploaderSub));
     expect(body.previewUrl).toContain("greeting.txt");
 
-    const writtenPath = path.join(root, uploaderSub, "greeting.txt");
+    const collection = await defaultCollectionFor(uploaderSub);
+    // The sub must never appear in the (public) default collection name or preview URL - session 016's fix
+    // for the sub-leak (a raw sub like "google:138543663" would otherwise identify the provider account).
+    expect(collection.name).not.toContain(uploaderSub);
+    expect(body.previewUrl).not.toContain(encodeURIComponent(uploaderSub));
+    expect(body.previewUrl).toContain(encodeURIComponent(collection.name));
+    const record = await resolveByNames([collection.name, "greeting.txt"]);
+    expect(record).not.toBeNull();
+    expect(record?.protection).toBe("unlisted");
+
+    const writtenPath = path.join(root, diskRelPath(record!));
     expect((await readFile(writtenPath)).toString()).toBe(content.toString());
+    // D-82: the disk name carries the ORIGINAL filename with a fresh id prefix, never the display name
+    // verbatim.
+    expect(record!.diskName.endsWith("-greeting.txt")).toBe(true);
+    expect(record!.diskName).not.toBe("greeting.txt");
   });
 
-  it("rejects a traversal-shaped filename and leaves nothing on disk", async () => {
+  it("rejects a traversal-shaped filename and leaves nothing on disk or in the DB", async () => {
     const uploaderSub = `user:${randomUUID()}`;
-    createdFolders.push(uploaderSub);
+    createdOwnerSubs.push(uploaderSub);
     mockAuthorizedAs(uploaderSub);
 
     const content = Buffer.from("malicious");
@@ -278,16 +299,108 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
     const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, content);
     expect(patchRes.status).toBe(400);
 
-    const collectionDir = path.join(root, uploaderSub);
-    const entries = await import("node:fs/promises").then((fs) =>
-      fs.readdir(collectionDir).catch(() => []),
-    );
-    expect(entries.filter((e) => !e.startsWith("."))).toHaveLength(0);
+    // No collection was ever created either - the filename is rejected before any destination resolves.
+    expect(await listCollectionsFor(uploaderSub)).toEqual([]);
+  });
+
+  it("uploads into the caller's default collection unless a valid destinationCollectionId is given", async () => {
+    const uploaderSub = `user:${randomUUID()}`;
+    createdOwnerSubs.push(uploaderSub);
+    mockAuthorizedAs(uploaderSub);
+
+    const other = await createCollection({ parentId: "", name: `dest-${randomUUID()}`, ownerSub: uploaderSub });
+
+    const content = Buffer.from("into a chosen destination");
+    const createRes = await createUpload(uploaderSub, content.length, {
+      filename: "chosen.txt",
+      destinationCollectionId: other.id,
+    });
+    const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
+    const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, content);
+    expect(patchRes.status).toBe(200);
+
+    const record = await resolveByNames([other.name, "chosen.txt"]);
+    expect(record).not.toBeNull();
+    expect(record?.collectionId).toBe(other.id);
+  });
+
+  it("falls back to the default collection when destinationCollectionId names a collection the caller cannot write to", async () => {
+    const uploaderSub = `user:${randomUUID()}`;
+    createdOwnerSubs.push(uploaderSub);
+    const strangerCollection = await createCollection({
+      parentId: "",
+      name: `stranger-${randomUUID()}`,
+      ownerSub: `user:${randomUUID()}`,
+    });
+    mockAuthorizedAs(uploaderSub);
+
+    const content = Buffer.from("falls back");
+    const createRes = await createUpload(uploaderSub, content.length, {
+      filename: "fallback.txt",
+      destinationCollectionId: strangerCollection.id,
+    });
+    const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
+    const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, content);
+    expect(patchRes.status).toBe(200);
+
+    expect(await resolveByNames([strangerCollection.name, "fallback.txt"])).toBeNull();
+    const defaultCollection = await defaultCollectionFor(uploaderSub);
+    expect(await resolveByNames([defaultCollection.name, "fallback.txt"])).not.toBeNull();
+  });
+
+  it("protection at ingest comes from the destination collection's default_protection (D-86)", async () => {
+    const uploaderSub = `user:${randomUUID()}`;
+    createdOwnerSubs.push(uploaderSub);
+    const privateByDefault = await createCollection({
+      parentId: "",
+      name: `priv-default-${randomUUID()}`,
+      ownerSub: uploaderSub,
+    });
+    await getPool().query("UPDATE collections SET default_protection = 'private' WHERE id = ?", [privateByDefault.id]);
+    mockAuthorizedAs(uploaderSub);
+
+    const content = Buffer.from("private by default");
+    const createRes = await createUpload(uploaderSub, content.length, {
+      filename: "p.txt",
+      destinationCollectionId: privateByDefault.id,
+    });
+    const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
+    await patchUpload(uploadUrl, uploaderSub, 0, content);
+
+    const [rows] = await getPool().query("SELECT protection FROM files WHERE collection_id = ? AND name = ?", [
+      privateByDefault.id,
+      "p.txt",
+    ]);
+    expect((rows as { protection: string }[])[0]?.protection).toBe("private");
+  });
+
+  it("two uploads of the same name into one collection produce two distinct files with distinct ids (D-81/D-85, no on-disk collision)", async () => {
+    const uploaderSub = `user:${randomUUID()}`;
+    createdOwnerSubs.push(uploaderSub);
+    mockAuthorizedAs(uploaderSub);
+
+    async function uploadOnce(content: string): Promise<void> {
+      const createRes = await createUpload(uploaderSub, content.length, { filename: "dup.txt" });
+      const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
+      const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, Buffer.from(content));
+      expect(patchRes.status).toBe(200);
+    }
+
+    await uploadOnce("first");
+    await uploadOnce("second");
+
+    const defaultCollection = await defaultCollectionFor(uploaderSub);
+    const first = await resolveByNames([defaultCollection.name, "dup.txt"]);
+    const second = await resolveByNames([defaultCollection.name, "dup(2).txt"]);
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(first!.id).not.toBe(second!.id);
+    expect(first!.diskName).not.toBe(second!.diskName);
   });
 
   it("an uploaded JPEG carrying GPS EXIF has no GPS on disk afterwards (D-60 end to end)", async () => {
     const uploaderSub = `user:${randomUUID()}`;
-    createdFolders.push(uploaderSub);
+    createdOwnerSubs.push(uploaderSub);
     mockAuthorizedAs(uploaderSub);
 
     const jpegBytes = await sharp({
@@ -306,14 +419,15 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
     const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, jpegBytes);
     expect(patchRes.status).toBe(200);
 
-    const writtenPath = path.join(root, uploaderSub, "photo.jpg");
-    const after = await sharp(writtenPath).metadata();
+    const defaultCollection = await defaultCollectionFor(uploaderSub);
+    const record = await resolveByNames([defaultCollection.name, "photo.jpg"]);
+    const after = await sharp(path.join(root, diskRelPath(record!))).metadata();
     expect(after.exif).toBeUndefined();
   });
 
   it("an uploaded PNG lands with captured width/height (D-74)", async () => {
     const uploaderSub = `user:${randomUUID()}`;
-    createdFolders.push(uploaderSub);
+    createdOwnerSubs.push(uploaderSub);
     mockAuthorizedAs(uploaderSub);
 
     const pngBytes = await sharp({
@@ -327,8 +441,28 @@ describe("routes/upload.ts - tus upload (D1-D3)", () => {
     const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, pngBytes);
     expect(patchRes.status).toBe(200);
 
-    const record = await resolveByPath(`${uploaderSub}/photo.png`);
+    const defaultCollection = await defaultCollectionFor(uploaderSub);
+    const record = await resolveByNames([defaultCollection.name, "photo.png"]);
     expect(record?.width).toBe(40);
     expect(record?.height).toBe(30);
+  });
+
+  it("a forced stripInPlace failure leaves NO row and NO bytes (D-85)", async () => {
+    const uploaderSub = `user:${randomUUID()}`;
+    createdOwnerSubs.push(uploaderSub);
+    mockAuthorizedAs(uploaderSub);
+
+    // sharp rejects a file with a real image extension but garbage content - stripStrategyFor("bad.png")
+    // is "image", so stripInPlace attempts to run sharp on it and fails.
+    const garbage = Buffer.from("not actually a png");
+    const createRes = await createUpload(uploaderSub, garbage.length, { filename: "bad.png" });
+    const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
+    const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, garbage);
+    expect(patchRes.status).toBe(422);
+
+    const collection = await defaultCollectionFor(uploaderSub);
+    expect(await resolveByNames([collection.name, "bad.png"])).toBeNull();
+    const [rows] = await getPool().query("SELECT COUNT(*) AS n FROM files WHERE collection_id = ?", [collection.id]);
+    expect((rows as { n: number }[])[0]?.n).toBe(0);
   });
 });

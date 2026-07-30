@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { can, isSuperuser, type Claims } from "../../src/lib/roles.ts";
+import { can, isFilesAdmin, isSuperuser, type Claims } from "../../src/lib/roles.ts";
 
 const claims = (partial: Partial<Claims>): Claims => ({ sub: "user:1", ...partial });
 
@@ -41,6 +41,32 @@ describe("can() (files:admin dropped session 007 - no implication anymore)", () 
   it("ignores non-string entries in roles without throwing", () => {
     expect(() => can(claims({ roles: [42, null, { x: 1 }] }), "files:write")).not.toThrow();
     expect(can(claims({ roles: [42, null, { x: 1 }] }), "files:write")).toBe(false);
+  });
+});
+
+// D-101: fills the `viewer.isAdmin` slot isListedFor() has carried since D-68 deleted files:admin. Note
+// per D-101: can() already returns true for mosni_owner on ANY role, so this needs no separate superuser
+// branch of its own.
+describe("isFilesAdmin() (D-101 - the E4 browse `scope=all` gate)", () => {
+  it("both lower roles held is admin", () => {
+    expect(isFilesAdmin(claims({ roles: ["files:write", "files:delete"] }))).toBe(true);
+  });
+
+  it("only one of the two roles is not admin", () => {
+    expect(isFilesAdmin(claims({ roles: ["files:write"] }))).toBe(false);
+    expect(isFilesAdmin(claims({ roles: ["files:delete"] }))).toBe(false);
+  });
+
+  it("neither role is not admin", () => {
+    expect(isFilesAdmin(claims({ roles: [] }))).toBe(false);
+  });
+
+  it("mosni_owner is admin with no roles array at all, via can()'s existing bypass", () => {
+    expect(isFilesAdmin(claims({ mosni_owner: true, roles: [] }))).toBe(true);
+  });
+
+  it("null claims is not admin", () => {
+    expect(isFilesAdmin(null)).toBe(false);
   });
 });
 

@@ -27,6 +27,11 @@ function CopyField({ value, label, primary }: { value: string; label: string; pr
   // `.panel`-wrapped field read as unstyled and detached (padding:2rem; margin:2rem auto meant for a
   // whole panel, not an inline field) - so this is now one bordered input+button unit, built from
   // mosni-chrome tokens rather than `.panel`/`.btn` (this repo ships no stylesheet - D-31's spirit).
+  //
+  // Hannah, session 013: the two fields had two different-looking buttons (a filled purple "Copy" block
+  // vs. a bordered icon box) and she picked the icon one for both - borderless, purple, and moved to the
+  // LEFT of the URL. Prominence now lives entirely in the field's border colour, not in a rival control
+  // shape, which is closer to D-1's "one obvious action" than two competing buttons were.
   return (
     <div className={primary ? "copy-field copy-field-primary" : "copy-field copy-field-secondary"}>
       <label style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.35rem", color: "var(--mosni-text-muted)" }}>
@@ -43,17 +48,8 @@ function CopyField({ value, label, primary }: { value: string; label: string; pr
           overflow: "hidden",
         }}
       >
-        <input
-          ref={inputRef}
-          type="text"
-          readOnly
-          value={value}
-          style={{ flex: 1, minWidth: 0, border: "none", background: "transparent", color: "var(--mosni-white)", padding: "0.55rem 0.65rem", font: "inherit" }}
-          onFocus={(event) => event.currentTarget.select()}
-        />
-        {/* D-1: the preview link is the ONE prominent action; the direct link stays deliberately
-            quieter - both share the same control shape, primary just gets the accent border/fill and
-            a "Copy" label. */}
+        {/* Left of the URL, borderless, purple. Identical in both fields - D-1's "one prominent action"
+            is carried by the primary field's accent border, not by a differently-shaped button. */}
         <button
           type="button"
           className={primary ? "copy-field-btn copy-field-btn-primary" : "copy-field-btn"}
@@ -62,18 +58,23 @@ function CopyField({ value, label, primary }: { value: string; label: string; pr
           style={{
             display: "flex",
             alignItems: "center",
-            gap: "0.35rem",
             border: "none",
-            borderLeft: `1px solid ${primary ? "var(--mosni-purple)" : "var(--mosni-border-muted)"}`,
-            background: primary ? "var(--mosni-purple)" : "transparent",
-            color: primary ? "var(--mosni-white)" : "inherit",
-            padding: "0 0.75rem",
+            background: "transparent",
+            color: "var(--mosni-purple)",
+            padding: "0 0.5rem 0 0.65rem",
             cursor: "pointer",
           }}
         >
           <CopyIcon />
-          {primary && <span style={{ fontSize: "0.85rem" }}>Copy</span>}
         </button>
+        <input
+          ref={inputRef}
+          type="text"
+          readOnly
+          value={value}
+          style={{ flex: 1, minWidth: 0, border: "none", background: "transparent", color: "var(--mosni-white)", padding: "0.55rem 0.65rem 0.55rem 0", font: "inherit" }}
+          onFocus={(event) => event.currentTarget.select()}
+        />
       </div>
     </div>
   );

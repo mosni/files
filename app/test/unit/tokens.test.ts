@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { generateLinkToken, isLinkTokenShaped, LINK_TOKEN_LENGTH } from "../../src/lib/tokens.ts";
+import { describe, expect, it, vi } from "vitest";
+import {
+  generateLinkToken,
+  isLinkTokenShaped,
+  LINK_TOKEN_LENGTH,
+  mintUniqueToken,
+} from "../../src/lib/tokens.ts";
 
 describe("generateLinkToken() (P5: short base62 tokens)", () => {
   it("produces a token of exactly LINK_TOKEN_LENGTH base62 characters", () => {
@@ -14,6 +19,28 @@ describe("generateLinkToken() (P5: short base62 tokens)", () => {
     // bound rather than strict uniqueness so the test can never flake on the astronomically rare dup.
     const tokens = Array.from({ length: 500 }, () => generateLinkToken());
     expect(new Set(tokens).size).toBeGreaterThanOrEqual(498);
+  });
+});
+
+describe("mintUniqueToken() (D-98: the namespace is shared across files and collections)", () => {
+  it("returns a well-shaped token on the first try when nothing collides", async () => {
+    const exists = vi.fn().mockResolvedValue(false);
+    const token = await mintUniqueToken(exists);
+    expect(token).toMatch(new RegExp(`^[A-Za-z0-9]{${LINK_TOKEN_LENGTH}}$`));
+    expect(exists).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries on collision until the existence check reports free", async () => {
+    const exists = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const token = await mintUniqueToken(exists);
+    expect(exists).toHaveBeenCalledTimes(3);
+    expect(token).toMatch(new RegExp(`^[A-Za-z0-9]{${LINK_TOKEN_LENGTH}}$`));
+  });
+
+  it("gives up after 10 attempts rather than looping forever", async () => {
+    const exists = vi.fn().mockResolvedValue(true);
+    await expect(mintUniqueToken(exists)).rejects.toThrow(/could not mint/);
+    expect(exists).toHaveBeenCalledTimes(10);
   });
 });
 

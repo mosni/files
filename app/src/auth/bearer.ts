@@ -4,13 +4,13 @@
 
 import type { FastifyRequest } from "fastify";
 import { verify } from "./verify.ts";
-import type { Claims } from "../lib/roles.ts";
+import type { VerifiedClaims } from "../lib/roles.ts";
 
-export async function claimsFromBearer(request: FastifyRequest, audience: string): Promise<Claims | null> {
+export async function claimsFromBearer(request: FastifyRequest, audience: string): Promise<VerifiedClaims | null> {
   const auth = request.headers.authorization;
   if (typeof auth !== "string" || !auth.startsWith("Bearer ")) return null;
   try {
-    return (await verify(auth.slice(7), audience)) as unknown as Claims;
+    return (await verify(auth.slice(7), audience)) as unknown as VerifiedClaims;
   } catch {
     return null;
   }

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
+import mysql from "mysql2/promise";
 
 // THE product invariant, finally executed end to end: open -> drop -> copy a link that works (D-1).
 //
@@ -34,6 +35,38 @@ async function mintToken(request: import("@playwright/test").APIRequestContext, 
 }
 
 const b64 = (s: string) => Buffer.from(s).toString("base64");
+
+// The full tus create + PATCH dance, through real nginx - the same sequence the first test performs
+// inline (kept inline there, since its own assertions step through each stage). Returns the completing
+// PATCH's JSON body.
+async function completeUpload(
+  request: import("@playwright/test").APIRequestContext,
+  token: string,
+  filename: string,
+  body: Buffer,
+): Promise<{ previewUrl: string; directUrl: string }> {
+  const create = await request.post(`${FILES_ORIGIN}/api/upload`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      "tus-resumable": "1.0.0",
+      "upload-length": String(body.length),
+      "upload-metadata": `filename ${b64(filename)}`,
+    },
+  });
+  expect(create.status()).toBe(201);
+  const uploadUrl = new URL(create.headers()["location"], FILES_ORIGIN);
+  const patch = await request.patch(`${FILES_ORIGIN}${uploadUrl.pathname}`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      "tus-resumable": "1.0.0",
+      "upload-offset": "0",
+      "content-type": "application/offset+octet-stream",
+    },
+    data: body,
+  });
+  expect(patch.status()).toBe(200);
+  return (await patch.json()) as { previewUrl: string; directUrl: string };
+}
 
 test("a real authorized tus upload lands the bytes, and the returned link serves them back", async ({
   request,
@@ -74,9 +107,29 @@ test("a real authorized tus upload lands the bytes, and the returned link serves
   expect(previewUrl).toContain(filename);
   expect(directUrl).toContain(filename);
 
-  // --- the bytes are really on disk, unchanged ----------------------------------------------------
   const relPath = new URL(directUrl).pathname.replace(/^\//, "");
-  const onDisk = await readFile(path.join(STORAGE_ROOT, ...relPath.split("/").map(decodeURIComponent)));
+
+  // --- the bytes are really on disk, unchanged ----------------------------------------------------
+  // D-81/D-82: the on-disk location is no longer derivable from the URL (it's `<YYYY>/<mm>/<id>-<original
+  // filename>`, an internal detail the URL never mirrors) - so the disk_dir/disk_name are read back from
+  // the database by the file's display name, exactly as the app itself resolves delivery.
+  const conn = await mysql.createConnection({
+    host: process.env.DB_HOST ?? "mariadb",
+    port: Number(process.env.DB_PORT ?? 3306),
+    user: process.env.DB_USER ?? "files",
+    password: process.env.DB_PASS ?? "filespass",
+    database: process.env.DB_NAME ?? "files",
+  });
+  let diskRelPath: string;
+  try {
+    const [rows] = await conn.execute("SELECT disk_dir, disk_name FROM files WHERE name = ?", [filename]);
+    const row = (rows as { disk_dir: string; disk_name: string }[])[0];
+    expect(row, "the uploaded file's row must exist").toBeTruthy();
+    diskRelPath = `${row!.disk_dir}/${row!.disk_name}`;
+  } finally {
+    await conn.end();
+  }
+  const onDisk = await readFile(path.join(STORAGE_ROOT, diskRelPath));
   expect(createHash("sha256").update(onDisk).digest("hex")).toBe(
     createHash("sha256").update(body).digest("hex"),
   );
@@ -98,6 +151,49 @@ test("a real authorized tus upload lands the bytes, and the returned link serves
   expect(Buffer.from(await direct.body()).equals(body), "nginx must deliver the exact bytes").toBeTruthy();
   expect(direct.headers()["x-content-type-options"]).toBe("nosniff");
   expect(direct.headers()["referrer-policy"]).toBe("no-referrer");
+
+  // E3 acceptance criterion 5 (A6/D-90): the DELIVERED bytes carry a Content-Type the APP chose from the
+  // display name - not one nginx inferred from the on-disk extension. Only assertable here: per session
+  // 010, the integration tier sees the app's own response, not what the client receives through the
+  // X-Accel-Redirect hop. Under D-82 the disk name is the ORIGINAL filename, pinned forever, so a later
+  // rename makes the two disagree permanently - the renameFile case below is what actually proves which
+  // of the two is winning.
+  expect(direct.headers()["content-type"]).toBe("text/plain");
+});
+
+test("delivery's Content-Type follows the DISPLAY name after a rename, not the pinned disk name (AC5/D-90)", async ({
+  request,
+}) => {
+  const sub = `user:e2e-${randomUUID()}`;
+  const token = await mintToken(request, sub);
+  const filename = `ct-${randomUUID()}.txt`;
+  const body = Buffer.from("content-type follows the display name");
+
+  const { previewUrl, directUrl } = await completeUpload(request, token, filename, body);
+
+  // Uploaded as .txt -> text/plain, from both the app and the disk name. Nothing distinguishes them yet.
+  const before = await request.get(`http://dl.mosni.dev/${new URL(directUrl).pathname.replace(/^\//, "")}`);
+  expect(before.status()).toBe(200);
+  expect(before.headers()["content-type"]).toBe("text/plain");
+
+  // Rename to an extension mime.ts does NOT know. The bytes never move (D-82), so the on-disk name is
+  // still ".txt" - if nginx were still the one deciding, this would stay text/plain.
+  const ctx = await (
+    await request.get(`${FILES_ORIGIN}/api/preview${new URL(previewUrl).pathname}`, {
+      headers: { host: FILES_HOST, authorization: `Bearer ${token}` },
+    })
+  ).json();
+  const patched = await request.patch(`${FILES_ORIGIN}/api/files/${ctx.id}`, {
+    headers: { host: FILES_HOST, authorization: `Bearer ${token}` },
+    data: { name: `ct-${randomUUID()}.unknownext` },
+  });
+  expect(patched.status()).toBe(200);
+
+  const after = await request.get(
+    `http://dl.mosni.dev/${new URL((await patched.json()).directUrl).pathname.replace(/^\//, "")}`,
+  );
+  expect(after.status()).toBe(200);
+  expect(after.headers()["content-type"]).toBe("application/octet-stream");
 });
 
 test("an upload larger than nginx's default body limit succeeds (the 413 regression Hannah hit)", async ({

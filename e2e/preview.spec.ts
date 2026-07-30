@@ -25,14 +25,37 @@ const STORAGE_ROOT = "/data/storage";
 const FILES_HOST = "files-e2e.test";
 const FILES_ORIGIN = `http://${FILES_HOST}`;
 
+function newId(): string {
+  // D-81's surrogate ids are base62, but any unique CHAR(16) string satisfies the schema - these fixtures
+  // seed the DB directly (there is no live IdP here to drive a real upload through the app), so plain hex
+  // is simplest.
+  return randomUUID().replace(/-/g, "").slice(0, 16);
+}
+
+// `relPath` keeps its old shape (`<collection-segment>/<filename>`) for every caller below - it is split
+// into a collection (created fresh, root-level) and the file's own display name, both fed through the
+// E3 schema directly (surrogate ids, disk_dir/disk_name, state='committed').
 async function seed(opts: {
   relPath: string;
   protection?: "public" | "unlisted" | "secret" | "private";
   width?: number;
   height?: number;
 }): Promise<{ linkToken: string }> {
+  const segments = opts.relPath.split("/");
+  const name = segments[segments.length - 1]!;
+  const collectionName = segments.slice(0, -1).join("/");
+
+  const collectionId = newId();
+  const fileId = newId();
+  const diskDir = "2026/07";
+  const diskName = `${fileId}-${name}`;
   const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
-  const abs = path.join(STORAGE_ROOT, ...opts.relPath.split("/"));
+  // D-98: collections now carry their own link_token too, sharing one unique-per-table namespace with
+  // files - each fixture needs its own distinct one, or the second seed() call in a run collides on the
+  // column's shared DEFAULT ''.
+  const collectionLinkToken = randomUUID().replace(/-/g, "").slice(0, 5);
+
+  const abs = path.join(STORAGE_ROOT, diskDir, diskName);
   await mkdir(path.dirname(abs), { recursive: true });
   await writeFile(abs, "e2e preview fixture bytes");
 
@@ -45,8 +68,24 @@ async function seed(opts: {
   });
   try {
     await conn.execute(
-      "INSERT INTO files (path, bytes, protection, link_token, width, height) VALUES (?, ?, ?, ?, ?, ?)",
-      [opts.relPath, 25, opts.protection ?? "public", linkToken, opts.width ?? null, opts.height ?? null],
+      "INSERT INTO collections (id, parent_id, name, owner_sub, default_protection, link_token) VALUES (?, '', ?, 'user:e2e-fixture', 'unlisted', ?)",
+      [collectionId, collectionName, collectionLinkToken],
+    );
+    await conn.execute(
+      `INSERT INTO files
+        (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, width, height)
+        VALUES (?, ?, ?, ?, ?, 25, ?, ?, 'committed', ?, ?)`,
+      [
+        fileId,
+        collectionId,
+        name,
+        diskDir,
+        diskName,
+        opts.protection ?? "public",
+        linkToken,
+        opts.width ?? null,
+        opts.height ?? null,
+      ],
     );
   } finally {
     await conn.end();

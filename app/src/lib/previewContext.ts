@@ -2,7 +2,7 @@
 // Pure and I/O-free (technical-baseline.md §2) - it only maps an already-resolved FileRecord + urls into
 // the context; storage/resolution stays in storage/files.ts, urls stay in lib/fileUrls.ts.
 
-import type { FileRecord } from "../storage/files.ts";
+import type { ResolvedFile } from "../storage/files.ts";
 import type { Protection } from "./protection.ts";
 import { isInlineAllowed, mimeTypeFor } from "./mime.ts";
 import { stripStrategyFor } from "./media.ts";
@@ -12,14 +12,16 @@ export type PreviewKind = "image" | "video" | "pdf" | "text" | "other";
 // Written exactly as specified in the waves hand-off (§1) - Wave B2 (the SPA) codes against this shape
 // in parallel and must not have to guess.
 export type PreviewContext = {
-  name: string; // basename, for the title and og:title
-  path: string; // relative path from STORAGE_ROOT - the file's identity
+  id: string; // the file's surrogate id (D-81) - what the E3 manage API (PATCH/DELETE /api/files/:id) addresses
+  collectionId: string; // the owning collection's id - what ManageControls needs for the destination picker
+  name: string; // DISPLAY name (D-82: renameable, independent of the on-disk name), for the title and og:title
+  path: string; // display path (collection names + file name) - for URLs and display, NOT an identity (D-81)
   bytes: number;
   sizeLabel: string; // humanised, e.g. "2.4 MB"
-  protection: Protection;
+  protection: Protection; // the EFFECTIVE level (D-96), never the stored column - see buildPreviewContext
   createdAt: string; // ISO 8601, from files.created_at
   previewUrl: string; // files.mosni.dev/f/<path> or /t/<token>
-  directUrl: string; // dl.mosni.dev/<path> or /t/<token>
+  directUrl: string; // dl.mosni.dev/<path> or /t/<token> - or a D-84 signed URL for a private file's owner
   kind: PreviewKind;
   mimeType: string; // "image/png", "video/mp4", "application/pdf", "text/plain",
   // "application/octet-stream" for unknown
@@ -60,16 +62,25 @@ export function previewKindFor(filename: string): PreviewKind {
   return "other";
 }
 
+// Takes a ResolvedFile, not a bare FileRecord, deliberately: `protection` in the context it returns is the
+// EFFECTIVE level (D-96), and asking for the resolved type makes `tsc` refuse any caller that has not
+// walked the ancestor chain first. D-97 leaves a row stored looser than the collection above it, so the
+// stored column would report a collection-gated file as `public` - to the owner's own preview page
+// (PreviewCard.tsx renders this value verbatim, and ManageControls seeds its protection selector from it)
+// and in the anonymous /api/preview/t/<token> body. Same landmine as `displayPathFor`, one field over.
 export function buildPreviewContext(
-  record: FileRecord,
+  record: ResolvedFile,
+  displayPath: string,
   urls: { previewUrl: string; directUrl: string },
 ): PreviewContext {
   return {
+    id: record.id,
+    collectionId: record.collectionId,
     name: record.name,
-    path: record.path,
+    path: displayPath,
     bytes: record.bytes,
     sizeLabel: humanSize(record.bytes),
-    protection: record.protection,
+    protection: record.effectiveProtection,
     createdAt: record.createdAt,
     previewUrl: urls.previewUrl,
     directUrl: urls.directUrl,
@@ -101,7 +112,9 @@ function kindLabel(ctx: PreviewContext): string {
   return KIND_LABELS[ctx.mimeType] ?? "File";
 }
 
-function formatUploadDate(iso: string): string {
+// Exported for E4.1 Wave B's browse table "added" column, which wants the same date format the preview
+// card already uses rather than a second copy of this formatting.
+export function formatUploadDate(iso: string): string {
   const d = new Date(iso);
   const day = d.getUTCDate();
   const month = d.toLocaleString("en-US", { month: "short", timeZone: "UTC" });

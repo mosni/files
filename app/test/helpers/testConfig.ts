@@ -16,6 +16,8 @@ export function makeTestConfig(overrides: Partial<Config> = {}): Config {
     storageRoot,
     tusTempDir: path.join(storageRoot, ".tus"),
     port: 0,
+    deliverySigningSecret: "test-signing-secret",
+    deliveryUrlTtlSeconds: 300,
     ...overrides,
   };
 }

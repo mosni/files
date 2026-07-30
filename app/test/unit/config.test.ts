@@ -14,6 +14,7 @@ const VALID_ENV = {
   DL_ORIGIN: "https://dl.mosni.dev",
   STORAGE_ROOT: "/data/storage",
   PORT: "3000",
+  DELIVERY_SIGNING_SECRET: "test-signing-secret",
 };
 
 describe("loadConfig()", () => {
@@ -29,6 +30,8 @@ describe("loadConfig()", () => {
       storageRoot: "/data/storage",
       tusTempDir: "/data/storage/.tus",
       port: 3000,
+      deliverySigningSecret: "test-signing-secret",
+      deliveryUrlTtlSeconds: 300,
     });
   });
 
@@ -54,5 +57,14 @@ describe("loadConfig()", () => {
 
   it("treats an empty string as missing", () => {
     expect(() => loadConfig({ ...VALID_ENV, PORT: "" })).toThrow("PORT");
+  });
+
+  it("DELIVERY_URL_TTL_SECONDS defaults to 300 when unset", () => {
+    expect(loadConfig(VALID_ENV).deliveryUrlTtlSeconds).toBe(300);
+  });
+
+  it("DELIVERY_URL_TTL_SECONDS is honoured when set", () => {
+    const config = loadConfig({ ...VALID_ENV, DELIVERY_URL_TTL_SECONDS: "60" });
+    expect(config.deliveryUrlTtlSeconds).toBe(60);
   });
 });

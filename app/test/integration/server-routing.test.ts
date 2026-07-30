@@ -5,8 +5,9 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Redis } from "ioredis";
 import { buildServer } from "../../src/server.ts";
-import { applySchema, closeDb, getPool, initDb } from "../../src/storage/db.ts";
-import { deleteFileRow, initFilesStorage } from "../../src/storage/files.ts";
+import { applyMigrations, closeDb, initDb } from "../../src/storage/db.ts";
+import { claimFileRow, commitFileRow, diskRelPath, initFilesStorage } from "../../src/storage/files.ts";
+import { createCollection } from "../../src/storage/collections.ts";
 import { makeTestConfig } from "../helpers/testConfig.ts";
 
 // The full server wires @fastify/static (unconstrained `/*`) alongside delivery's host-constrained `/*` on
@@ -17,7 +18,6 @@ describe("server routing - static vs delivery precedence across hosts", () => {
   let root: string;
   let redis: Redis;
   let app: Awaited<ReturnType<typeof buildServer>>;
-  const createdPaths: string[] = [];
 
   beforeAll(async () => {
     initDb({
@@ -27,7 +27,7 @@ describe("server routing - static vs delivery precedence across hosts", () => {
       password: process.env.DB_PASS ?? "filespass",
       database: process.env.DB_NAME ?? "files",
     });
-    await applySchema();
+    await applyMigrations();
     root = await mkdtemp(path.join(os.tmpdir(), "routing-test-"));
     initFilesStorage(root);
     redis = new Redis(process.env.REDIS_URL ?? "redis://redis:6379");
@@ -38,40 +38,49 @@ describe("server routing - static vs delivery precedence across hosts", () => {
   afterAll(async () => {
     await app.close();
     await redis.quit();
-    while (createdPaths.length > 0) await deleteFileRow(createdPaths.pop()!);
     await closeDb();
     await rm(root, { recursive: true, force: true });
   }, 30_000);
 
-  it("a dl. request for a real file reaches delivery (X-Accel-Redirect), NOT static (D-33 precedence)", async () => {
-    const relPath = `r-${randomUUID()}/a/deep.txt`;
-    createdPaths.push(relPath);
-    await mkdir(path.join(root, path.dirname(relPath)), { recursive: true });
-    await writeFile(path.join(root, ...relPath.split("/")), "bytes");
-    const token = randomUUID().replace(/-/g, "").slice(0, 5);
-    await getPool().query(
-      "INSERT INTO files (path, bytes, protection, link_token) VALUES (?, 5, 'public', ?)",
-      [relPath, token],
-    );
+  async function seedCommittedFile(name: string): Promise<{ collectionName: string }> {
+    const collection = await createCollection({ parentId: "", name: `c-${randomUUID()}`, ownerSub: "user:owner" });
+    const claimed = await claimFileRow({
+      collectionId: collection.id,
+      name,
+      diskDir: "2026/07",
+      diskName: `${randomUUID()}-${name}`,
+      ownerSub: "user:owner",
+      uploaderSub: "user:owner",
+      protection: "public",
+    });
+    const abs = path.join(root, diskRelPath(claimed));
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, "bytes");
+    await commitFileRow(claimed.id, { bytes: 5, width: null, height: null, durationSeconds: null, textPreview: null });
+    return { collectionName: collection.name };
+  }
 
-    const res = await app.inject({ method: "GET", url: `/${relPath}`, headers: { host: "dl.mosni.dev" } });
+  it("a dl. request for a real file reaches delivery (X-Accel-Redirect), NOT static (D-33 precedence)", async () => {
+    const { collectionName } = await seedCommittedFile("deep.txt");
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/${collectionName}/deep.txt`,
+      headers: { host: "dl.mosni.dev" },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.body).toBe("");
-    expect(res.headers["x-accel-redirect"]).toBe(`/internal-storage/${relPath}`);
+    expect(res.headers["x-accel-redirect"]).toMatch(/^\/internal-storage\/2026\/07\//);
   });
 
   it("a files. preview request reaches the preview route (/f/*), not static or delivery", async () => {
-    const relPath = `p-${randomUUID()}/pic.png`;
-    createdPaths.push(relPath);
-    await mkdir(path.join(root, path.dirname(relPath)), { recursive: true });
-    await writeFile(path.join(root, ...relPath.split("/")), "x");
-    const token = randomUUID().replace(/-/g, "").slice(0, 5);
-    await getPool().query(
-      "INSERT INTO files (path, bytes, protection, link_token) VALUES (?, 1, 'public', ?)",
-      [relPath, token],
-    );
+    const { collectionName } = await seedCommittedFile("pic.png");
 
-    const res = await app.inject({ method: "GET", url: `/f/${relPath}`, headers: { host: "files.mosni.dev" } });
+    const res = await app.inject({
+      method: "GET",
+      url: `/f/${collectionName}/pic.png`,
+      headers: { host: "files.mosni.dev" },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.headers["content-type"]).toContain("text/html");
     expect(res.body).toContain('property="og:image"');
@@ -103,6 +112,11 @@ describe("server routing - static vs delivery precedence across hosts", () => {
 
   it("/api/config is unreachable on the dl host too", async () => {
     const onDl = await app.inject({ method: "GET", url: "/api/config", headers: { host: "dl.mosni.dev" } });
+    expect(onDl.statusCode).toBe(404);
+  });
+
+  it("the manage API is unreachable on the dl host too (D-33 - the mutation API is files.-only)", async () => {
+    const onDl = await app.inject({ method: "GET", url: "/api/collections", headers: { host: "dl.mosni.dev" } });
     expect(onDl.statusCode).toBe(404);
   });
 

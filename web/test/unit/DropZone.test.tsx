@@ -47,6 +47,8 @@ import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 
 function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
   return {
+    id: "file0000000000id",
+    collectionId: "coll000000000000",
     name: "hello.txt",
     path: "hello.txt",
     bytes: 5,
@@ -73,6 +75,18 @@ async function flush() {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
+}
+
+// React installs its own instance-level `value` setter on a mounted input/select (to track "did the
+// browser see this value already" for its onChange comparison). Assigning `.value` directly goes through
+// THAT setter too, so React's tracker silently updates right along with the DOM - and a subsequently
+// dispatched "input"/"change" event then finds nothing changed and never calls onChange. Using the
+// PROTOTYPE's native setter bypasses React's override, leaving the tracker stale so the event is seen as
+// a real change.
+function setNativeInputValue(input: HTMLInputElement | HTMLSelectElement, value: string): void {
+  const proto = input instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!;
+  setter.call(input, value);
 }
 
 type MockClaims = { sub: string; roles?: string[]; mosni_owner?: boolean } | null;
@@ -115,9 +129,13 @@ describe("DropZone", () => {
     container.remove();
     delete (window as unknown as { mosni?: unknown }).mosni;
     vi.restoreAllMocks();
+    // restoreAllMocks does NOT undo vi.stubGlobal, and vitest.config.ts doesn't set `unstubGlobals` -
+    // so without this a failing assertion in a fetch-stubbing test leaks that stub into every test
+    // after it (review session 013).
+    vi.unstubAllGlobals();
   });
 
-  it("renders the login button when signed out (F5)", () => {
+  it("renders a login-only panel when signed out - the login button and nothing else (D-120)", () => {
     installMockMosni(null);
 
     act(() => {
@@ -126,6 +144,16 @@ describe("DropZone", () => {
 
     expect(container.querySelector("mosni-login-button")).not.toBeNull();
     expect(container.querySelector('input[type="file"]')).toBeNull();
+    // D-120: "dedicated log in panel that's only for log in, no other text" - no heading, no drop
+    // target, no copy of any kind. <mosni-login-button> is the ONLY sign-in affordance in the app, so
+    // the panel must never be emptied down to nothing (§0.4.1 of the hand-off).
+    expect(container.querySelector("h1")).toBeNull();
+    expect(container.textContent).not.toContain("Send a file");
+    expect(container.textContent).not.toContain("Sign in to upload");
+    const panel = container.querySelector(".panel");
+    expect(panel).not.toBeNull();
+    expect(panel?.children).toHaveLength(1);
+    expect(panel?.firstElementChild?.tagName.toLowerCase()).toBe("mosni-login-button");
   });
 
   it("renders a plain no-access message when signed in without files:write (F5)", () => {
@@ -236,8 +264,10 @@ describe("DropZone", () => {
     expect(fetchSpy).toHaveBeenCalledWith("/api/preview/abc", { headers: { Authorization: "Bearer test-token" } });
     expect(container.querySelector("img")).not.toBeNull();
     expect(container.querySelector("button.copy-field-btn-primary")).not.toBeNull();
-
-    vi.unstubAllGlobals();
+    // The card renders the filename as its own <h1>; the row label must not print it a second time
+    // (review session 013 - this shipped as a visible duplicate on every completed upload).
+    expect(container.textContent?.match(/hello\.txt/g) ?? []).toHaveLength(1);
+    expect(container.querySelector("h1")?.textContent).toBe("hello.txt");
   });
 
   it("falls back to bare CopyLink when /api/preview fails after completion (finding 6 fallback)", async () => {
@@ -268,8 +298,34 @@ describe("DropZone", () => {
 
     expect(container.querySelector("button.copy-field-btn-primary")).not.toBeNull();
     expect(container.querySelector("img")).toBeNull();
+    // No card, so the row label is what names the file - it must still be there in the fallback.
+    expect(container.textContent).toContain("hello.txt");
+  });
 
-    vi.unstubAllGlobals();
+  // A2's guard (hand-off acceptance criterion 2) shipped in session 012 with no test at all. The failure
+  // it exists for is real: the file is already stored server-side and the audit notification already
+  // sent, so a row stuck on `uploading` forever is a lie about state that the user cannot clear. An
+  // nginx 502 page or any non-JSON body reaches this path.
+  it("puts the row in error when the completion body is unreadable, never a permanent uploading (A2)", () => {
+    installMockMosni({ sub: "user:1", roles: ["files:write"] });
+
+    act(() => {
+      root.render(<DropZone />);
+    });
+
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
+
+    act(() => {
+      uploadInstances[0].options.onSuccess?.({
+        lastResponse: { getBody: () => "<html><body>502 Bad Gateway</body></html>" },
+      });
+    });
+
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(container.textContent).toContain("Upload failed");
+    expect(container.querySelector(".progress")).toBeNull();
+    expect(container.querySelector("button.copy-field-btn-primary")).toBeNull();
   });
 
   it("shows an error state for a file whose upload fails, without affecting other files (F1)", () => {
@@ -396,5 +452,137 @@ describe("DropZone", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("destination picker (G1/G2, D-42/D-86, presentation amended by D-114)", () => {
+    it("the drop zone and Options render as a single panel, Options expanded with no disclosure", () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) }));
+
+      act(() => {
+        root.render(<DropZone />);
+      });
+
+      expect(container.querySelector("details")).toBeNull();
+      const panels = container.querySelectorAll(".panel");
+      expect(panels).toHaveLength(1);
+      // Both the drop target and the destination select live in that one panel.
+      expect(panels[0]!.querySelector('[role="button"]')).not.toBeNull();
+      expect(panels[0]!.querySelector("#destination-select")).not.toBeNull();
+    });
+
+    it("Options data loads once on mount for an eligible user, with no toggle to trigger it (D2)", async () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      const fetchSpy = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve([{ id: "coll1", name: "vacation" }]),
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(<DropZone />);
+      });
+      await flush();
+
+      expect(fetchSpy).toHaveBeenCalledWith("/api/collections", { headers: { Authorization: "Bearer test-token" } });
+      const options = Array.from(container.querySelectorAll("#destination-select option")).map((o) => o.textContent);
+      expect(options).toContain("vacation");
+    });
+
+    it("no upload access: collections are never fetched (D2 only fires for an eligible signed-in user)", async () => {
+      installMockMosni({ sub: "user:1", roles: [] });
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(<DropZone />);
+      });
+      await flush();
+
+      expect(fetchSpy).not.toHaveBeenCalledWith("/api/collections", expect.anything());
+    });
+
+    it("uploading with a selected destination passes destinationCollectionId in tus metadata", () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+
+      act(() => {
+        root.render(<DropZone />);
+      });
+
+      const select = container.querySelector("#destination-select") as HTMLSelectElement;
+      act(() => {
+        const option = document.createElement("option");
+        option.value = "coll-chosen";
+        select.appendChild(option);
+        setNativeInputValue(select, "coll-chosen");
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+
+      const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+      dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
+
+      expect(uploadInstances[0].options.metadata).toEqual({
+        filename: "hello.txt",
+        destinationCollectionId: "coll-chosen",
+      });
+    });
+
+    it("typing a new collection name creates it, then uploads use its returned id", async () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ id: "coll-new" }) });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(<DropZone />);
+      });
+
+      const nameInput = container.querySelector("#new-collection-name") as HTMLInputElement;
+      act(() => {
+        setNativeInputValue(nameInput, "vacation photos");
+        nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+
+      const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+      await act(async () => {
+        dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
+        await flush();
+      });
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "/api/collections",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ name: "vacation photos" }),
+        }),
+      );
+      expect(uploadInstances[0].options.metadata).toEqual({
+        filename: "hello.txt",
+        destinationCollectionId: "coll-new",
+      });
+    });
+
+    it("a failed new-collection creation falls back to the default rather than blocking the upload", async () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+
+      act(() => {
+        root.render(<DropZone />);
+      });
+
+      const nameInput = container.querySelector("#new-collection-name") as HTMLInputElement;
+      act(() => {
+        setNativeInputValue(nameInput, "will fail");
+        nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+
+      const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+      await act(async () => {
+        dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
+        await flush();
+      });
+
+      expect(uploadInstances).toHaveLength(1);
+      expect(uploadInstances[0].options.metadata).toEqual({ filename: "hello.txt" });
+    });
   });
 });

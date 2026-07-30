@@ -6,14 +6,23 @@ import {
   previewKindFor,
   type PreviewContext,
 } from "../../src/lib/previewContext.ts";
-import type { FileRecord } from "../../src/storage/files.ts";
+import type { ResolvedFile } from "../../src/storage/files.ts";
 
-function makeRecord(overrides: Partial<FileRecord> = {}): FileRecord {
+// A ResolvedFile, not a bare FileRecord: buildPreviewContext reports the EFFECTIVE level (D-96), so the
+// type system refuses a caller that has not resolved the ancestor chain first. `effectiveProtection`
+// defaults to the same value as `protection` here, which is the ordinary case (nothing above the file is
+// stricter); the tests below that care about the landmine set them apart deliberately.
+function makeRecord(overrides: Partial<ResolvedFile> = {}): ResolvedFile {
+  const protection = overrides.protection ?? "public";
   return {
-    path: "dir/photo.png",
+    id: "file0000000000id",
+    collectionId: "coll000000000000",
     name: "photo.png",
+    diskDir: "2026/07",
+    diskName: "file0000000000id-photo.png",
     bytes: 2_400_000,
-    protection: "public",
+    protection,
+    effectiveProtection: protection,
     linkToken: "abcde",
     ownerSub: "user-1",
     uploaderSub: "user-1",
@@ -26,6 +35,7 @@ function makeRecord(overrides: Partial<FileRecord> = {}): FileRecord {
   };
 }
 
+const displayPath = "dir/photo.png";
 const urls = { previewUrl: "https://files.mosni.dev/f/dir/photo.png", directUrl: "https://dl.mosni.dev/dir/photo.png" };
 
 describe("humanSize() - binary units, 1 decimal place", () => {
@@ -66,10 +76,12 @@ describe("previewKindFor()", () => {
 });
 
 describe("buildPreviewContext()", () => {
-  it("maps a FileRecord + urls into a PreviewContext with isOwner always false", () => {
+  it("maps a FileRecord + display path + urls into a PreviewContext with isOwner always false", () => {
     const record = makeRecord();
-    const ctx = buildPreviewContext(record, urls);
+    const ctx = buildPreviewContext(record, displayPath, urls);
     expect(ctx).toEqual<PreviewContext>({
+      id: "file0000000000id",
+      collectionId: "coll000000000000",
       name: "photo.png",
       path: "dir/photo.png",
       bytes: 2_400_000,
@@ -89,14 +101,29 @@ describe("buildPreviewContext()", () => {
     });
   });
 
+  // D-96, the landmine (technical-baseline.md §3): a row stored looser than an ancestor collection is
+  // legitimate - D-97 deliberately rewrites nothing when a collection is raised - so the context this
+  // builder produces must report the EFFECTIVE level. Reporting the stored column instead tells the
+  // owner's own preview page ("You own this file (public)." - PreviewCard.tsx) and the anonymous
+  // /api/preview/t/<token> body that a collection-gated file is public, which is false.
+  it("reports the EFFECTIVE protection, never the stored column (D-96)", () => {
+    const ctx = buildPreviewContext(
+      makeRecord({ protection: "public", effectiveProtection: "private" }),
+      displayPath,
+      urls,
+    );
+    expect(ctx.protection).toBe("private");
+  });
+
   it("isOwner is false even when the record has an ownerSub", () => {
-    const ctx = buildPreviewContext(makeRecord({ ownerSub: "someone" }), urls);
+    const ctx = buildPreviewContext(makeRecord({ ownerSub: "someone" }), displayPath, urls);
     expect(ctx.isOwner).toBe(false);
   });
 
   it("carries a non-allowlisted extension through as kind other, inline false", () => {
     const ctx = buildPreviewContext(
-      makeRecord({ name: "archive.zip", path: "dir/archive.zip", width: null, height: null }),
+      makeRecord({ name: "archive.zip", width: null, height: null }),
+      "dir/archive.zip",
       urls,
     );
     expect(ctx.kind).toBe("other");
@@ -107,13 +134,14 @@ describe("buildPreviewContext()", () => {
 
 describe("describeFile()", () => {
   it("describes a non-text file as '<Kind label> · <sizeLabel> · uploaded <D Mon YYYY>'", () => {
-    const ctx = buildPreviewContext(makeRecord(), urls);
+    const ctx = buildPreviewContext(makeRecord(), displayPath, urls);
     expect(describeFile(ctx)).toBe("PNG image · 2.3 MB · uploaded 21 Jul 2026");
   });
 
   it("describes a video similarly", () => {
     const ctx = buildPreviewContext(
-      makeRecord({ name: "clip.mp4", path: "dir/clip.mp4", bytes: 1024, width: 1920, height: 1080 }),
+      makeRecord({ name: "clip.mp4", bytes: 1024, width: 1920, height: 1080 }),
+      "dir/clip.mp4",
       urls,
     );
     expect(describeFile(ctx)).toBe("MP4 video · 1.0 KB · uploaded 21 Jul 2026");
@@ -123,11 +151,11 @@ describe("describeFile()", () => {
     const ctx = buildPreviewContext(
       makeRecord({
         name: "notes.txt",
-        path: "dir/notes.txt",
         width: null,
         height: null,
         textPreview: "Hello from the notes file.",
       }),
+      "dir/notes.txt",
       urls,
     );
     expect(describeFile(ctx)).toBe("Hello from the notes file.");
@@ -136,7 +164,8 @@ describe("describeFile()", () => {
   it("truncates a long textPreview to 200 chars with an ellipsis", () => {
     const longText = "x".repeat(400);
     const ctx = buildPreviewContext(
-      makeRecord({ name: "notes.txt", path: "dir/notes.txt", width: null, height: null, textPreview: longText }),
+      makeRecord({ name: "notes.txt", width: null, height: null, textPreview: longText }),
+      "dir/notes.txt",
       urls,
     );
     const description = describeFile(ctx);
@@ -147,7 +176,8 @@ describe("describeFile()", () => {
 
   it("falls back to the size/date description for a .txt with no textPreview", () => {
     const ctx = buildPreviewContext(
-      makeRecord({ name: "notes.txt", path: "dir/notes.txt", width: null, height: null, textPreview: null }),
+      makeRecord({ name: "notes.txt", width: null, height: null, textPreview: null }),
+      "dir/notes.txt",
       urls,
     );
     expect(describeFile(ctx)).toBe("Text file · 2.3 MB · uploaded 21 Jul 2026");
@@ -155,7 +185,8 @@ describe("describeFile()", () => {
 
   it("falls back to a generic label for an unrecognised type", () => {
     const ctx = buildPreviewContext(
-      makeRecord({ name: "archive.zip", path: "dir/archive.zip", width: null, height: null }),
+      makeRecord({ name: "archive.zip", width: null, height: null }),
+      "dir/archive.zip",
       urls,
     );
     expect(describeFile(ctx)).toBe("File · 2.3 MB · uploaded 21 Jul 2026");

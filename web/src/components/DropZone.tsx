@@ -1,6 +1,12 @@
 // F1: this component *is* the product for now (D-64) - drag/drop or click-to-pick, one independent
 // tus.Upload per file, per-file progress, and a hand-off to CopyLink on completion. F5's gating also
 // lives here since the full landing page (file browser, admin entry point) is a later epic (E4).
+//
+// E4.1 Wave D (D-114, amending D-42): the drop target and its Options render as ONE panel - a permanent
+// dashed rectangle (not a hover-only state) plus the destination controls, always expanded rather than
+// behind a <details> disclosure. D-1 still governs: expanding Options adds no REQUIRED step to open →
+// drop → copy, and Options data loads once on mount for anyone who may upload, not on a toggle that no
+// longer exists.
 
 import { useEffect, useRef, useState } from "react";
 import * as tus from "tus-js-client";
@@ -94,16 +100,57 @@ async function fetchPreviewContext(previewUrl: string, token: string | null): Pr
   }
 }
 
+type CollectionOption = { id: string; name: string };
+
+function authHeaders(token: string | null): Record<string, string> {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function fetchCollections(token: string | null): Promise<CollectionOption[]> {
+  try {
+    const res = await fetch("/api/collections", { headers: authHeaders(token) });
+    if (!res.ok) return [];
+    const body: unknown = await res.json();
+    // D2 (Wave D) calls this unconditionally on mount rather than behind a disclosure the caller opted
+    // into, so a malformed/unexpected response must degrade to "no collections" rather than crash the
+    // whole panel - never block the fast path over a destination-picker fetch (D-1).
+    return Array.isArray(body) ? (body as CollectionOption[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+// G2: creates the typed-in collection name on demand, so a chosen destination is resolved to an id
+// before any file starts uploading. Returns null (falls back to the caller's default, server-side) on
+// any failure - a bad destination must never turn "drop a file" into an error dialog (D-1).
+async function createCollection(token: string | null, name: string): Promise<string | null> {
+  try {
+    const res = await fetch("/api/collections", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(token) },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) return null;
+    return ((await res.json()) as CollectionOption).id;
+  } catch {
+    return null;
+  }
+}
+
 function startUpload(
   file: File,
   token: string | null,
   chunkSize: number,
+  destinationCollectionId: string | null,
   onUpdate: (state: UploadState) => void,
 ) {
   const upload = new tus.Upload(file, {
     endpoint: "/api/upload",
     chunkSize,
-    metadata: { filename: file.name },
+    metadata: {
+      filename: file.name,
+      ...(destinationCollectionId ? { destinationCollectionId } : {}),
+    },
     headers: { Authorization: `Bearer ${token ?? ""}` },
     onProgress: (bytesSent, bytesTotal) => {
       onUpdate({ status: "uploading", progress: Math.round((bytesSent / bytesTotal) * 100), loaded: bytesSent, total: bytesTotal });
@@ -140,6 +187,13 @@ export function DropZone() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragDepth, setDragDepth] = useState(0); // >0 ⇒ a file drag is somewhere over the page
   const [zoneHover, setZoneHover] = useState(false); // a file drag is over the drop zone itself
+
+  // G1/G2 (D-42, D-86): the destination picker. Collapsed by default and never fetched until opened -
+  // D-1's three-action path (open → drop → copy) must never grow a step for anyone who leaves it alone.
+  const [collections, setCollections] = useState<CollectionOption[]>([]);
+  const [destinationCollectionId, setDestinationCollectionId] = useState("");
+  const [newCollectionName, setNewCollectionName] = useState("");
+  const [collectionsLoaded, setCollectionsLoaded] = useState(false);
 
   // Finding 2: dropping a file anywhere gave no visual cue it would even work. Tracked at the window
   // level (not just the zone) so the page-level overlay can invite the drag toward the zone; drop is
@@ -210,13 +264,28 @@ export function DropZone() {
     };
   }, []);
 
+  // D2/D-114: Options has no disclosure to open anymore, so its data loads once eligibility is known
+  // instead of on a toggle event. `loadCollectionsOnce`'s own `collectionsLoaded` guard keeps this to
+  // exactly one fetch even though `user` can change reference as auth resolves.
+  useEffect(() => {
+    if (user !== null && can(user, "files:write")) loadCollectionsOnce();
+  }, [user]);
+
   function updateUpload(id: string, state: UploadState) {
     setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, state } : u)));
   }
 
-  function startUploads(files: File[]) {
+  async function startUploads(files: File[]) {
     if (files.length === 0) return;
     const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
+
+    // A typed-in new-collection name takes priority over a selected existing one; resolved to an id ONCE
+    // per batch, before any file starts, so every dropped file in this batch lands in the same place.
+    let destination = destinationCollectionId || null;
+    if (newCollectionName.trim().length > 0) {
+      destination = await createCollection(token, newCollectionName.trim());
+      setNewCollectionName("");
+    }
 
     // Each file gets its own tus.Upload and its own row - multi-file grouping into a single shared link
     // is a later epic (E6), not this one.
@@ -226,7 +295,7 @@ export function DropZone() {
         ...prev,
         { id, name: file.name, state: { status: "uploading", progress: 0, loaded: 0, total: file.size } },
       ]);
-      startUpload(file, token, chunkSize, (state) => {
+      startUpload(file, token, chunkSize, destination, (state) => {
         updateUpload(id, state);
         if (state.status === "done") {
           void fetchPreviewContext(state.previewUrl, token).then((context) => {
@@ -237,25 +306,35 @@ export function DropZone() {
     });
   }
 
+  function loadCollectionsOnce() {
+    if (collectionsLoaded) return;
+    setCollectionsLoaded(true);
+    const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
+    void fetchCollections(token).then(setCollections);
+  }
+
   function handleInputFiles(fileList: FileList | null) {
     if (!fileList) return;
     const all = Array.from(fileList);
     const files = all.filter((f) => f.size > 0);
     all.filter((f) => f.size === 0).forEach((f) => toastError(`Can't upload "${f.name}" — it's empty.`));
-    startUploads(files);
+    void startUploads(files);
   }
 
   if (!authReady) {
     return <span className="spinner" role="status" aria-label="Loading" />;
   }
 
-  // Signed out this is the WHOLE page (E4 adds the browser), so it needs to say what the app is rather
-  // than stranding a lone button in the corner - which is exactly how it read before session 010.
+  // D-120 (E4.1 Wave E findings, finding 5): signed out, this is a DEDICATED login-only panel - Hannah's
+  // call, verbatim: "dedicated log in panel that's only for log in, no other text." No heading, no copy,
+  // no drop target - the browser below the drop zone (D-93) already shows what the app is for an
+  // anonymous visitor, so this panel's only job is to offer sign-in.
+  // Landmine: <mosni-login-button /> is the ONLY sign-in affordance in the entire app (verified by grep
+  // during E4.1 Wave E findings planning) - this panel may be emptied of copy but must NEVER be removed
+  // or replaced with nothing, or an anonymous visitor has no way to sign in at all.
   if (user === null) {
     return (
       <div className="panel">
-        <h1 style={{ marginTop: 0 }}>Send a file</h1>
-        <p>Drop a file, get a link. Sign in to upload.</p>
         <mosni-login-button />
       </div>
     );
@@ -288,71 +367,125 @@ export function DropZone() {
             border: "3px dashed var(--mosni-purple)",
           }}
         >
-          <span style={{ fontSize: "1.5rem", color: "var(--mosni-white)" }}>Drop to upload</span>
+          {/* The zone is still the only drop target (the hand-off scoped whole-page drop out, and E6 owns
+              it). A viewport-wide "Drop to upload" therefore promised something a drop on the header or
+              the margins does not honour - it silently does nothing. The copy points at the zone instead,
+              which the overlay's own translucency leaves highlighted underneath. */}
+          <span style={{ fontSize: "1.5rem", color: "var(--mosni-white)" }}>Drop on the box below to upload</span>
         </div>
       )}
-      <div
-        className="panel"
-        role="button"
-        tabIndex={0}
-        onClick={() => inputRef.current?.click()}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            inputRef.current?.click();
-          }
-        }}
-        onDragEnter={(event) => {
-          event.preventDefault();
-          setZoneHover(true);
-        }}
-        onDragOver={(event) => {
-          event.preventDefault();
-          setZoneHover(true);
-        }}
-        onDragLeave={() => setZoneHover(false)}
-        onDrop={(event) => {
-          event.preventDefault();
-          setZoneHover(false);
-          setDragDepth(0);
-          const { files, rejected } = uploadableFiles(event.dataTransfer);
-          rejected.forEach((name) =>
-            toastError(`Can't upload "${name}" — folders and empty files aren't supported yet.`),
-          );
-          startUploads(files);
-        }}
-        style={
-          zoneHover
-            ? {
-                borderColor: "var(--mosni-purple)",
-                borderStyle: "dashed",
-                background: "var(--mosni-surface-input)",
-                transform: "scale(1.01)",
-              }
-            : undefined
-        }
-      >
-        Drop files here, or click to choose
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          style={{ display: "none" }}
-          // input.click() dispatches its own bubbling native click event - without stopping it here,
-          // that synthetic click would bubble back up to the wrapping div's onClick and call
-          // inputRef.current.click() again, recursing forever. Same fix react-dropzone uses.
-          onClick={(event) => event.stopPropagation()}
-          onChange={(event) => {
-            handleInputFiles(event.target.files);
-            // Allow re-selecting the same file again later (browsers don't fire "change" otherwise).
-            event.target.value = "";
+      {/* D1/D-114: ONE panel for the drop target and its Options - previously two sibling `.panel`s (the
+          drop zone and a `<details>`), which read as two equal stacked boxes (defect 11 / H9). */}
+      <div className="panel" style={{ display: "grid", gap: "1rem" }}>
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => inputRef.current?.click()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              inputRef.current?.click();
+            }
           }}
-        />
+          onDragEnter={(event) => {
+            event.preventDefault();
+            setZoneHover(true);
+          }}
+          onDragOver={(event) => {
+            event.preventDefault();
+            setZoneHover(true);
+          }}
+          onDragLeave={() => setZoneHover(false)}
+          onDrop={(event) => {
+            event.preventDefault();
+            setZoneHover(false);
+            setDragDepth(0);
+            const { files, rejected } = uploadableFiles(event.dataTransfer);
+            rejected.forEach((name) =>
+              toastError(`Can't upload "${name}" — folders and empty files aren't supported yet.`),
+            );
+            void startUploads(files);
+          }}
+          // D1: the dashed rectangle is now the drop target's permanent resting state (previously only a
+          // hover affordance) - hovering just accents it further, it never starts undecorated.
+          style={{
+            border: "3px dashed var(--mosni-border-muted)",
+            borderRadius: "8px",
+            padding: "3rem 1.5rem",
+            textAlign: "center",
+            cursor: "pointer",
+            ...(zoneHover
+              ? {
+                  borderColor: "var(--mosni-purple)",
+                  background: "var(--mosni-surface-input)",
+                  transform: "scale(1.01)",
+                }
+              : undefined),
+          }}
+        >
+          Drop files here, or click to choose
+          <input
+            ref={inputRef}
+            type="file"
+            multiple
+            style={{ display: "none" }}
+            // input.click() dispatches its own bubbling native click event - without stopping it here,
+            // that synthetic click would bubble back up to the wrapping div's onClick and call
+            // inputRef.current.click() again, recursing forever. Same fix react-dropzone uses.
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => {
+              handleInputFiles(event.target.files);
+              // Allow re-selecting the same file again later (browsers don't fire "change" otherwise).
+              event.target.value = "";
+            }}
+          />
+        </div>
+
+        {/* G1 (D-42/D-86, amended by D-114): expanded rather than behind a disclosure - D3's check is
+            that this adds no REQUIRED step: a user who ignores it entirely still does exactly
+            open → drop → copy, with the default destination unchanged. */}
+        <div style={{ display: "grid", gap: "0.75rem" }}>
+          <h2 style={{ margin: 0, fontSize: "1rem" }}>Options</h2>
+          <div>
+            <label htmlFor="destination-select" style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.35rem", color: "var(--mosni-text-muted)" }}>
+              Upload into
+            </label>
+            <select
+              id="destination-select"
+              value={destinationCollectionId}
+              onChange={(event) => setDestinationCollectionId(event.target.value)}
+            >
+              <option value="">Default</option>
+              {collections.map((collection) => (
+                <option key={collection.id} value={collection.id}>
+                  {collection.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label htmlFor="new-collection-name" style={{ display: "block", fontSize: "0.8rem", marginBottom: "0.35rem", color: "var(--mosni-text-muted)" }}>
+              Or create a new collection
+            </label>
+            <input
+              id="new-collection-name"
+              type="text"
+              placeholder="New collection name"
+              value={newCollectionName}
+              onChange={(event) => setNewCollectionName(event.target.value)}
+            />
+          </div>
+        </div>
       </div>
 
-      {uploads.map((upload) => (
+      {uploads.map((upload) => {
+        // The compact card renders the filename itself, as its own <h1>. Keeping the row label as well
+        // printed every completed upload's name twice (review session 013, visible in production) - so
+        // the label only stands in while there is no card: uploading, error, and the CopyLink fallback.
+        const cardShown = upload.state.status === "done" && upload.state.context !== null;
+        return (
         <div className="panel" key={upload.id}>
-          <p style={{ marginTop: 0 }}>{upload.name}</p>
+          {!cardShown && <p style={{ marginTop: 0 }}>{upload.name}</p>}
           {upload.state.status === "uploading" && (
             <>
               <div className="progress-label">
@@ -375,7 +508,8 @@ export function DropZone() {
             ))}
           {upload.state.status === "error" && <p role="alert">Upload failed: {upload.state.message}</p>}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
