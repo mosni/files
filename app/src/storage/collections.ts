@@ -168,14 +168,16 @@ export async function listCollectionsFor(sub: string): Promise<CollectionRecord[
   return rows.map(rowToRecord);
 }
 
-// --- Browse listing queries (§1.4 of the E4 waves hand-off) - one per scope, newest-first ------------
+// --- Browse listing queries (D-116/§1.2 of the E4.1 Wave E findings hand-off) - one per scope, newest-
+// first ------------------------------------------------------------------------------------------------
 //
 // Each returns the direct children of `parentId` ('' for root). None of these resolve EFFECTIVE
 // protection - that is controllers/browse.ts's job (it already has each row's OWN protection to fold
-// with the parent chain the caller separately verified). The public-scope query is the security-critical
-// one: it is a single WHERE clause that structurally cannot return a non-public row, never a broader
-// select filtered in JavaScript afterward - see controllers/browse.ts for why checking each row's own
-// `protection` here is sufficient (the caller has already verified the parent chain is itself public).
+// with the parent chain the caller separately verified). listVisibleChildCollections' anonymous branch is
+// the security-critical one: it is a single WHERE clause that structurally cannot return a non-public
+// row, never a broader select filtered in JavaScript afterward - see controllers/browse.ts for why
+// checking each row's own `protection` here is sufficient (the caller has already verified the parent
+// chain is itself public).
 
 export async function listOwnedChildCollections(parentId: string, ownerSub: string): Promise<CollectionRecord[]> {
   const [rows] = await getPool().query<CollectionRow[]>(
@@ -185,10 +187,36 @@ export async function listOwnedChildCollections(parentId: string, ownerSub: stri
   return rows.map(rowToRecord);
 }
 
-export async function listPublicChildCollections(parentId: string): Promise<CollectionRecord[]> {
+// D-116/§1.2 of the E4.1 Wave E findings hand-off: the `visible` scope's one query, replacing the old
+// scope=public/scope=all split. Written as two EXPLICIT SQL branches, never one query with NULL-guarded
+// predicates - when viewerSub is null the SQL string that runs contains ONLY the `protection = 'public'`
+// predicate, so the anonymous invariant is structurally true rather than incidentally true (this is the
+// app's only anonymous listing endpoint). Signed in, the predicate is the three-way union D-116 defines:
+// stored public, OR owned by the viewer, OR an EXISTS against collection_acl matched byte-for-byte on
+// `sub` (security invariant 6 - never a prefix, never parsed).
+export async function listVisibleChildCollections(
+  parentId: string,
+  viewerSub: string | null,
+): Promise<CollectionRecord[]> {
+  if (viewerSub === null) {
+    const [rows] = await getPool().query<CollectionRow[]>(
+      `SELECT ${SELECT_COLUMNS} FROM collections WHERE parent_id = ? AND protection = 'public' ORDER BY created_at DESC`,
+      [parentId],
+    );
+    return rows.map(rowToRecord);
+  }
   const [rows] = await getPool().query<CollectionRow[]>(
-    `SELECT ${SELECT_COLUMNS} FROM collections WHERE parent_id = ? AND protection = 'public' ORDER BY created_at DESC`,
-    [parentId],
+    `SELECT ${SELECT_COLUMNS} FROM collections
+     WHERE parent_id = ?
+       AND (
+         protection = 'public'
+         OR owner_sub = ?
+         OR EXISTS (
+           SELECT 1 FROM collection_acl WHERE collection_acl.collection_id = collections.id AND collection_acl.sub = ?
+         )
+       )
+     ORDER BY created_at DESC`,
+    [parentId, viewerSub, viewerSub],
   );
   return rows.map(rowToRecord);
 }

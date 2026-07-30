@@ -5,7 +5,10 @@
 
 import type { Protection, VisibilityReason } from "./protection.ts";
 
-export type Scope = "mine" | "public" | "all";
+// D-116/E4.1 Wave E findings: collapsed from three scopes to two. "public" and "all" are DELETED, not
+// deprecated - "visible" replaces both with one server-decided contract ("everything this viewer can
+// see"), so the client never branches on role. See controllers/browse.ts's header comment.
+export type Scope = "mine" | "visible";
 
 export type BrowseCollection = {
   id: string;

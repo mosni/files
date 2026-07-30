@@ -171,15 +171,17 @@ export async function resolveEffective(record: FileRecord): Promise<ResolvedFile
   return { ...record, effectiveProtection };
 }
 
-// --- Browse listing queries (§1.4 of the E4 waves hand-off) - one per scope, newest-first ------------
+// --- Browse listing queries (D-116/§1.2 of the E4.1 Wave E findings hand-off) - one per scope, newest-
+// first ------------------------------------------------------------------------------------------------
 //
 // Each returns committed files directly inside `collectionId`. `state='committed'` excludes D-85 pending
 // rows exactly like every other lookup in this module - a listing must not surface an upload still in
 // flight. None of these resolve EFFECTIVE protection or stat() the filesystem; controllers/browse.ts
 // folds each row's own protection with the parent chain it already verified, and a listing is not the
 // place to pay for a stat() per row (D-16's vanished-bytes prune already happens lazily on individual
-// lookups). The public-scope query is the security-critical one - see storage/collections.ts's matching
-// comment for why filtering by protection = 'public' here is sufficient given the caller's prior check.
+// lookups). listVisibleFilesIn's anonymous branch is the security-critical one - see
+// storage/collections.ts's matching comment for why filtering by protection = 'public' here is
+// sufficient given the caller's prior check.
 
 function rowToListedRecord(row: FileRow): FileRecord {
   return rowToRecord(row, row.bytes);
@@ -193,10 +195,27 @@ export async function listOwnedFilesIn(collectionId: string, ownerSub: string): 
   return rows.map(rowToListedRecord);
 }
 
-export async function listPublicFilesIn(collectionId: string): Promise<FileRecord[]> {
+// D-116/§1.2 of the E4.1 Wave E findings hand-off: the `visible` scope's one query, replacing the old
+// scope=public/scope=all split. Two EXPLICIT SQL branches, never one NULL-guarded predicate - see
+// storage/collections.ts's listVisibleChildCollections for why that matters.
+export async function listVisibleFilesIn(collectionId: string, viewerSub: string | null): Promise<FileRecord[]> {
+  if (viewerSub === null) {
+    const [rows] = await getPool().query<FileRow[]>(
+      `SELECT ${SELECT_COLUMNS} FROM files WHERE collection_id = ? AND protection = 'public' AND state = 'committed' ORDER BY created_at DESC`,
+      [collectionId],
+    );
+    return rows.map(rowToListedRecord);
+  }
   const [rows] = await getPool().query<FileRow[]>(
-    `SELECT ${SELECT_COLUMNS} FROM files WHERE collection_id = ? AND protection = 'public' AND state = 'committed' ORDER BY created_at DESC`,
-    [collectionId],
+    `SELECT ${SELECT_COLUMNS} FROM files
+     WHERE collection_id = ? AND state = 'committed'
+       AND (
+         protection = 'public'
+         OR owner_sub = ?
+         OR EXISTS (SELECT 1 FROM file_acl WHERE file_acl.file_id = files.id AND file_acl.sub = ?)
+       )
+     ORDER BY created_at DESC`,
+    [collectionId, viewerSub, viewerSub],
   );
   return rows.map(rowToListedRecord);
 }
