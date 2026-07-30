@@ -35,6 +35,10 @@ const updateCollectionSchema = {
       name: { type: "string", minLength: 1, maxLength: 255 },
       protection: { type: "string", enum: PROTECTION_ENUM },
       defaultProtection: { type: "string", enum: PROTECTION_ENUM },
+      // C3 (E4.1 live-testing findings, Wave C): move. Fastify's default AJV config sets
+      // removeAdditional: true, so a field missing from `properties` is silently STRIPPED before the
+      // handler ever sees it (not rejected) - "" (the root) must be an allowed value, so no minLength.
+      parentId: { type: "string" },
     },
     additionalProperties: false,
   },
@@ -46,6 +50,8 @@ const updateFileSchema = {
     properties: {
       name: { type: "string", minLength: 1, maxLength: 255 },
       protection: { type: "string", enum: PROTECTION_ENUM },
+      // C2 (E4.1 live-testing findings, Wave C): move - see updateCollectionSchema's parentId comment.
+      collectionId: { type: "string" },
     },
     additionalProperties: false,
   },

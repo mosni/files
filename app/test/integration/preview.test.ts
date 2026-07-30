@@ -582,17 +582,31 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       expect(embeddedLocationOf(byToken.body)).toEqual({ kind: "collection", collectionId: collection.id });
     });
 
-    it("unlisted/private: anonymous 404s at the readable path (unlike a file, which reveals nothing but still 200s)", async () => {
-      for (const protection of ["unlisted", "private"] as const) {
-        const collection = await createCollection({
-          parentId: "",
-          name: `${protection}-${randomUUID()}`,
-          ownerSub: "user:owner",
-          protection,
-        });
-        const res = await get(`/f/${collection.name}`);
-        expect(res.statusCode).toBe(404);
-      }
+    it("private: anonymous 404s at the readable path (unlike a file, which reveals nothing but still 200s)", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `private-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "private",
+      });
+      const res = await get(`/f/${collection.name}`);
+      expect(res.statusCode).toBe(404);
+    });
+
+    // AC6/D-124 (E4.1 live-testing findings, Wave B): the exact reproduction of finding 4 - a collection's
+    // readable path 404d cold even though its own token (and its own browse listing) already 200d. The
+    // link shape IS the credential for unlisted, same as it already is for a file (D-59: "not listed, but
+    // the link works for anyone who has it").
+    it("unlisted: a COLD, client-free anonymous GET at the readable path 200s with an embedded CollectionLocation (D-124)", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `unlisted-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "unlisted",
+      });
+      const res = await get(`/f/${collection.name}`);
+      expect(res.statusCode).toBe(200);
+      expect(embeddedLocationOf(res.body)).toEqual({ kind: "collection", collectionId: collection.id });
     });
 
     it("private: the owner and a superuser CAN reach it at the readable path", async () => {
@@ -705,6 +719,18 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
         protection: "secret",
       });
       const res = await get(`/api/preview/t/${collection.linkToken}`);
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ kind: "collection", collectionId: collection.id });
+    });
+
+    it("GET /api/preview/f/<unlisted collection's readable path> 200s anonymously, same as the document (D-124)", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `ctxunl-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "unlisted",
+      });
+      const res = await get(`/api/preview/f/${collection.name}`);
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ kind: "collection", collectionId: collection.id });
     });

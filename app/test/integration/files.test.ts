@@ -145,6 +145,20 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
     expect(await resolveByNames([`no-such-${randomUUID()}`, "x.txt"])).toBeNull();
   });
 
+  // A3/A7 (E4.1 live-testing findings, Wave A): a single-segment path is a bare root-level filename -
+  // resolveCollectionByNames([]) returns null by contract (root is not a collection row), so that lookup
+  // must be skipped entirely rather than treated as a failed resolution.
+  it("resolveByNames finds a root-level file from a single-segment path (D-126)", async () => {
+    const name = `root-photo-${randomUUID()}.png`;
+    const { id } = await seedCommittedFile({ collectionId: "", name, protection: "public" });
+
+    const record = await resolveByNames([name]);
+    expect(record).toMatchObject({ id, name, collectionId: "" });
+
+    const resolved = await resolveEffective(record!);
+    expect(resolved.effectiveProtection).toBe("public"); // no ancestor chain - its own stored level, verbatim
+  });
+
   it("resolveByNames cleans up and returns null when the row exists but the bytes are gone (D-16)", async () => {
     const { id, diskDir, diskName } = await seedCommittedFile({});
     await unlink(path.join(root, diskDir, diskName));

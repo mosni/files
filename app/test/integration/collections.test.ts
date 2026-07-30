@@ -6,13 +6,15 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { applyMigrations, closeDb, getPool, initDb } from "../../src/storage/db.ts";
 import {
   canUploadTo,
+  collectionBreadcrumb,
   collectionPath,
   countDescendants,
   createCollection,
   deleteCollectionRecursive,
-  ensureDefaultCollection,
   hasAclGrantOnChain,
+  isDescendantOf,
   listCollectionsFor,
+  moveCollection,
   protectionChain,
   renameCollection,
   resolveCollectionById,
@@ -213,32 +215,44 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
     await expect(collectionPath(leafId)).rejects.toThrow(/max depth/);
   });
 
-  it("ensureDefaultCollection is idempotent for the same sub", async () => {
-    const name = `default-${randomUUID()}`;
-    const first = await ensureDefaultCollection("user:a", name);
-    createdCollectionIds.push(first.id);
-    const second = await ensureDefaultCollection("user:a", name);
-    expect(second.id).toBe(first.id);
-  });
-
-  it("ensureDefaultCollection gives two different owners distinct collections instead of sharing one (closes the pre-E3 comingling gap)", async () => {
-    const name = `shared-name-${randomUUID()}`;
-    const forA = await ensureDefaultCollection("user:a", name);
-    createdCollectionIds.push(forA.id);
-    const forB = await ensureDefaultCollection("user:b", name);
-    createdCollectionIds.push(forB.id);
-
-    expect(forA.id).not.toBe(forB.id);
-    expect(forA.ownerSub).toBe("user:a");
-    expect(forB.ownerSub).toBe("user:b");
-    expect(forA.name).not.toBe(forB.name); // one of them got suffixed to stay globally unique at root
-  });
-
   it("renameCollection is a single UPDATE", async () => {
     const collection = await createCollection({ parentId: "", name: `old-${randomUUID()}`, ownerSub: "user:a" });
     createdCollectionIds.push(collection.id);
     await renameCollection(collection.id, "brand-new-name");
     expect(await resolveCollectionByNames(["brand-new-name"])).toMatchObject({ id: collection.id });
+  });
+
+  // D-82/D-130 (E4.1 live-testing findings, Wave C): a move is a plain UPDATE of parent_id.
+  describe("moveCollection / isDescendantOf", () => {
+    it("moveCollection updates parent_id; the collection resolves under its new parent's path", async () => {
+      const a = await createCollection({ parentId: "", name: `move-a-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(a.id);
+      const b = await createCollection({ parentId: "", name: `move-b-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(b.id);
+      const moving = await createCollection({ parentId: a.id, name: "moving", ownerSub: "user:a" });
+      createdCollectionIds.push(moving.id);
+
+      await moveCollection(moving.id, b.id);
+
+      expect(await resolveCollectionByNames([a.name, "moving"])).toBeNull();
+      expect(await resolveCollectionByNames([b.name, "moving"])).toMatchObject({ id: moving.id });
+    });
+
+    it("isDescendantOf is true for the collection itself and any nested descendant, false for an unrelated collection", async () => {
+      const top = await createCollection({ parentId: "", name: `desc-top-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(top.id);
+      const child = await createCollection({ parentId: top.id, name: "child", ownerSub: "user:a" });
+      createdCollectionIds.push(child.id);
+      const grandchild = await createCollection({ parentId: child.id, name: "grandchild", ownerSub: "user:a" });
+      createdCollectionIds.push(grandchild.id);
+      const unrelated = await createCollection({ parentId: "", name: `desc-unrelated-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(unrelated.id);
+
+      expect(await isDescendantOf(top.id, top.id)).toBe(true);
+      expect(await isDescendantOf(top.id, child.id)).toBe(true);
+      expect(await isDescendantOf(top.id, grandchild.id)).toBe(true);
+      expect(await isDescendantOf(top.id, unrelated.id)).toBe(false);
+    });
   });
 
   describe("canUploadTo", () => {
@@ -389,6 +403,26 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
       const child = await createCollection({ parentId: top.id, name: "child", ownerSub: "user:a" });
       createdCollectionIds.push(child.id);
       expect(await hasAclGrantOnChain(child.id, "user:stranger")).toBe(false);
+    });
+
+    it("the root ('') is not a dangling parent - it is an empty chain, no ACL rows", async () => {
+      expect(await hasAclGrantOnChain("", "user:anybody")).toBe(false);
+    });
+  });
+
+  // A1/A2/A7 (E4.1 live-testing findings, Wave A): the root sentinel must resolve as an empty chain
+  // everywhere the ancestor walk is projected, never throw "dangling parent_id" - it is not a real row.
+  describe("the root ('') sentinel resolves as an empty chain, not a dangling parent (D-126)", () => {
+    it("collectionPath('') is []", async () => {
+      expect(await collectionPath("")).toEqual([]);
+    });
+
+    it("protectionChain('') is []", async () => {
+      expect(await protectionChain("")).toEqual([]);
+    });
+
+    it("collectionBreadcrumb('') is []", async () => {
+      expect(await collectionBreadcrumb("")).toEqual([]);
     });
   });
 

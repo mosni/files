@@ -10,7 +10,6 @@
 // insert-failure together).
 
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { mkdir, rename, stat, unlink } from "node:fs/promises";
 import type http from "node:http";
 import { Server as TusServer } from "@tus/server";
@@ -20,8 +19,9 @@ import { verify } from "../auth/verify.ts";
 import { can, type VerifiedClaims } from "../lib/roles.ts";
 import { isReservedRootName, resolveRelPath, safeSegment } from "../lib/paths.ts";
 import { buildFileUrls } from "../lib/fileUrls.ts";
-import { generateId, ID_LENGTH } from "../lib/ids.ts";
+import { generateId } from "../lib/ids.ts";
 import { actorLabel } from "../lib/audit.ts";
+import type { Protection } from "../lib/protection.ts";
 import {
   abandonFileRow,
   claimFileRow,
@@ -30,13 +30,7 @@ import {
   diskRelPath,
   resolveEffective,
 } from "../storage/files.ts";
-import {
-  canUploadTo,
-  collectionPath,
-  ensureDefaultCollection,
-  resolveCollectionById,
-  type CollectionRecord,
-} from "../storage/collections.ts";
+import { canUploadTo, collectionPath, resolveCollectionById } from "../storage/collections.ts";
 import { stripInPlace } from "../storage/strip.ts";
 import { probeMedia } from "../storage/probe.ts";
 import { emitAuditEvent } from "../storage/audit.ts";
@@ -58,44 +52,29 @@ function bearerToken(req: http.IncomingMessage): string | null {
   return typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : null;
 }
 
-// The uploader's default collection name: their `name` claim if safe, else a stable opaque fallback.
-// NOTE (carried from session 007, flagged for E4): ensureDefaultCollection (D-80) now gives two different
-// owners distinct collections even if they both derive the same requested name here, closing the old
-// co-mingled-folder gap - see storage/collections.ts.
-function deriveDefaultCollectionName(claims: VerifiedClaims): string | null {
-  const fromName = typeof claims.name === "string" ? safeSegment(claims.name) : null;
-  const name = fromName ?? opaqueNameForSub(claims.sub);
-  if (name === null) return null;
-  // The reserved-root set itself now lives in lib/paths.ts, so the manage API applies the same one.
-  return isReservedRootName(name) ? `${name}-files` : name;
-}
+// D-126 (E4.1 live-testing findings, Wave A): the default upload destination, now the root - no per-user
+// default collection is created, so there is no name left to derive and D-92's random-string fallback
+// never fires again. `id: ""` is the same sentinel storage/collections.ts's parent_id has used since
+// D-80; the root is not a `collections` row (no owner, no ACL, no link token, no protection of its own -
+// a root file's effective protection is simply its own stored level).
+type UploadDestination = { id: string; defaultProtection: Protection };
+const ROOT_DESTINATION: UploadDestination = { id: "", defaultProtection: "unlisted" }; // D-105's root default
 
-// Session 016 (Hannah's report, 2026-07-28): the raw `sub` must never be the fallback here - subs look
-// like "google:138543663" or "eve:<character id>", and a default collection's name is public (it appears
-// in unlisted/public delivery links), so the old `safeSegment(claims.sub)` fallback leaked the provider and
-// internal account id to anyone holding a link. A sha256 of the sub is deterministic (so repeat calls for
-// the same user with no `name` claim still resolve to the same collection via ensureDefaultCollection's
-// name-keyed lookup) but reveals nothing about the identity behind it.
-function opaqueNameForSub(sub: string): string | null {
-  const digest = createHash("sha256").update(sub, "utf8").digest("hex").slice(0, ID_LENGTH);
-  return safeSegment(digest);
-}
-
+// A requested destination is honoured only when it resolves AND canUploadTo() passes; anything else falls
+// through to the root, exactly as it used to fall through to the per-user default collection (D-1: a
+// stale or unauthorized destination must never turn "drop a file" into an error dialog). This can no
+// longer fail - there is always a valid destination.
 async function resolveDestinationCollection(
   claims: VerifiedClaims,
   requestedCollectionId: unknown,
-): Promise<CollectionRecord | null> {
+): Promise<UploadDestination> {
   if (typeof requestedCollectionId === "string" && requestedCollectionId.length > 0) {
     const requested = await resolveCollectionById(requestedCollectionId);
     if (requested !== null && (await canUploadTo(requested, claims))) {
-      return requested;
+      return { id: requested.id, defaultProtection: requested.defaultProtection };
     }
-    // Falls through to the default rather than rejecting the upload (D-1): a stale or unauthorized
-    // destination must never turn "drop a file" into an error dialog.
   }
-  const name = deriveDefaultCollectionName(claims);
-  if (name === null) return null;
-  return ensureDefaultCollection(claims.sub, name);
+  return ROOT_DESTINATION;
 }
 
 async function cleanupFailedClaim(
@@ -163,11 +142,12 @@ export function buildTusServer(config: Config): TusServer {
         tusError(400, "unsafe filename");
       }
 
-      const collection = await resolveDestinationCollection(claims, upload.metadata?.destinationCollectionId);
-      if (collection === null) {
-        await unlink(tempPath).catch(() => {});
-        tusError(400, "could not derive a safe upload destination");
-      }
+      const destination = await resolveDestinationCollection(claims, upload.metadata?.destinationCollectionId);
+
+      // A root-level file named "t" would shadow the static /t/:token route on dl.mosni.dev, the same
+      // collision lib/paths.ts's isReservedRootName already guards for a root COLLECTION name (A6, Wave A
+      // of the E4.1 live-testing findings hand-off) - suffix rather than reject (D-1).
+      const name = destination.id === "" && isReservedRootName(safeName) ? `${safeName}-file` : safeName;
 
       // Display-name collision suffixing is now purely cosmetic (D-81: the disk name can never collide,
       // since it is prefixed with a fresh id) - but siblings still cannot share a `name` in the DB
@@ -183,13 +163,13 @@ export function buildTusServer(config: Config): TusServer {
 
       const claimed = await claimFileRow({
         id,
-        collectionId: collection.id,
-        name: safeName,
+        collectionId: destination.id,
+        name,
         diskDir,
         diskName,
         ownerSub: claims.sub,
         uploaderSub: claims.sub,
-        protection: collection.defaultProtection,
+        protection: destination.defaultProtection,
       });
 
       let finalPath: string | null = null;
@@ -227,7 +207,7 @@ export function buildTusServer(config: Config): TusServer {
           textPreview: probe.textPreview,
         });
 
-        const collectionSegments = await collectionPath(collection.id);
+        const collectionSegments = await collectionPath(destination.id);
         // Fire-and-forget (D-43) - never awaited, a dead bot must not break or delay the upload response.
         emitAuditEvent({
           action: "upload",

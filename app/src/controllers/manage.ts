@@ -22,7 +22,9 @@ import {
   countDescendants,
   createCollection,
   deleteCollectionRecursive,
+  isDescendantOf,
   listCollectionsFor,
+  moveCollection,
   protectionChain,
   renameCollection,
   resolveCollectionById,
@@ -30,7 +32,14 @@ import {
   setCollectionProtection,
   type CollectionRecord,
 } from "../storage/collections.ts";
-import { deleteFile, renameFile, resolveById, setFileProtection, type FileRecord } from "../storage/files.ts";
+import {
+  deleteFile,
+  moveFile,
+  renameFile,
+  resolveById,
+  setFileProtection,
+  type FileRecord,
+} from "../storage/files.ts";
 
 const PROTECTION_LEVELS: readonly Protection[] = ["public", "unlisted", "secret", "private"];
 
@@ -175,7 +184,12 @@ export async function updateCollectionHandler(
     return;
   }
 
-  const body = request.body as { name?: string; protection?: string; defaultProtection?: string };
+  const body = request.body as {
+    name?: string;
+    protection?: string;
+    defaultProtection?: string;
+    parentId?: string;
+  };
   if (body.name !== undefined && body.name !== collection.name) {
     const name = validatedName(body.name, { rootLevel: collection.parentId === "" });
     if (name === null) {
@@ -235,6 +249,45 @@ export async function updateCollectionHandler(
       target: body.name ?? collection.name,
       protection: body.defaultProtection,
     });
+  }
+  if (body.parentId !== undefined) {
+    // D-130 (E4.1 live-testing findings, Wave C3): move, plus the cycle check a file's move does not need.
+    const destinationId = body.parentId;
+    if (destinationId === id || (await isDescendantOf(id, destinationId))) {
+      reply.code(400).send({ error: "invalid_destination" });
+      return;
+    }
+    let destinationChain: Protection[];
+    if (destinationId === "") {
+      destinationChain = [];
+    } else {
+      const destination = await resolveCollectionById(destinationId);
+      if (destination === null || !(await canUploadTo(destination, claims))) {
+        reply.code(404).send();
+        return;
+      }
+      destinationChain = await protectionChain(destinationId);
+    }
+    // Floor direction for a collection's OWN protection is the DESTINATION's chain - matching this same
+    // handler's existing `protection` branch, which floors against the (current) parent's chain.
+    if (!meetsParentFloor(collection.protection, destinationChain)) {
+      reply.code(400).send({ error: "below_parent_protection" });
+      return;
+    }
+    if (destinationId === "" && isReservedRootName(collection.name)) {
+      reply.code(400).send({ error: "invalid_name" });
+      return;
+    }
+    try {
+      await moveCollection(id, destinationId);
+    } catch (err) {
+      if (isDuplicateNameError(err, "uniq_sibling_name")) {
+        reply.code(409).send({ error: "name_taken" });
+        return;
+      }
+      throw err;
+    }
+    emitAuditEvent({ action: "move", actor: actorLabel(claims), target: body.name ?? collection.name });
   }
 
   const updated = await resolveCollectionById(id);
@@ -305,9 +358,12 @@ export async function updateFileHandler(
     return;
   }
 
-  const body = request.body as { name?: string; protection?: string };
+  const body = request.body as { name?: string; protection?: string; collectionId?: string };
   if (body.name !== undefined && body.name !== record.name) {
-    const name = validatedName(body.name, { rootLevel: false });
+    // A6 (E4.1 live-testing findings, Wave A): a root-level file gets the same reserved-root-name check a
+    // root collection already had - otherwise it could be renamed to "t" and shadow the static /t/:token
+    // route on dl.mosni.dev.
+    const name = validatedName(body.name, { rootLevel: record.collectionId === "" });
     if (name === null) {
       reply.code(400).send({ error: "invalid_name" });
       return;
@@ -329,7 +385,8 @@ export async function updateFileHandler(
       return;
     }
     // D-97: floored by the owning collection's effective chain (self-inclusive) - raising the collection
-    // later is what may make a currently-valid file value fail this check, and that is by design.
+    // later is what may make a currently-valid file value fail this check, and that is by design. A
+    // root-level file's chain is empty (D-126), so there is no floor - `public` becomes settable.
     const chain = await protectionChain(record.collectionId);
     if (!meetsParentFloor(body.protection, chain)) {
       reply.code(400).send({ error: "below_parent_protection" });
@@ -343,9 +400,49 @@ export async function updateFileHandler(
       protection: body.protection,
     });
   }
+  if (body.collectionId !== undefined) {
+    // D-130 (E4.1 live-testing findings, Wave C2): move. Authorization is the existing owner/superuser
+    // gate above (authorizeFileOwner) - move is a manage action (D-104), not a delete action (D-115), so
+    // it is never widened to a files:delete holder.
+    const destinationId = body.collectionId;
+    let destinationChain: Protection[];
+    if (destinationId === "") {
+      destinationChain = [];
+    } else {
+      const destination = await resolveCollectionById(destinationId);
+      // A destination that does not resolve, or that this caller may not upload into, is a 404 - never
+      // 403 (this app never becomes an existence oracle), matching every other authorization gate here.
+      if (destination === null || !(await canUploadTo(destination, claims))) {
+        reply.code(404).send();
+        return;
+      }
+      destinationChain = await protectionChain(destinationId);
+    }
+    // D-97's floor, re-checked at the DESTINATION - a move that would breach it is rejected, never
+    // silently re-levelled (Wave F makes the rejection visible to the user).
+    if (!meetsParentFloor(record.protection, destinationChain)) {
+      reply.code(400).send({ error: "below_parent_protection" });
+      return;
+    }
+    if (destinationId === "" && isReservedRootName(record.name)) {
+      reply.code(400).send({ error: "invalid_name" });
+      return;
+    }
+    try {
+      await moveFile(id, destinationId);
+    } catch (err) {
+      if (isDuplicateNameError(err, "uniq_name_in_collection")) {
+        reply.code(409).send({ error: "name_taken" });
+        return;
+      }
+      throw err;
+    }
+    emitAuditEvent({ action: "move", actor: actorLabel(claims), target: record.name });
+  }
 
-  // The full preview context, not just the changed fields: a rename or a protection change retires the
-  // file's previewUrl/directUrl, and the SPA has no way to recompute them (it never sees the link_token).
+  // The full preview context, not just the changed fields: a rename, protection change or move retires
+  // the file's previewUrl/directUrl, and the SPA has no way to recompute them (it never sees the
+  // link_token).
   const updated = await resolveById(id);
   reply.send(await ownerContextFor(config, updated!));
 }

@@ -67,7 +67,16 @@ async function collectionDocumentAuthorized(
   config: Config,
   resolved: ResolvedCollection,
 ): Promise<boolean> {
-  if (resolved.effectiveProtection === "public") return true;
+  // D-124 (E4.1 live-testing findings, Wave B): the link shape IS the credential for public/unlisted
+  // (D-59) - "not listed, but the link works for anyone who has it" is exactly what `unlisted` means, and
+  // the FILE half of this app already honours that (readablePathResolves() allows it through). This
+  // collection-document gate had never been reconciled with that rule. `secret` never reaches here
+  // (readablePathResolves rejected it in the caller); only `private` still asks who is asking.
+  // ⚠ Accepted cost (D-127, Hannah, 2026-07-30): collection names are user-supplied and therefore
+  // guessable, so guessing an `unlisted` collection's name reveals its unlisted contents - consistent with
+  // the posture already recorded for files (session 007: co-mingled unlisted files are mutually
+  // path-guessable). `secret` and `private` are unaffected by this branch.
+  if (resolved.effectiveProtection === "public" || resolved.effectiveProtection === "unlisted") return true;
   const claims = await claimsFromBearer(request, config.appOrigin);
   if (claims === null) return false;
   const isOwner = claims.sub === resolved.ownerSub;

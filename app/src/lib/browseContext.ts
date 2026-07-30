@@ -40,6 +40,10 @@ export type BrowseResponse = {
   collections: BrowseCollection[];
   files: BrowseFile[];
   nextOffset: number | null;
+  // D-130/C4 (E4.1 live-testing findings, Wave C): may THIS viewer upload into the collection being
+  // listed? Server-decided (D-116's lesson: the client never infers upload rights from the user object) -
+  // true at the root for any files:write holder, and canUploadTo(target, claims) for a specific collection.
+  canUpload: boolean;
 };
 
 // D-107/§1.2 of the E4.1 waves hand-off: what the SPA shell's embedded context carries when a `/f/*` or

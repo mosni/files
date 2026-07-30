@@ -8,6 +8,7 @@ import type { VerifiedClaims } from "./roles.ts";
 export type WriteAction =
   | "upload"
   | "rename"
+  | "move"
   | "delete"
   | "protection-change"
   | "share-change"
@@ -28,6 +29,7 @@ export type AuditEvent = {
 const VERBS: Record<WriteAction, string> = {
   upload: "uploaded",
   rename: "renamed",
+  move: "moved",
   delete: "deleted",
   "protection-change": "changed the protection level of",
   "share-change": "changed the sharing of",

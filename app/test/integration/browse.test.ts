@@ -37,6 +37,7 @@ type BrowseResponse = {
     directUrl: string;
   }[];
   nextOffset: number | null;
+  canUpload: boolean;
 };
 
 describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scopes by D-116)", () => {
@@ -67,9 +68,17 @@ describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scop
   }, 30_000);
 
   const createdCollectionIds: string[] = [];
+  // D-126 (E4.1 live-testing findings, Wave A): a root-level file has no owning collection to clean up
+  // through - tracked and deleted directly.
+  const createdRootFileIds: string[] = [];
 
   afterEach(async () => {
     vi.mocked(verify).mockReset();
+    while (createdRootFileIds.length > 0) {
+      const id = createdRootFileIds.pop()!;
+      await getPool().query("DELETE FROM file_acl WHERE file_id = ?", [id]);
+      await getPool().query("DELETE FROM files WHERE id = ?", [id]);
+    }
     while (createdCollectionIds.length > 0) {
       const id = createdCollectionIds.pop()!;
       const [fileRows] = await getPool().query("SELECT id FROM files WHERE collection_id = ?", [id]);
@@ -377,15 +386,120 @@ describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scop
       expect((await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t")).statusCode).toBe(404);
     });
 
-    it("a stranger who reaches a secret collection via its token still only sees its public rows (never-delete)", async () => {
+    // D-125 (E4.1 live-testing findings, Wave B): INVERTED, not deleted. A token-holder on a secret
+    // collection now sees its public/unlisted rows too (§3.1's narrowed invariant) - a secret/private row
+    // inside it stays absent (B4). The companion test right below takes over the invariant half this test
+    // used to hold: a stranger with NO token still sees nothing.
+    it("a stranger who reaches a secret collection via its token sees its public+unlisted rows, never its secret/private rows (D-125)", async () => {
       const collection = await seedCollection({ ownerSub: "user:a", protection: "secret" });
       const publicFile = await seedFile({ collectionId: collection.id, ownerSub: "user:a", protection: "public" });
-      const hiddenFile = await seedFile({ collectionId: collection.id, ownerSub: "user:a", protection: "private" });
+      const unlistedFile = await seedFile({ collectionId: collection.id, ownerSub: "user:a", protection: "unlisted" });
+      const secretFile = await seedFile({ collectionId: collection.id, ownerSub: "user:a", protection: "secret" });
+      const privateFile = await seedFile({ collectionId: collection.id, ownerSub: "user:a", protection: "private" });
 
       const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}&token=${collection.linkToken}`);
+      expect(res.statusCode).toBe(200);
       const body = res.json() as BrowseResponse;
-      expect(body.files.map((f) => f.id)).toContain(publicFile.id);
-      expect(body.files.map((f) => f.id)).not.toContain(hiddenFile.id);
+      const ids = body.files.map((f) => f.id);
+      expect(ids).toContain(publicFile.id);
+      expect(ids).toContain(unlistedFile.id);
+      expect(ids).not.toContain(secretFile.id);
+      expect(ids).not.toContain(privateFile.id);
+    });
+
+    // Takes over the invariant half of the test above: possession of the link is what grants the
+    // listing (D-124/D-125) - a stranger with no token and no identity still sees nothing at all.
+    it("a stranger with NO token reaching the same secret collection still 404s (never-delete, unchanged)", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "secret" });
+      await seedFile({ collectionId: collection.id, ownerSub: "user:a", protection: "public" });
+
+      expect((await get(`/api/browse?scope=visible&collectionId=${collection.id}`)).statusCode).toBe(404);
+    });
+
+    // AC6/AC8 (D-124/D-125): the OTHER link shape - a viewer who merely knows an unlisted collection's id
+    // (its readable /f/ path is the credential, D-59) needs no token at all, unlike secret.
+    describe("an unlisted collection is reachable by anyone, no token needed (D-124)", () => {
+      it("an anonymous viewer lists an unlisted collection's public+unlisted rows, never its secret/private rows", async () => {
+        const collection = await seedCollection({ ownerSub: "user:a", protection: "unlisted" });
+        const publicFile = await seedFile({ collectionId: collection.id, ownerSub: "user:a", protection: "public" });
+        const unlistedFile = await seedFile({
+          collectionId: collection.id,
+          ownerSub: "user:a",
+          protection: "unlisted",
+        });
+        const secretFile = await seedFile({ collectionId: collection.id, ownerSub: "user:a", protection: "secret" });
+        const privateFile = await seedFile({
+          collectionId: collection.id,
+          ownerSub: "user:a",
+          protection: "private",
+        });
+        const publicChild = await seedCollection({
+          parentId: collection.id,
+          ownerSub: "user:a",
+          protection: "public",
+        });
+        const privateChild = await seedCollection({
+          parentId: collection.id,
+          ownerSub: "user:a",
+          protection: "private",
+        });
+
+        const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`);
+        expect(res.statusCode).toBe(200);
+        const body = res.json() as BrowseResponse;
+        const fileIds = body.files.map((f) => f.id);
+        expect(fileIds).toContain(publicFile.id);
+        expect(fileIds).toContain(unlistedFile.id);
+        expect(fileIds).not.toContain(secretFile.id);
+        expect(fileIds).not.toContain(privateFile.id);
+        const collectionIds = body.collections.map((c) => c.id);
+        expect(collectionIds).toContain(publicChild.id);
+        expect(collectionIds).not.toContain(privateChild.id);
+        for (const row of [...body.files, ...body.collections]) expect(row.reason).toBe("granted");
+      });
+
+      it("a signed-in non-owner additionally sees rows they own or hold a grant on, inside that same unlisted collection", async () => {
+        const collection = await seedCollection({ ownerSub: "user:a", protection: "unlisted" });
+        const ownedByViewer = await seedFile({
+          collectionId: collection.id,
+          ownerSub: "user:viewer",
+          protection: "private",
+        });
+        const grantedFile = await seedFile({
+          collectionId: collection.id,
+          ownerSub: "user:a",
+          protection: "secret",
+        });
+        await getPool().query("INSERT INTO file_acl (file_id, sub) VALUES (?, ?)", [grantedFile.id, "user:viewer"]);
+        const strangerPrivateFile = await seedFile({
+          collectionId: collection.id,
+          ownerSub: "user:a",
+          protection: "private",
+        });
+        asUser("user:viewer", { roles: [] });
+
+        const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
+        expect(res.statusCode).toBe(200);
+        const ids = (res.json() as BrowseResponse).files.map((f) => f.id);
+        expect(ids).toContain(ownedByViewer.id);
+        expect(ids).toContain(grantedFile.id);
+        expect(ids).not.toContain(strangerPrivateFile.id);
+      });
+    });
+
+    it("the root listing is untouched by D-125: anonymous scope=visible at root still returns only public rows", async () => {
+      const pub = await seedCollection({ ownerSub: "user:a", protection: "public", name: `root-pub-${randomUUID()}` });
+      const unlisted = await seedCollection({
+        ownerSub: "user:a",
+        protection: "unlisted",
+        name: `root-unl-${randomUUID()}`,
+      });
+
+      const res = await get("/api/browse?scope=visible");
+      expect(res.statusCode).toBe(200);
+      const ids = (res.json() as BrowseResponse).collections.map((c) => c.id);
+      expect(ids).toContain(pub.id);
+      expect(ids).not.toContain(unlisted.id);
     });
 
     // A5 (found during planning): a token-authorized anonymous listing must never mislabel a listed row
@@ -445,6 +559,40 @@ describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scop
       const res = await get(`/api/browse?scope=mine&collectionId=${collection.id}`, "t");
       const body = res.json() as BrowseResponse;
       expect(body.files.find((f) => f.id === file.id)?.reason).toBe("own");
+    });
+  });
+
+  // A4/A7 (E4.1 live-testing findings, Wave A): the root now holds files directly (partially reverses
+  // D-80) - listFilesFor's old pseudo-root short-circuit is gone.
+  describe("the root now holds files directly (D-126)", () => {
+    it("scope=mine at root lists the caller's own root-level files", async () => {
+      const mine = await seedFile({ collectionId: "", ownerSub: "user:a", protection: "private" });
+      createdRootFileIds.push(mine.id);
+      const theirs = await seedFile({ collectionId: "", ownerSub: "user:b", protection: "public" });
+      createdRootFileIds.push(theirs.id);
+      asUser("user:a", { roles: [] });
+
+      const res = await get("/api/browse?scope=mine", "t");
+      expect(res.statusCode).toBe(200);
+      const ids = (res.json() as BrowseResponse).files.map((f) => f.id);
+      expect(ids).toContain(mine.id);
+      expect(ids).not.toContain(theirs.id);
+    });
+
+    it("anonymous scope=visible at root lists only public root-level files (never-delete, now with files present)", async () => {
+      const pub = await seedFile({ collectionId: "", ownerSub: "user:a", protection: "public" });
+      createdRootFileIds.push(pub.id);
+      const unlisted = await seedFile({ collectionId: "", ownerSub: "user:a", protection: "unlisted" });
+      createdRootFileIds.push(unlisted.id);
+      const priv = await seedFile({ collectionId: "", ownerSub: "user:a", protection: "private" });
+      createdRootFileIds.push(priv.id);
+
+      const res = await get("/api/browse?scope=visible");
+      expect(res.statusCode).toBe(200);
+      const ids = (res.json() as BrowseResponse).files.map((f) => f.id);
+      expect(ids).toContain(pub.id);
+      expect(ids).not.toContain(unlisted.id);
+      expect(ids).not.toContain(priv.id);
     });
   });
 
@@ -622,6 +770,38 @@ describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scop
       asAdmin("user:root");
       const res = await get(`/api/browse?scope=${scope}&collectionId=${randomUUID()}`, "t");
       expect(res.statusCode).toBe(404);
+    });
+  });
+
+  // C4/C5 (E4.1 live-testing findings, Wave C): the client must not infer upload rights from the user
+  // object (D-116's lesson) - the server decides and hands `canUpload` over on the browse response itself.
+  describe("canUpload (Wave G's collection-page upload box depends on this)", () => {
+    it("is true for an owner browsing their own collection", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "unlisted" });
+      asUser("user:a", { roles: ["files:write"] });
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
+      expect((res.json() as BrowseResponse).canUpload).toBe(true);
+    });
+
+    it("is true at the root for any files:write holder", async () => {
+      asUser("user:a", { roles: ["files:write"] });
+      const res = await get("/api/browse?scope=mine", "t");
+      expect((res.json() as BrowseResponse).canUpload).toBe(true);
+    });
+
+    it("is false anonymously, everywhere", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "public" });
+      const rootRes = await get("/api/browse?scope=visible");
+      expect((rootRes.json() as BrowseResponse).canUpload).toBe(false);
+      const collectionRes = await get(`/api/browse?scope=visible&collectionId=${collection.id}`);
+      expect((collectionRes.json() as BrowseResponse).canUpload).toBe(false);
+    });
+
+    it("is false in a stranger's collection the viewer cannot upload into", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "public" });
+      asUser("user:stranger", { roles: ["files:write"] });
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
+      expect((res.json() as BrowseResponse).canUpload).toBe(false);
     });
   });
 });

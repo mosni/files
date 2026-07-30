@@ -113,6 +113,7 @@ export async function resolveCollectionEffective(record: CollectionRecord): Prom
 // collection. collectionPath, protectionChain and collectionBreadcrumb below are each just a different
 // projection of the same records.
 async function ancestorChainRecords(id: string): Promise<CollectionRecord[]> {
+  if (id === "") return []; // D-126: the root is a sentinel, not a row - an empty chain, not a dangling parent
   const records: CollectionRecord[] = [];
   let currentId = id;
   for (let depth = 0; depth < MAX_COLLECTION_DEPTH; depth++) {
@@ -229,13 +230,37 @@ export async function listAllChildCollections(parentId: string): Promise<Collect
   return rows.map(rowToRecord);
 }
 
-function isSiblingNameDuplicate(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    (err as { code?: string }).code === "ER_DUP_ENTRY" &&
-    /uniq_sibling_name/.test((err as { message?: string }).message ?? "")
+// D-125 (E4.1 live-testing findings, Wave B): the third breadth, between listVisibleChildCollections'
+// absolute anonymous-safe floor and listAllChildCollections' full elevated breadth. A viewer who holds
+// this collection's own link (token or readable path, D-124) but is not independently authorized on it
+// sees its `public`/`unlisted` rows PLUS anything they are independently authorized on (own, or an ACL
+// grant) - never its `secret`/`private` rows. Same two-explicit-branches shape as listVisibleChildCollections
+// for the same reason: the anonymous branch's SQL string must contain only the level predicate.
+export async function listLinkAuthorizedChildCollections(
+  parentId: string,
+  viewerSub: string | null,
+): Promise<CollectionRecord[]> {
+  if (viewerSub === null) {
+    const [rows] = await getPool().query<CollectionRow[]>(
+      `SELECT ${SELECT_COLUMNS} FROM collections WHERE parent_id = ? AND protection IN ('public','unlisted') ORDER BY created_at DESC`,
+      [parentId],
+    );
+    return rows.map(rowToRecord);
+  }
+  const [rows] = await getPool().query<CollectionRow[]>(
+    `SELECT ${SELECT_COLUMNS} FROM collections
+     WHERE parent_id = ?
+       AND (
+         protection IN ('public','unlisted')
+         OR owner_sub = ?
+         OR EXISTS (
+           SELECT 1 FROM collection_acl WHERE collection_acl.collection_id = collections.id AND collection_acl.sub = ?
+         )
+       )
+     ORDER BY created_at DESC`,
+    [parentId, viewerSub, viewerSub],
   );
+  return rows.map(rowToRecord);
 }
 
 // D-105: a new collection inherits its parent's protection (`unlisted` at root, matching the column
@@ -259,33 +284,16 @@ export async function createCollection(params: {
   return record;
 }
 
-// The user's own root-level default collection, created once and reused after. A root-level name is
-// unique across ALL owners (uniq_sibling_name has no owner column), so two different subs asking for the
-// same default name can no longer be silently comingled into one shared collection the way two users
-// sharing a `name` claim shared a disk folder pre-E3 - the second one lands in a distinctly-suffixed
-// collection of their own instead.
-export async function ensureDefaultCollection(sub: string, name: string): Promise<CollectionRecord> {
-  const [ownRows] = await getPool().query<CollectionRow[]>(
-    `SELECT ${SELECT_COLUMNS} FROM collections WHERE parent_id = '' AND owner_sub = ? AND name = ?`,
-    [sub, name],
-  );
-  const existing = ownRows[0];
-  if (existing !== undefined) return rowToRecord(existing);
-
-  let candidate = name;
-  for (let attempt = 0; attempt < 20; attempt++) {
-    try {
-      return await createCollection({ parentId: "", name: candidate, ownerSub: sub });
-    } catch (err) {
-      if (!isSiblingNameDuplicate(err)) throw err;
-      candidate = `${name}-${attempt + 2}`; // name, then name-2, name-3, ... on each further collision
-    }
-  }
-  throw new Error(`storage/collections: could not find a free default-collection name for "${name}"`);
-}
-
 export async function renameCollection(id: string, newName: string): Promise<void> {
   await getPool().query("UPDATE collections SET name = ? WHERE id = ?", [newName, id]);
+}
+
+// D-82/D-130 (E4.1 live-testing findings, Wave C): a move is a plain UPDATE of parent_id - no bytes exist
+// for a collection to move, and a file's own disk layout is untouched regardless (storage/files.ts's
+// moveFile). The caller (controllers/manage.ts) is responsible for the D-97 floor at the destination and
+// the cycle check (isDescendantOf below) before calling this.
+export async function moveCollection(id: string, parentId: string): Promise<void> {
+  await getPool().query("UPDATE collections SET parent_id = ? WHERE id = ?", [parentId, id]);
 }
 
 // D-86: a collection's default_protection is what new uploads into it inherit (upload.ts, Wave E).
@@ -312,6 +320,14 @@ async function descendantCollectionIds(rootId: string): Promise<string[]> {
     frontier = (rows as { id: string }[]).map((row) => row.id);
   }
   return all;
+}
+
+// D-130 (E4.1 live-testing findings, Wave C3): the cycle check for moving a collection - it may not move
+// into itself or any of its own descendants. Reuses descendantCollectionIds' walk (which already includes
+// the root itself, matching countDescendants' own inclusive convention) rather than exposing that walk as
+// a second public name (working-conventions.md §2: a clean readable name over exposing the walk).
+export async function isDescendantOf(ancestorId: string, candidateId: string): Promise<boolean> {
+  return (await descendantCollectionIds(ancestorId)).includes(candidateId);
 }
 
 // D-88/D-104: the count a recursive-delete confirmation names, computed WITHOUT deleting anything -
@@ -372,6 +388,7 @@ export async function hasCollectionAclGrant(collectionId: string, sub: string): 
 // does, checking collection_acl at each level in turn (root check happens last since the walk climbs
 // from the given collection upward), returning true on the first match.
 export async function hasAclGrantOnChain(collectionId: string, sub: string): Promise<boolean> {
+  if (collectionId === "") return false; // D-126: the root holds no collection_acl rows
   let currentId = collectionId;
   for (let depth = 0; depth < MAX_COLLECTION_DEPTH; depth++) {
     if (await hasCollectionAclGrant(currentId, sub)) return true;

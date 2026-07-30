@@ -26,7 +26,7 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
-import { isFilesAdmin, isSuperuser, type Claims } from "../lib/roles.ts";
+import { can, isFilesAdmin, isSuperuser, type Claims } from "../lib/roles.ts";
 import { buildCollectionPreviewUrl, buildFileUrls } from "../lib/fileUrls.ts";
 import { isListedFor, mostRestrictive, type Protection, type VisibilityReason } from "../lib/protection.ts";
 import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../lib/browseContext.ts";
@@ -35,15 +35,18 @@ import {
   hasAclGrantOnChain,
   hasCollectionAclGrant,
   listAllChildCollections,
+  listLinkAuthorizedChildCollections,
   listOwnedChildCollections,
   listVisibleChildCollections,
   protectionChain,
   resolveCollectionById,
+  canUploadTo,
   type CollectionRecord,
 } from "../storage/collections.ts";
 import {
   hasAclGrant,
   listAllFilesIn,
+  listLinkAuthorizedFilesIn,
   listOwnedFilesIn,
   listVisibleFilesIn,
   type FileRecord,
@@ -64,11 +67,13 @@ type Viewer = { sub: string | null; isAdmin: boolean };
 // collection, not once per file") applied to the ACL walk as well as the protection chain; it matters here
 // because the box is an Atom N2800 (D-78) and a page is 100 rows.
 //
-// `tokenAuthorizedOnly` (A5, E4.1 Wave E findings) is true only when the WHOLE page's reachability was
-// granted purely by the target collection's own link token - not by identity (owner/superuser/isAdmin/
-// chain-grant). Threaded into reasonFor() below so a token-authorized listing's rows are labelled
-// "granted", never mislabelled "public".
-type PageGrants = { chainGranted: boolean; tokenAuthorizedOnly: boolean };
+// `linkAuthorizedOnly` (D-125, E4.1 live-testing findings, Wave B - renamed from A5's tokenAuthorizedOnly)
+// is true only when the WHOLE page's reachability was granted purely by the target collection's link -
+// its token (secret) or its readable path (unlisted/public, D-124) - not by identity (owner/superuser/
+// isAdmin/chain-grant). Threaded into reasonFor() below so a link-authorized listing's rows are labelled
+// "granted", never mislabelled "public", and into listChildCollections/listFilesFor to pick the widened
+// D-125 breadth.
+type PageGrants = { chainGranted: boolean; linkAuthorizedOnly: boolean };
 
 // D-99's identity list for reaching a NON-public target collection: owner, superuser, isFilesAdmin (D-101
 // survives here as `visible`'s admin branch - an admin browsing into any collection must not 404, which is
@@ -98,21 +103,22 @@ async function reasonFor(
   ownerSub: string | null,
   viewer: Viewer,
   resolveGranted: () => Promise<boolean>,
-  tokenAuthorizedOnly: boolean,
+  linkAuthorizedOnly: boolean,
 ): Promise<VisibilityReason> {
   const isOwn = viewer.sub !== null && ownerSub !== null && viewer.sub === ownerSub;
   const granted = isOwn ? false : await resolveGranted();
   const reason = isListedFor(effectiveProtection, viewer, ownerSub, granted);
   if (reason !== null) return reason;
-  // A5 (E4.1 Wave E findings, found during planning): isListedFor legitimately returns null for a row
-  // this endpoint chose to list ONLY when the whole page's reachability came from the target collection's
-  // own link token (an anonymous, non-granted, non-admin viewer) - D-98 grants the token bearer the
-  // LISTING, and every row on it is exactly as visible as the collection itself, so reusing the existing
-  // "granted" case (D-103's four cases are locked - no fifth) is accurate: "Shared with you" is exactly
-  // what a link-shared collection is. The OLD `?? "public"` fallback silently mislabelled this case.
+  // D-125 (renamed from A5's tokenAuthorizedOnly): isListedFor legitimately returns null for a row this
+  // endpoint chose to list ONLY when the whole page's reachability came from the target collection's own
+  // link - token (secret) or readable path (unlisted, D-124) - for an anonymous, non-granted, non-admin
+  // viewer. D-98/D-124 grant the link holder the LISTING, and every row on it is exactly as visible as the
+  // collection itself, so reusing the existing "granted" case (D-103's four cases are locked - no fifth)
+  // is accurate: "Shared with you" is exactly what a link-shared collection is. The OLD `?? "public"`
+  // fallback silently mislabelled this case.
   // Any OTHER null means this endpoint listed a row isListedFor cannot explain - a bug, so this throws
   // rather than defaulting, the same fail-loud choice hasAclGrantOnChain already makes.
-  if (tokenAuthorizedOnly) return "granted";
+  if (linkAuthorizedOnly) return "granted";
   throw new Error(
     `controllers/browse: isListedFor returned null for a row this endpoint chose to list ` +
       `(effectiveProtection=${effectiveProtection}, ownerSub=${ownerSub ?? "null"}) - every listed row must be explainable`,
@@ -142,7 +148,7 @@ async function shapeCollection(
     record.ownerSub,
     viewer,
     async () => grants.chainGranted || (viewer.sub !== null && (await hasCollectionAclGrant(record.id, viewer.sub))),
-    grants.tokenAuthorizedOnly,
+    grants.linkAuthorizedOnly,
   );
   const previewUrl = buildCollectionPreviewUrl(
     config,
@@ -176,7 +182,7 @@ async function shapeFile(
     record.ownerSub,
     viewer,
     async () => grants.chainGranted || (viewer.sub !== null && (await hasAclGrant(record.id, viewer.sub))),
-    grants.tokenAuthorizedOnly,
+    grants.linkAuthorizedOnly,
   );
   const urls = buildFileUrls(config, effectiveProtection, [...pathSegments, record.name], record.linkToken);
   return {
@@ -209,16 +215,21 @@ async function shapeFile(
 // EVERYWHERE, including at the pseudo-root (`elevated`'s own `targetOwnerSub !== null` guard is
 // structurally false there, since there is no single target collection to be elevated on) - this is what
 // makes "the browser shows exactly the same two tabs for an admin" true without a client-side role branch.
+// D-125 (E4.1 live-testing findings, Wave B): a third breadth between listVisible*'s absolute
+// anonymous-safe floor and listAll*'s full elevated breadth - see storage/{collections,files}.ts's
+// listLinkAuthorized* header comments for what it includes. `linkAuthorizedOnly` only ever applies to
+// scope=visible; scope=mine and the identity-elevated/admin branches are checked first and win.
 async function listChildCollections(
   scope: Scope,
   parentId: string,
   viewer: Viewer,
   elevated: boolean,
+  linkAuthorizedOnly: boolean,
 ): Promise<CollectionRecord[]> {
   if (scope === "mine") return listOwnedChildCollections(parentId, viewer.sub!);
-  return viewer.isAdmin || elevated
-    ? listAllChildCollections(parentId)
-    : listVisibleChildCollections(parentId, viewer.sub);
+  if (viewer.isAdmin || elevated) return listAllChildCollections(parentId);
+  if (linkAuthorizedOnly) return listLinkAuthorizedChildCollections(parentId, viewer.sub);
+  return listVisibleChildCollections(parentId, viewer.sub);
 }
 
 async function listFilesFor(
@@ -226,10 +237,15 @@ async function listFilesFor(
   collectionId: string,
   viewer: Viewer,
   elevated: boolean,
+  linkAuthorizedOnly: boolean,
 ): Promise<FileRecord[]> {
-  if (collectionId === "") return []; // the pseudo-root never holds files directly (D-80)
+  // D-126 (E4.1 live-testing findings, Wave A - partially reverses D-80): the root now holds files
+  // directly, so there is no pseudo-root short-circuit here any more - every branch below already takes
+  // collectionId literally, including "".
   if (scope === "mine") return listOwnedFilesIn(collectionId, viewer.sub!);
-  return viewer.isAdmin || elevated ? listAllFilesIn(collectionId) : listVisibleFilesIn(collectionId, viewer.sub);
+  if (viewer.isAdmin || elevated) return listAllFilesIn(collectionId);
+  if (linkAuthorizedOnly) return listLinkAuthorizedFilesIn(collectionId, viewer.sub);
+  return listVisibleFilesIn(collectionId, viewer.sub);
 }
 
 export async function browseHandler(request: FastifyRequest, reply: FastifyReply, config: Config): Promise<void> {
@@ -261,14 +277,16 @@ export async function browseHandler(request: FastifyRequest, reply: FastifyReply
 
   let targetChain: Protection[] = [];
   let targetOwnerSub: string | null = null;
+  let target: CollectionRecord | null = null;
   let breadcrumb: { id: string; name: string; previewUrl: string }[] = [];
   let pathSegments: string[] = [];
-  // A5 (E4.1 Wave E findings): true only when the target below was reached PURELY by its own link token,
-  // not by any identity check - see reasonFor()'s header comment.
-  let tokenAuthorizedOnly = false;
+  // D-125 (renamed from A5's tokenAuthorizedOnly): true only when the target below was reached PURELY by
+  // its own link - token (secret) or readable path (unlisted, D-124) - not by any identity check. See
+  // reasonFor()'s header comment.
+  let linkAuthorizedOnly = false;
 
   if (collectionId !== "") {
-    const target = await resolveCollectionById(collectionId);
+    target = await resolveCollectionById(collectionId);
     if (target === null) {
       reply.code(404).send();
       return;
@@ -279,21 +297,24 @@ export async function browseHandler(request: FastifyRequest, reply: FastifyReply
       return;
     }
     targetChain = await protectionChain(collectionId); // root-first, includes the target's own level
-    if (scope === "visible" && mostRestrictive(targetChain) !== "public") {
-      // D-94's visible tree only descends anonymously through collections that are themselves public all
-      // the way down - UNLESS the caller is independently authorized into this one target: its own token
-      // (D-98), its owner, a superuser, an admin (D-101), or an ACL grant anywhere on its chain (D-99).
-      // This is what lets a collection resolved by the document route actually list its contents too, and
-      // is what lets an admin browse into ANY collection without 404ing (the scope=all replacement path).
+    const targetEffective = mostRestrictive(targetChain);
+    // D-124 (E4.1 live-testing findings, Wave B): the link shape IS the credential for public/unlisted
+    // (D-59) - reachable by anyone, no identity and no token required. `secret` still needs the matching
+    // token OR identity; `private` is identity only (D-99) - no token bypass exists for it.
+    if (scope === "visible" && targetEffective !== "public") {
       const identityAuthorized = await isIdentityAuthorizedForTarget(target, claims);
       if (!identityAuthorized) {
-        const rawToken = query.token;
-        const suppliedToken = typeof rawToken === "string" ? rawToken : null;
-        if (suppliedToken === null || suppliedToken !== target.linkToken) {
-          reply.code(404).send();
-          return;
+        if (targetEffective === "unlisted") {
+          linkAuthorizedOnly = true;
+        } else {
+          const rawToken = query.token;
+          const suppliedToken = typeof rawToken === "string" ? rawToken : null;
+          if (targetEffective === "private" || suppliedToken === null || suppliedToken !== target.linkToken) {
+            reply.code(404).send();
+            return;
+          }
+          linkAuthorizedOnly = true;
         }
-        tokenAuthorizedOnly = true;
       }
     }
     const rawBreadcrumb = await collectionBreadcrumb(collectionId);
@@ -327,7 +348,7 @@ export async function browseHandler(request: FastifyRequest, reply: FastifyReply
     pathSegments = rawBreadcrumb.map((crumb) => crumb.name);
   }
 
-  const grants: PageGrants = { ...(await resolvePageGrants(collectionId, viewer)), tokenAuthorizedOnly };
+  const grants: PageGrants = { ...(await resolvePageGrants(collectionId, viewer)), linkAuthorizedOnly };
   // See listChildCollections'/listFilesFor's header comment - this is the SAME identity list
   // isIdentityAuthorizedForTarget already used for the reachability gate above (owner/superuser/chain-
   // grant), minus the token bypass (a bare token authorizes this one document/listing, not elevated
@@ -338,9 +359,15 @@ export async function browseHandler(request: FastifyRequest, reply: FastifyReply
     targetOwnerSub !== null &&
     (viewer.sub === targetOwnerSub || (claims !== null && isSuperuser(claims)) || grants.chainGranted);
 
+  // C4 (E4.1 live-testing findings, Wave C): may THIS viewer upload into the collection being listed? The
+  // client must not infer this from the user object (D-116's lesson) - the server decides and hands it
+  // over on the browse response, so Wave G's collection-page upload box knows whether to render at all.
+  const canUpload =
+    claims !== null && can(claims, "files:write") && (target === null || (await canUploadTo(target, claims)));
+
   const [childCollections, files] = await Promise.all([
-    listChildCollections(scope, collectionId, viewer, elevatedAccess),
-    listFilesFor(scope, collectionId, viewer, elevatedAccess),
+    listChildCollections(scope, collectionId, viewer, elevatedAccess, linkAuthorizedOnly),
+    listFilesFor(scope, collectionId, viewer, elevatedAccess, linkAuthorizedOnly),
   ]);
 
   // D-102: collections first, then files, each newest-first (already the query order) - paginate the
@@ -365,6 +392,7 @@ export async function browseHandler(request: FastifyRequest, reply: FastifyReply
     collections: shapedCollections,
     files: shapedFiles,
     nextOffset,
+    canUpload,
   };
   reply.send(response);
 }

@@ -125,18 +125,24 @@ async function materialize(row: FileRow): Promise<FileRecord | null> {
 
 // Resolution for `/f/<...>` (replaces the old path-keyed resolveByPath). `segments` is the decoded URL
 // path: zero or more collection names followed by the file name. Walks collections from root, then the
-// file by (collection_id, name).
+// file by (collection_id, name). D-126 (E4.1 live-testing findings, Wave A3): a single-segment path is a
+// bare root-level filename - `resolveCollectionByNames([])` returns null by contract (root is not a
+// collection row), so that lookup is skipped entirely rather than treated as a failed resolution.
 export async function resolveByNames(segments: readonly string[]): Promise<FileRecord | null> {
   if (segments.length < 1) return null;
   const collectionSegments = segments.slice(0, -1);
   const fileName = segments[segments.length - 1]!;
 
-  const collection = await resolveCollectionByNames(collectionSegments);
-  if (collection === null) return null;
+  let collectionId = "";
+  if (collectionSegments.length > 0) {
+    const collection = await resolveCollectionByNames(collectionSegments);
+    if (collection === null) return null;
+    collectionId = collection.id;
+  }
 
   const [rows] = await getPool().query<FileRow[]>(
     `SELECT ${SELECT_COLUMNS} FROM files WHERE collection_id = ? AND name = ?`,
-    [collection.id, fileName],
+    [collectionId, fileName],
   );
   const row = rows[0];
   return row === undefined ? null : await materialize(row);
@@ -211,6 +217,32 @@ export async function listVisibleFilesIn(collectionId: string, viewerSub: string
      WHERE collection_id = ? AND state = 'committed'
        AND (
          protection = 'public'
+         OR owner_sub = ?
+         OR EXISTS (SELECT 1 FROM file_acl WHERE file_acl.file_id = files.id AND file_acl.sub = ?)
+       )
+     ORDER BY created_at DESC`,
+    [collectionId, viewerSub, viewerSub],
+  );
+  return rows.map(rowToListedRecord);
+}
+
+// D-125 (E4.1 live-testing findings, Wave B): the third breadth - a viewer who holds this collection's own
+// link (token or readable path, D-124) but is not independently authorized on it sees its `public`/
+// `unlisted` files PLUS anything they are independently authorized on (own, or a file_acl grant); never a
+// `secret`/`private` row. Same two-explicit-branches shape as listVisibleFilesIn, for the same reason.
+export async function listLinkAuthorizedFilesIn(collectionId: string, viewerSub: string | null): Promise<FileRecord[]> {
+  if (viewerSub === null) {
+    const [rows] = await getPool().query<FileRow[]>(
+      `SELECT ${SELECT_COLUMNS} FROM files WHERE collection_id = ? AND protection IN ('public','unlisted') AND state = 'committed' ORDER BY created_at DESC`,
+      [collectionId],
+    );
+    return rows.map(rowToListedRecord);
+  }
+  const [rows] = await getPool().query<FileRow[]>(
+    `SELECT ${SELECT_COLUMNS} FROM files
+     WHERE collection_id = ? AND state = 'committed'
+       AND (
+         protection IN ('public','unlisted')
          OR owner_sub = ?
          OR EXISTS (SELECT 1 FROM file_acl WHERE file_acl.file_id = files.id AND file_acl.sub = ?)
        )
@@ -381,6 +413,14 @@ export async function renameFile(id: string, newName: string): Promise<void> {
 
 export async function setFileProtection(id: string, protection: Protection): Promise<void> {
   await getPool().query("UPDATE files SET protection = ? WHERE id = ?", [protection, id]);
+}
+
+// D-82/D-130 (E4.1 live-testing findings, Wave C): a move is a plain UPDATE of collection_id - disk_dir/
+// disk_name are fixed at ingest and are never touched here; no bytes move. The caller (controllers/
+// manage.ts) is responsible for authorization, destination validity and the D-97 floor before calling
+// this.
+export async function moveFile(id: string, collectionId: string): Promise<void> {
+  await getPool().query("UPDATE files SET collection_id = ? WHERE id = ?", [collectionId, id]);
 }
 
 // D-16: a hard delete removes the row, its ACL rows, AND the bytes. Row first, then bytes (A4) - a crash

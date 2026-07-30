@@ -46,9 +46,17 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
   }, 30_000);
 
   const createdCollectionIds: string[] = [];
+  // D-126 (E4.1 live-testing findings, Wave A): a root-level file has no owning collection to clean up
+  // through - tracked and deleted directly, same as browse.test.ts.
+  const createdRootFileIds: string[] = [];
 
   afterEach(async () => {
     vi.mocked(verify).mockReset();
+    while (createdRootFileIds.length > 0) {
+      const id = createdRootFileIds.pop()!;
+      await getPool().query("DELETE FROM file_acl WHERE file_id = ?", [id]);
+      await getPool().query("DELETE FROM files WHERE id = ?", [id]);
+    }
     // A test that renames a collection to a fixed literal ("renamed", "root-renamed") must not collide
     // with a leftover row from an earlier run against this same shared MariaDB (D-45) - clean up every
     // collection (and its files) this file created, not just the ones still under their seeded name.
@@ -392,6 +400,73 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       const res = await req("PATCH", `/api/collections/${collection.id}`, { token: "t", body: { name: taken } });
       expect(res.statusCode).toBe(409);
     });
+
+    // C3/C5 (E4.1 live-testing findings, Wave C): move (parentId), plus the cycle check a file's move
+    // does not need.
+    describe("move (parentId)", () => {
+      it("moves a collection to a new parent", async () => {
+        const destination = await seedCollection("user:mover");
+        const moving = await seedCollection("user:mover");
+        asUser("user:mover");
+
+        const res = await req("PATCH", `/api/collections/${moving.id}`, {
+          token: "t",
+          body: { parentId: destination.id },
+        });
+        expect(res.statusCode).toBe(200);
+        expect((await resolveCollectionById(moving.id))?.parentId).toBe(destination.id);
+      });
+
+      it("rejects moving a collection into ITSELF (400 invalid_destination)", async () => {
+        const collection = await seedCollection("user:mover2");
+        asUser("user:mover2");
+        const res = await req("PATCH", `/api/collections/${collection.id}`, {
+          token: "t",
+          body: { parentId: collection.id },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({ error: "invalid_destination" });
+      });
+
+      it("rejects moving a collection into its OWN DESCENDANT (400 invalid_destination)", async () => {
+        const top = await seedCollection("user:mover3");
+        const child = await createCollection({ parentId: top.id, name: "child", ownerSub: "user:mover3" });
+        createdCollectionIds.push(child.id);
+        asUser("user:mover3");
+
+        const res = await req("PATCH", `/api/collections/${top.id}`, { token: "t", body: { parentId: child.id } });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({ error: "invalid_destination" });
+        expect((await resolveCollectionById(top.id))?.parentId).toBe("");
+      });
+
+      it("floors a moved collection's OWN protection against the DESTINATION's chain", async () => {
+        const destination = await seedCollection("user:mover4");
+        await getPool().query("UPDATE collections SET protection = 'private' WHERE id = ?", [destination.id]);
+        const moving = await seedCollection("user:mover4");
+        await getPool().query("UPDATE collections SET protection = 'public' WHERE id = ?", [moving.id]);
+        asUser("user:mover4");
+
+        const res = await req("PATCH", `/api/collections/${moving.id}`, {
+          token: "t",
+          body: { parentId: destination.id },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({ error: "below_parent_protection" });
+        expect((await resolveCollectionById(moving.id))?.parentId).toBe("");
+      });
+
+      it("moves a collection to the root", async () => {
+        const parent = await seedCollection("user:mover5");
+        const child = await createCollection({ parentId: parent.id, name: "child", ownerSub: "user:mover5" });
+        createdCollectionIds.push(child.id);
+        asUser("user:mover5");
+
+        const res = await req("PATCH", `/api/collections/${child.id}`, { token: "t", body: { parentId: "" } });
+        expect(res.statusCode).toBe(200);
+        expect((await resolveCollectionById(child.id))?.parentId).toBe("");
+      });
+    });
   });
 
   describe("DELETE /api/collections/:id (D-88 recursive)", () => {
@@ -556,6 +631,120 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       // Without this the owner's own preview stops rendering the bytes the moment they make it private.
       expect(body.directUrl).toContain(`/s/${file.id}?exp=`);
       expect(body.directUrl).toContain("&sig=");
+    });
+
+    // AC3/A7 (E4.1 live-testing findings, Wave A): a root-level file has no ancestor chain, so no floor
+    // applies - `public` (the level D-97+D-105's combination made unreachable for a file in a default
+    // collection, finding 10's product half) becomes settable.
+    it("PATCH {protection:'public'} on a ROOT-LEVEL file succeeds - no parent floor applies (D-126)", async () => {
+      const file = await seedFile({ collectionId: "", ownerSub: "user:root-owner", protection: "unlisted" });
+      createdRootFileIds.push(file.id);
+      asUser("user:root-owner");
+      const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { protection: "public" } });
+      expect(res.statusCode).toBe(200);
+      expect((await resolveById(file.id))?.protection).toBe("public");
+    });
+
+    // A6/A7 (E4.1 live-testing findings, Wave A): a root file gets the same reserved-root-name check a
+    // root collection already had, or it could be renamed to "t" and shadow /t/:token on dl.mosni.dev.
+    it("rejects renaming a root-level file to the reserved name 't' (400)", async () => {
+      const file = await seedFile({ collectionId: "", name: "keep-root.txt", ownerSub: "user:root-owner" });
+      createdRootFileIds.push(file.id);
+      asUser("user:root-owner");
+      const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { name: "t" } });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: "invalid_name" });
+    });
+
+    // C2/C5 (E4.1 live-testing findings, Wave C): move is a plain UPDATE of collection_id; no bytes move.
+    describe("move (collectionId)", () => {
+      it("moves a file into a collection; bytes stay put; the response carries the NEW previewUrl", async () => {
+        const destination = await seedCollection("user:mover", `dest-${randomUUID()}`);
+        const file = await seedFile({ collectionId: "", name: "moveme.txt", ownerSub: "user:mover" });
+        createdRootFileIds.push(file.id);
+        const before = await resolveById(file.id);
+        asUser("user:mover");
+
+        const res = await req("PATCH", `/api/files/${file.id}`, {
+          token: "t",
+          body: { collectionId: destination.id },
+        });
+        expect(res.statusCode).toBe(200);
+        const after = await resolveById(file.id);
+        expect(after?.collectionId).toBe(destination.id);
+        expect(after?.diskDir).toBe(before?.diskDir);
+        expect(after?.diskName).toBe(before?.diskName);
+        const body = res.json();
+        expect(body.previewUrl).toContain(`${encodeURIComponent(destination.name)}/moveme.txt`);
+      });
+
+      it("moves a file to the root, then back into a collection", async () => {
+        const origin = await seedCollection("user:mover2");
+        const file = await seedFile({ collectionId: origin.id, name: "roundtrip.txt", ownerSub: "user:mover2" });
+        asUser("user:mover2");
+
+        const toRoot = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { collectionId: "" } });
+        expect(toRoot.statusCode).toBe(200);
+        expect((await resolveById(file.id))?.collectionId).toBe("");
+        createdRootFileIds.push(file.id);
+
+        const back = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { collectionId: origin.id } });
+        expect(back.statusCode).toBe(200);
+        expect((await resolveById(file.id))?.collectionId).toBe(origin.id);
+      });
+
+      it("rejects moving a public file into an unlisted collection - 400 below_parent_protection, row unchanged", async () => {
+        const destination = await seedCollection("user:mover3");
+        await getPool().query("UPDATE collections SET protection = 'unlisted' WHERE id = ?", [destination.id]);
+        const file = await seedFile({ collectionId: "", ownerSub: "user:mover3", protection: "public" });
+        createdRootFileIds.push(file.id);
+        asUser("user:mover3");
+
+        const res = await req("PATCH", `/api/files/${file.id}`, {
+          token: "t",
+          body: { collectionId: destination.id },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({ error: "below_parent_protection" });
+        expect((await resolveById(file.id))?.collectionId).toBe("");
+      });
+
+      it("404s moving into a collection the caller cannot upload to", async () => {
+        const stranger = await seedCollection("user:stranger-owner");
+        const file = await seedFile({ collectionId: "", ownerSub: "user:mover4" });
+        createdRootFileIds.push(file.id);
+        asUser("user:mover4");
+
+        const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { collectionId: stranger.id } });
+        expect(res.statusCode).toBe(404);
+      });
+
+      it("404s a non-owner moving someone else's file", async () => {
+        const destination = await seedCollection("user:mover5");
+        const file = await seedFile({ collectionId: "", ownerSub: "user:file-owner" });
+        createdRootFileIds.push(file.id);
+        asUser("user:mover5");
+
+        const res = await req("PATCH", `/api/files/${file.id}`, {
+          token: "t",
+          body: { collectionId: destination.id },
+        });
+        expect(res.statusCode).toBe(404);
+      });
+
+      it("409s a name collision at the destination", async () => {
+        const destination = await seedCollection("user:mover6");
+        await seedFile({ collectionId: destination.id, name: "clash.txt", ownerSub: "user:mover6" });
+        const file = await seedFile({ collectionId: "", name: "clash.txt", ownerSub: "user:mover6" });
+        createdRootFileIds.push(file.id);
+        asUser("user:mover6");
+
+        const res = await req("PATCH", `/api/files/${file.id}`, {
+          token: "t",
+          body: { collectionId: destination.id },
+        });
+        expect(res.statusCode).toBe(409);
+      });
     });
   });
 
