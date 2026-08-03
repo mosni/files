@@ -1,7 +1,7 @@
 # --- build stage: produces both Vite outputs (SPA + SSR) ---
 FROM node:24-alpine AS build
 WORKDIR /repo
-COPY package*.json ./
+COPY package*.json .npmrc ./
 RUN npm ci
 COPY . .
 RUN npx vite build
@@ -27,7 +27,7 @@ FROM node:24-alpine
 # and the cleanup step took it away again.
 RUN apk add --no-cache ffmpeg vips vips-cpp
 WORKDIR /app
-COPY package*.json ./
+COPY package*.json .npmrc ./
 # vips-dev's presence at install time is what makes sharp's installer choose a source build over its
 # prebuilt binary; node-addon-api and node-gyp must be real dependencies (not devDependencies) for that
 # build to work under --omit=dev. The toolchain is a virtual package so it can be dropped again in the

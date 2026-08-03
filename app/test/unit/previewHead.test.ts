@@ -16,6 +16,7 @@ function makeCtx(overrides: Partial<PreviewContext> = {}): PreviewContext {
     createdAt: "2026-07-21T12:00:00.000Z",
     previewUrl: "https://files.mosni.dev/f/dir/photo.png",
     directUrl: "https://dl.mosni.dev/dir/photo.png",
+    thumbUrl: null,
     kind: "image",
     mimeType: "image/png",
     inline: true,
@@ -23,6 +24,8 @@ function makeCtx(overrides: Partial<PreviewContext> = {}): PreviewContext {
     height: 600,
     durationSeconds: null,
     textPreview: null,
+    uploaderName: null,
+    uploaderAvatarUrl: null,
     isOwner: false,
     ...overrides,
   };
@@ -139,6 +142,49 @@ describe("renderPreviewHead() - image kind", () => {
     expect(noDims).not.toContain("og:image:width");
     expect(noDims).not.toContain("og:image:height");
     expect(noDims).not.toContain('content=""');
+  });
+});
+
+// D-137/B2: og:image/twitter:image prefer the thumbnail when one exists, and its declared dimensions must
+// describe the THUMBNAIL, not the source - a mismatch there is exactly what makes Discord fall back to a
+// bare link instead of a card.
+describe("renderPreviewHead() - image kind WITH a thumbnail (D-137)", () => {
+  const ctx = makeCtx({
+    kind: "image",
+    mimeType: "image/png",
+    width: 2000,
+    height: 1000,
+    thumbUrl: "https://dl.mosni.dev/thumb/dir/photo.png",
+  });
+  const head = renderPreviewHead(ctx, APP_ORIGIN);
+
+  it("og:image and twitter:image point at the THUMBNAIL url, not directUrl", () => {
+    expect(head).toContain(`property="og:image" content="${ctx.thumbUrl}"`);
+    expect(head).toContain(`property="og:image:secure_url" content="${ctx.thumbUrl}"`);
+    expect(head).toContain(`name="twitter:image" content="${ctx.thumbUrl}"`);
+    expect(head).not.toContain(`content="${ctx.directUrl}"`);
+  });
+
+  it("og:image:type becomes image/webp, not the source's own mimeType", () => {
+    expect(head).toContain('property="og:image:type" content="image/webp"');
+  });
+
+  it("og:image:width/height describe the THUMBNAIL (2000x1000 source -> 512x256 thumb), not the source", () => {
+    expect(head).toContain('property="og:image:width" content="512"');
+    expect(head).toContain('property="og:image:height" content="256"');
+    expect(head).not.toContain('content="2000"');
+    expect(head).not.toContain('content="1000"');
+  });
+
+  it("falls back to directUrl and the source's own dimensions/type when thumbUrl is null (pre-E5 file, D-138)", () => {
+    const noThumb = renderPreviewHead(
+      makeCtx({ kind: "image", mimeType: "image/png", width: 2000, height: 1000, thumbUrl: null }),
+      APP_ORIGIN,
+    );
+    expect(noThumb).toContain('property="og:image" content="https://dl.mosni.dev/dir/photo.png"');
+    expect(noThumb).toContain('property="og:image:type" content="image/png"');
+    expect(noThumb).toContain('property="og:image:width" content="2000"');
+    expect(noThumb).toContain('property="og:image:height" content="1000"');
   });
 });
 

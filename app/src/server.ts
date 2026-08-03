@@ -20,6 +20,7 @@ import { registerDeliveryRoutes } from "./routes/delivery.ts";
 import { registerPreviewRoutes } from "./routes/preview.ts";
 import { registerManageRoutes } from "./routes/manage.ts";
 import { registerBrowseRoutes } from "./routes/browse.ts";
+import { registerAvatarRoutes } from "./routes/avatar.ts";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 // D-48: the SPA is built into the image (web/dist, alongside this built server at app/dist/server.js)
@@ -82,7 +83,11 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
           "blob:",
         ],
         mediaSrc: ["'self'", "https://dl.mosni.dev"],
-        connectSrc: ["'self'", "https://auth.mosni.dev"],
+        // D-135 (E5): dl.mosni.dev joins connect-src so the client-side archive feature (D-133) can
+        // `fetch()` file bytes cross-origin to zip them. connect-src governs where our OWN JS may read
+        // from; it is not script-src, which would grant EXECUTION - that distinction is the security
+        // boundary, and dl. must never join script-src (D-4/D-33's containment).
+        connectSrc: ["'self'", "https://auth.mosni.dev", "https://dl.mosni.dev"],
         // helmet's `useDefaults` (on by default, never explicitly chosen here) merges in
         // `upgrade-insecure-requests`, which silently rewrites every same-origin http: subresource URL
         // (the SPA's own relative /assets/*.js script tag included) to https: before the browser even
@@ -137,6 +142,9 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
   // E4: the file browser's listing API. files.mosni.dev-only; scope=visible is this app's first and only
   // anonymous listing endpoint (D-94).
   await registerBrowseRoutes(app, config);
+  // E5/D-136: the uploader avatar proxy. files.mosni.dev-only, same containment reasoning as above - the
+  // raw sub never reaches the client (see controllers/avatar.ts).
+  await registerAvatarRoutes(app, config);
 
   // Renders a real .tsx view through renderToString (technical-baseline.md §1: React SSR via JSX). This
   // is also what makes D-44 verifiable rather than assumed - JSX cannot be type-stripped, so a server

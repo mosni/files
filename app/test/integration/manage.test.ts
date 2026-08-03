@@ -111,11 +111,12 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       ownerSub: opts.ownerSub === undefined ? "user:owner" : (opts.ownerSub ?? "no-owner"),
       uploaderSub: "user:owner",
       protection: opts.protection ?? "unlisted",
+      uploaderName: null,
     });
     const abs = path.join(root, ...diskRelPath(claimed).split("/"));
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, "content");
-    await commitFileRow(claimed.id, { bytes: 7, width: null, height: null, durationSeconds: null, textPreview: null });
+    await commitFileRow(claimed.id, { bytes: 7, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null });
     return claimed;
   }
 
@@ -350,11 +351,12 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
           ownerSub: "user:floor6",
           uploaderSub: "user:floor6",
           protection: "unlisted",
+          uploaderName: null,
         });
         const abs = path.join(root, ...diskRelPath(claimed).split("/"));
         await mkdir(path.dirname(abs), { recursive: true });
         await writeFile(abs, "x");
-        await commitFileRow(claimed.id, { bytes: 1, width: null, height: null, durationSeconds: null, textPreview: null });
+        await commitFileRow(claimed.id, { bytes: 1, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null });
 
         asUser("user:floor6");
         const raise = await req("PATCH", `/api/collections/${collection.id}`, {

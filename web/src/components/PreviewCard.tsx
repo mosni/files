@@ -96,6 +96,22 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
           {ctx.sizeLabel}
           {ctx.width !== null && ctx.height !== null ? ` · ${ctx.width}×${ctx.height}` : ""}
         </p>
+        {/* D-136: omitted entirely when uploaderName is null - never "Unknown" plus a default avatar for
+            every pre-E5 file, and never a fallback to the raw sub. */}
+        {ctx.uploaderName !== null && (
+          <p style={{ display: "flex", alignItems: "center", gap: "0.4rem", margin: "0.4rem 0 0" }}>
+            {ctx.uploaderAvatarUrl !== null && (
+              <img
+                src={ctx.uploaderAvatarUrl}
+                alt=""
+                width={20}
+                height={20}
+                style={{ borderRadius: "50%" }}
+              />
+            )}
+            <span className="little-link">{ctx.uploaderName}</span>
+          </p>
+        )}
       </div>
       {ctx.isOwner && (
         <div className="panel">

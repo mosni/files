@@ -11,7 +11,7 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 import sharp from "sharp";
-import { stripStrategyFor } from "../lib/media.ts";
+import { mediaKindByExtension } from "../lib/media.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -107,9 +107,9 @@ async function probeText(absolutePath: string): Promise<MediaProbe> {
 export async function probeMedia(absolutePath: string): Promise<MediaProbe> {
   try {
     const filename = path.basename(absolutePath);
-    const strategy = stripStrategyFor(filename);
-    if (strategy === "image") return await probeImage(absolutePath);
-    if (strategy === "video") return await probeVideo(absolutePath);
+    const kind = mediaKindByExtension(filename);
+    if (kind === "image") return await probeImage(absolutePath);
+    if (kind === "video") return await probeVideo(absolutePath);
     if (finalExtension(filename) === "txt") return await probeText(absolutePath);
     return { ...EMPTY_PROBE };
   } catch {

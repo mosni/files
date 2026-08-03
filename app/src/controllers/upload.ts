@@ -22,6 +22,7 @@ import { buildFileUrls } from "../lib/fileUrls.ts";
 import { generateId } from "../lib/ids.ts";
 import { actorLabel } from "../lib/audit.ts";
 import type { Protection } from "../lib/protection.ts";
+import { thumbnailApplies } from "../lib/thumbs.ts";
 import {
   abandonFileRow,
   claimFileRow,
@@ -33,6 +34,7 @@ import {
 import { canUploadTo, collectionPath, resolveCollectionById } from "../storage/collections.ts";
 import { stripInPlace } from "../storage/strip.ts";
 import { probeMedia } from "../storage/probe.ts";
+import { generateThumb } from "../storage/thumbs.ts";
 import { emitAuditEvent } from "../storage/audit.ts";
 
 interface RequestWithClaims extends http.IncomingMessage {
@@ -161,6 +163,11 @@ export function buildTusServer(config: Config): TusServer {
       // the (possibly suffixed) display name, since two different original uploads may legitimately
       // share an original filename once suffixing separates their display names.
 
+      // D-136: the display name from the token's `name` claim, captured now since it never changes after
+      // this point. NEVER falls back to the sub (D-92) - a null renders no uploader block at all.
+      const uploaderName =
+        typeof claims.name === "string" && claims.name.trim().length > 0 ? claims.name : null;
+
       const claimed = await claimFileRow({
         id,
         collectionId: destination.id,
@@ -170,6 +177,7 @@ export function buildTusServer(config: Config): TusServer {
         ownerSub: claims.sub,
         uploaderSub: claims.sub,
         protection: destination.defaultProtection,
+        uploaderName,
       });
 
       let finalPath: string | null = null;
@@ -199,12 +207,16 @@ export function buildTusServer(config: Config): TusServer {
         // so its dimensions are the true ones. A probe failure never fails the upload - probeMedia() never
         // throws.
         const probe = await probeMedia(finalPath);
+        // D-137: thumbnail generation piggybacks on the same post-strip pass. generateThumb() never
+        // throws - a thumbnail failure must never fail an upload (same contract as probeMedia()).
+        const thumbName = thumbnailApplies(claimed.name) ? await generateThumb(finalPath, claimed.id) : null;
         const record = await commitFileRow(claimed.id, {
           bytes: size,
           width: probe.width,
           height: probe.height,
           durationSeconds: probe.durationSeconds,
           textPreview: probe.textPreview,
+          thumbName,
         });
 
         const collectionSegments = await collectionPath(destination.id);

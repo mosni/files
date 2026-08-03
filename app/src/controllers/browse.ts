@@ -27,7 +27,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
 import { can, isFilesAdmin, isSuperuser, type Claims } from "../lib/roles.ts";
-import { buildCollectionPreviewUrl, buildFileUrls } from "../lib/fileUrls.ts";
+import { buildCollectionPreviewUrl, buildFileUrls, buildThumbUrl } from "../lib/fileUrls.ts";
 import { isListedFor, mostRestrictive, type Protection, type VisibilityReason } from "../lib/protection.ts";
 import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../lib/browseContext.ts";
 import {
@@ -185,6 +185,13 @@ async function shapeFile(
     grants.linkAuthorizedOnly,
   );
   const urls = buildFileUrls(config, effectiveProtection, [...pathSegments, record.name], record.linkToken);
+  const thumbUrl = buildThumbUrl(
+    config,
+    effectiveProtection,
+    [...pathSegments, record.name],
+    record.linkToken,
+    record.thumbName !== null,
+  );
   return {
     id: record.id,
     name: record.name,
@@ -194,6 +201,7 @@ async function shapeFile(
     reason,
     previewUrl: urls.previewUrl,
     directUrl: urls.directUrl,
+    thumbUrl,
     width: record.width,
     height: record.height,
     durationSeconds: record.durationSeconds,

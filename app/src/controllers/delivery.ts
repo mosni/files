@@ -18,6 +18,7 @@ import {
   resolveByNames,
   resolveByToken,
   resolveEffective,
+  thumbRelPath,
   type FileRecord,
   type ResolvedFile,
 } from "../storage/files.ts";
@@ -128,6 +129,102 @@ export async function deliverByToken(
 // No Bearer is read here and no cookie is ever set (D-33 forbids one on this origin outright); an invalid
 // or expired signature returns 404, never 403, matching every other "does this exist" question this
 // origin refuses to answer honestly for an unauthorized caller.
+// D-137: thumbnails are served by the SAME delivery machinery as the source, not a new authorization path
+// - same effective-protection resolution, same readablePathResolves/private-auth branches. "A thumbnail of
+// a `private` image IS that image" is not a slogan, it is this function reusing authorizePrivate()
+// unchanged.
+function sendThumbBytes(reply: FastifyReply, record: FileRecord): void {
+  const relPath = thumbRelPath(record);
+  if (relPath === null) {
+    // No thumbnail exists (non-image/video, generation failed, or a pre-E5 row) - 404, never fall back to
+    // the full original under a thumbnail URL, which would silently defeat the size ceiling the thumbnail
+    // exists to provide.
+    reply.code(404).send();
+    return;
+  }
+  // A thumbnail is always image/webp and always inline - it is generated content (a downsized re-encode or
+  // a single decoded video frame), never attacker-controlled bytes served verbatim, so there is no
+  // per-file MIME/disposition decision to make here the way sendBytes() has to make for an arbitrary
+  // upload. The containment headers still apply - a thumbnail is still derived from user-uploaded content.
+  reply.header("Content-Type", "image/webp");
+  reply.header("Content-Disposition", "inline");
+  reply.header("X-Content-Type-Options", "nosniff");
+  reply.header("Referrer-Policy", "no-referrer");
+  reply.header("X-Accel-Redirect", `/internal-storage/${encodeRelPath(relPath)}`);
+  reply.code(200).send();
+}
+
+async function deliverThumb(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  config: Config,
+  record: ResolvedFile | null,
+): Promise<void> {
+  if (record === null) {
+    reply.code(404).send();
+    return;
+  }
+  // D-96: identical gate to a full delivery - a row stored looser than its collection must still trigger
+  // the private-authorization branch for its thumbnail too.
+  if (record.effectiveProtection === "private" && !(await authorizePrivate(request, reply, config, record))) {
+    return; // authorizePrivate already sent the 401/403
+  }
+  sendThumbBytes(reply, record);
+}
+
+export async function deliverThumbByPath(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  config: Config,
+  relPath: string,
+): Promise<void> {
+  const segments = safeSegments(relPath);
+  const record = segments === null ? null : await resolveByNames(segments);
+  const resolved = record === null ? null : await resolveEffective(record);
+  // Same `secret` 404-not-403 rule as the source (D-59/D-96/D-100).
+  const gated = resolved !== null && !readablePathResolves(resolved.effectiveProtection) ? null : resolved;
+  await deliverThumb(request, reply, config, gated);
+}
+
+export async function deliverThumbByToken(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  config: Config,
+  token: string,
+): Promise<void> {
+  const record = await resolveByToken(token);
+  await deliverThumb(request, reply, config, record === null ? null : await resolveEffective(record));
+}
+
+// D-84/D-137: the thumbnail counterpart of deliverSigned - same signature scheme (it signs the fileId, not
+// anything thumbnail-specific), so a `private` file's thumbnail can render in its own owner's preview page
+// exactly as its full bytes already do.
+export async function deliverThumbSigned(
+  _request: FastifyRequest,
+  reply: FastifyReply,
+  config: Config,
+  fileId: string,
+  query: { exp?: string; sig?: string },
+): Promise<void> {
+  const expiresAt = Number(query.exp);
+  const sig = query.sig;
+  if (!Number.isFinite(expiresAt) || typeof sig !== "string" || sig.length === 0) {
+    reply.code(404).send();
+    return;
+  }
+  const valid = verifyDelivery(config.deliverySigningSecret, fileId, expiresAt, sig, Date.now() / 1000);
+  if (!valid) {
+    reply.code(404).send();
+    return;
+  }
+  const record = await resolveById(fileId);
+  if (record === null) {
+    reply.code(404).send();
+    return;
+  }
+  sendThumbBytes(reply, record);
+}
+
 export async function deliverSigned(
   _request: FastifyRequest,
   reply: FastifyReply,

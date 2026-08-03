@@ -152,6 +152,13 @@ test("a real authorized tus upload lands the bytes, and the returned link serves
   expect(direct.headers()["x-content-type-options"]).toBe("nosniff");
   expect(direct.headers()["referrer-policy"]).toBe("no-referrer");
 
+  // D-135: ACAO must be set in nginx's `internal;` location, not on the Fastify reply - X-Accel-Redirect
+  // drops app-set headers (the same trap nosniff/referrer-policy above already prove), so the integration
+  // tier structurally cannot see this header at all. Exact value only, never a wildcard: a test that only
+  // checked presence would pass on `*` just as easily as on the real origin.
+  expect(direct.headers()["access-control-allow-origin"]).toBe("https://files.mosni.dev");
+  expect(direct.headers()["access-control-allow-credentials"]).toBeUndefined();
+
   // E3 acceptance criterion 5 (A6/D-90): the DELIVERED bytes carry a Content-Type the APP chose from the
   // display name - not one nginx inferred from the on-disk extension. Only assertable here: per session
   // 010, the integration tier sees the app's own response, not what the client receives through the

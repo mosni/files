@@ -1,12 +1,17 @@
-// D-60: uploaded images and videos get embedded metadata (EXIF/GPS etc.) stripped in place at
-// ingest - images via sharp, video containers via ffmpeg (stream-copy only). This module only
-// classifies a filename into the strategy that applies; it does no I/O and never touches
-// sharp/ffmpeg itself (see storage/strip.ts for the actual stripping).
+// Extension-based media-kind GUESS. Used ONLY for display/routing purposes that are not security
+// decisions: lib/previewContext.ts's previewKindFor() (which UI component to render) and
+// storage/probe.ts's dimension-probe routing (D-74).
+//
+// ⚠ This is NOT authoritative for whether metadata stripping applies (D-143, corrected 2026-07-30).
+// storage/strip.ts classifies from the file's BYTES (sharp/ffprobe), never from the filename, because an
+// extension allowlist governing stripping fails OPEN: every unlisted or lying extension would silently
+// skip stripping, and the list can never be complete. This module only ever answers "what does the name
+// suggest", which is fine for a UI guess and wrong for a security gate.
 
-export type StripStrategy = "image" | "video" | "none";
+export type MediaExtensionKind = "image" | "video" | "none";
 
-const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "gif"] as const;
-const VIDEO_EXTENSIONS = ["mp4", "webm"] as const;
+export const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "gif"] as const;
+export const VIDEO_EXTENSIONS = ["mp4", "webm"] as const;
 
 // The final extension only, matching Node's own path.extname() convention: a purely leading-dot name
 // (".txt") has NO extension by this rule (fail closed on the ambiguous case) - only text after a dot that
@@ -18,13 +23,10 @@ function finalExtension(filename: string): string | null {
   return base.slice(lastDot + 1).toLowerCase();
 }
 
-export function stripStrategyFor(filename: string): StripStrategy {
+export function mediaKindByExtension(filename: string): MediaExtensionKind {
   const ext = finalExtension(filename);
   if (ext === null) return "none";
   if ((IMAGE_EXTENSIONS as readonly string[]).includes(ext)) return "image";
   if ((VIDEO_EXTENSIONS as readonly string[]).includes(ext)) return "video";
-  // PDF (and everything else) is deliberately "none": neither sharp nor ffmpeg can touch PDF
-  // metadata, so PDF stripping is a documented, known gap - not a bug to silently "fix" here.
-  // Revisit the tradeoffs explicitly before ever extending this to cover PDFs.
   return "none";
 }

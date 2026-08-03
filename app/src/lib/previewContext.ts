@@ -5,7 +5,7 @@
 import type { ResolvedFile } from "../storage/files.ts";
 import type { Protection } from "./protection.ts";
 import { isInlineAllowed, mimeTypeFor } from "./mime.ts";
-import { stripStrategyFor } from "./media.ts";
+import { mediaKindByExtension } from "./media.ts";
 
 export type PreviewKind = "image" | "video" | "pdf" | "text" | "other";
 
@@ -22,6 +22,9 @@ export type PreviewContext = {
   createdAt: string; // ISO 8601, from files.created_at
   previewUrl: string; // files.mosni.dev/f/<path> or /t/<token>
   directUrl: string; // dl.mosni.dev/<path> or /t/<token> - or a D-84 signed URL for a private file's owner
+  thumbUrl: string | null; // dl.mosni.dev/thumb/<path> or /thumb/t/<token> - null when no thumbnail exists
+  // (non-image/video, generation failed, or a pre-E5 file, D-137/D-138). A D-84-style signed
+  // /thumb/s/<id> URL for a private file's owner, mirroring directUrl exactly.
   kind: PreviewKind;
   mimeType: string; // "image/png", "video/mp4", "application/pdf", "text/plain",
   // "application/octet-stream" for unknown
@@ -30,6 +33,9 @@ export type PreviewContext = {
   height: number | null;
   durationSeconds: number | null; // video only
   textPreview: string | null; // .txt only: first 400 chars, sanitised
+  uploaderName: string | null; // display name, or null. NEVER the sub (D-92/D-136).
+  uploaderAvatarUrl: string | null; // files.-relative proxy URL (/api/avatar/<file id>), or null. NEVER
+  // auth.mosni.dev/avatar/<sub> directly (D-92/D-136) - null exactly when uploaderName is null.
   isOwner: boolean; // ALWAYS false in the embedded document copy (D-75: the document is
   // anonymous). Only the API, given a Bearer, can return true.
 };
@@ -49,13 +55,13 @@ export function humanSize(bytes: number): string {
   return `${value.toFixed(1)} ${BYTE_UNITS[unitIndex]}`;
 }
 
-// stripStrategyFor already tells image/video apart (media.ts); pdf/text are read off the MIME type
-// (mime.ts), which is itself keyed on the same "final extension" rule - reusing it here avoids a third
-// copy of that parsing logic.
+// mediaKindByExtension already tells image/video apart (media.ts, display-only guess - D-143); pdf/text
+// are read off the MIME type (mime.ts), which is itself keyed on the same "final extension" rule - reusing
+// it here avoids a third copy of that parsing logic.
 export function previewKindFor(filename: string): PreviewKind {
-  const strategy = stripStrategyFor(filename);
-  if (strategy === "image") return "image";
-  if (strategy === "video") return "video";
+  const kind = mediaKindByExtension(filename);
+  if (kind === "image") return "image";
+  if (kind === "video") return "video";
   const mime = mimeTypeFor(filename);
   if (mime === "application/pdf") return "pdf";
   if (mime === "text/plain") return "text";
@@ -71,7 +77,7 @@ export function previewKindFor(filename: string): PreviewKind {
 export function buildPreviewContext(
   record: ResolvedFile,
   displayPath: string,
-  urls: { previewUrl: string; directUrl: string },
+  urls: { previewUrl: string; directUrl: string; thumbUrl: string | null; uploaderAvatarUrl: string | null },
 ): PreviewContext {
   return {
     id: record.id,
@@ -84,12 +90,16 @@ export function buildPreviewContext(
     createdAt: record.createdAt,
     previewUrl: urls.previewUrl,
     directUrl: urls.directUrl,
+    thumbUrl: urls.thumbUrl,
     kind: previewKindFor(record.name),
     mimeType: mimeTypeFor(record.name),
     inline: isInlineAllowed(record.name),
     width: record.width,
     height: record.height,
     durationSeconds: record.durationSeconds,
+    uploaderName: record.uploaderName,
+    // D-92/D-136: null exactly when uploaderName is null - never render an avatar for an "Unknown" upload.
+    uploaderAvatarUrl: record.uploaderName === null ? null : urls.uploaderAvatarUrl,
     textPreview: record.textPreview,
     // Always false here - this builder feeds the anonymous document copy (D-75). Only the API handler,
     // given a Bearer it can check against ownerSub/superuser/ACL, may set this true.

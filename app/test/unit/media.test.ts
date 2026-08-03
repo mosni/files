@@ -1,51 +1,61 @@
 import { describe, expect, it } from "vitest";
-import { stripStrategyFor } from "../../src/lib/media.ts";
+import { mediaKindByExtension } from "../../src/lib/media.ts";
 
-describe("stripStrategyFor() - classifies filenames for metadata-stripping strategy (D-60)", () => {
+// mediaKindByExtension() is a display-only guess (previewContext.ts's kind, probe.ts's probe routing) -
+// it is deliberately NOT the security-relevant classifier any more. See storage/strip.ts's content-based
+// classifier for what actually decides whether metadata stripping applies (D-143).
+describe("mediaKindByExtension() - extension-based media-kind guess for display/probe routing", () => {
   it.each(["jpg", "jpeg", "png", "webp", "gif"])("classifies .%s as image", (ext) => {
-    expect(stripStrategyFor(`photo.${ext}`)).toBe("image");
+    expect(mediaKindByExtension(`photo.${ext}`)).toBe("image");
   });
 
   it.each(["mp4", "webm"])("classifies .%s as video", (ext) => {
-    expect(stripStrategyFor(`video.${ext}`)).toBe("video");
+    expect(mediaKindByExtension(`video.${ext}`)).toBe("video");
   });
 
   it("matching is case-insensitive", () => {
-    expect(stripStrategyFor("photo.jpg")).toBe("image");
-    expect(stripStrategyFor("photo.JPG")).toBe("image");
-    expect(stripStrategyFor("photo.Jpeg")).toBe("image");
+    expect(mediaKindByExtension("photo.jpg")).toBe("image");
+    expect(mediaKindByExtension("photo.JPG")).toBe("image");
+    expect(mediaKindByExtension("photo.Jpeg")).toBe("image");
   });
 
   it("video extensions are also case-insensitive", () => {
-    expect(stripStrategyFor("video.MP4")).toBe("video");
-    expect(stripStrategyFor("video.WebM")).toBe("video");
+    expect(mediaKindByExtension("video.MP4")).toBe("video");
+    expect(mediaKindByExtension("video.WebM")).toBe("video");
   });
 
-  it("classifies .pdf as none - documented gap, neither sharp nor ffmpeg can strip PDF metadata", () => {
-    expect(stripStrategyFor("document.pdf")).toBe("none");
+  it("classifies .pdf as none - not an image or video extension", () => {
+    expect(mediaKindByExtension("document.pdf")).toBe("none");
   });
 
   it("classifies unrelated extensions as none", () => {
-    expect(stripStrategyFor("notes.txt")).toBe("none");
+    expect(mediaKindByExtension("notes.txt")).toBe("none");
   });
 
   it("double extensions resolve on the FINAL extension only", () => {
-    expect(stripStrategyFor("archive.tar.gz")).toBe("none");
-    expect(stripStrategyFor("photo.backup.png")).toBe("image");
+    expect(mediaKindByExtension("archive.tar.gz")).toBe("none");
+    expect(mediaKindByExtension("photo.backup.png")).toBe("image");
   });
 
   it("a purely leading-dot name has no extension by this rule - fails closed, not open", () => {
-    expect(stripStrategyFor(".jpg")).toBe("none");
+    expect(mediaKindByExtension(".jpg")).toBe("none");
   });
 
   it("no extension at all is none", () => {
-    expect(stripStrategyFor("README")).toBe("none");
+    expect(mediaKindByExtension("README")).toBe("none");
   });
 
   it("does not throw on empty or dots-only filenames", () => {
-    expect(() => stripStrategyFor("")).not.toThrow();
-    expect(stripStrategyFor("")).toBe("none");
-    expect(() => stripStrategyFor("..")).not.toThrow();
-    expect(stripStrategyFor("..")).toBe("none");
+    expect(() => mediaKindByExtension("")).not.toThrow();
+    expect(mediaKindByExtension("")).toBe("none");
+    expect(() => mediaKindByExtension("..")).not.toThrow();
+    expect(mediaKindByExtension("..")).toBe("none");
+  });
+
+  it("this is NOT the strip classifier - an extension that lies is not this module's concern (D-143)", () => {
+    // storage/strip.ts's content-based classifier is what must still strip a GPS-bearing JPEG named
+    // "photo.txt" - this module only answers "what does the name suggest" and is expected to say "none"
+    // here, which is fine, because nothing security-relevant reads this function any more.
+    expect(mediaKindByExtension("photo.txt")).toBe("none");
   });
 });

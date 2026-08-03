@@ -59,12 +59,14 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
     collectionProtection?: Protection;
     ownerSub?: string | null;
     content?: string;
+    withThumb?: boolean;
   }): Promise<{
     collectionId: string;
     collectionName: string;
     name: string;
     linkToken: string;
     fileId: string;
+    thumbName: string | null;
   }> {
     const name = opts.name ?? `file-${randomUUID()}.txt`;
     const collection = await createCollection({
@@ -81,17 +83,26 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
       ownerSub: opts.ownerSub ?? "user:no-owner-placeholder",
       uploaderSub: opts.ownerSub ?? "user:owner",
       protection: opts.protection,
+      uploaderName: null,
     });
     const content = opts.content ?? "content";
     const abs = path.join(root, ...diskRelPath(claimed).split("/"));
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, content);
+    // A thumbnail is a bare filename in the SAME directory as the source (D-137) - this test never runs
+    // real generation (that is storage/thumbs.test.ts's job), it only needs real bytes at the path
+    // thumbRelPath() computes, so delivery has something real to X-Accel-Redirect at.
+    const thumbName = opts.withThumb === true ? `${claimed.id}-thumb.webp` : null;
+    if (thumbName !== null) {
+      await writeFile(path.join(path.dirname(abs), thumbName), "fake-thumbnail-bytes");
+    }
     await commitFileRow(claimed.id, {
       bytes: content.length,
       width: null,
       height: null,
       durationSeconds: null,
       textPreview: null,
+      thumbName,
     });
     return {
       collectionId: collection.id,
@@ -99,6 +110,7 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
       name,
       linkToken: claimed.linkToken,
       fileId: claimed.id,
+      thumbName,
     };
   }
 
@@ -371,6 +383,97 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
       const res = await get(`/s/${fileId}?exp=${exp}&sig=${sig}`, { authorization: "Bearer garbage-never-checked" });
       expect(res.statusCode).toBe(200);
       expect(res.headers["set-cookie"]).toBeUndefined();
+    });
+  });
+
+  // D-137: "a thumbnail of a `private` image IS that image" - every gating rule the source enforces
+  // applies identically to its thumbnail, via the exact same delivery machinery under a /thumb prefix.
+  describe("thumbnail delivery (/thumb/*, /thumb/t/:token, /thumb/s/:id) - D-137", () => {
+    it("serves a public file's thumbnail via X-Accel-Redirect at the THUMBNAIL's own path, not the source's", async () => {
+      const { collectionName, name, thumbName } = await seed({ protection: "public", withThumb: true });
+      const res = await get(`/thumb/${collectionName}/${name}`);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toBe("");
+      expect(res.headers["x-accel-redirect"]).toMatch(new RegExp(`/internal-storage/2026/07/${thumbName}$`));
+      expect(res.headers["content-type"]).toBe("image/webp");
+      expect(res.headers["content-disposition"]).toBe("inline");
+      expect(res.headers["x-content-type-options"]).toBe("nosniff");
+      expect(res.headers["referrer-policy"]).toBe("no-referrer");
+    });
+
+    it("404s when the file has no thumbnail at all - never falls back to the full original", async () => {
+      const { collectionName, name } = await seed({ protection: "public", withThumb: false });
+      expect((await get(`/thumb/${collectionName}/${name}`)).statusCode).toBe(404);
+    });
+
+    it("404s (not 403) for a secret file's thumbnail at its readable path (same D-59 rule as the source)", async () => {
+      const { collectionName, name } = await seed({ protection: "secret", withThumb: true });
+      expect((await get(`/thumb/${collectionName}/${name}`)).statusCode).toBe(404);
+    });
+
+    it("serves a secret file's thumbnail by token even though its readable path 404s", async () => {
+      const { linkToken, thumbName } = await seed({ protection: "secret", withThumb: true });
+      const res = await get(`/thumb/t/${linkToken}`);
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["x-accel-redirect"]).toMatch(new RegExp(`/internal-storage/2026/07/${thumbName}$`));
+    });
+
+    it("404s an unknown thumbnail token", async () => {
+      expect((await get("/thumb/t/ZZZZZ")).statusCode).toBe(404);
+    });
+
+    it("a PRIVATE file's thumbnail 401s anonymously, 403s a wrong sub, 200s the owner", async () => {
+      const { collectionName, name } = await seed({
+        protection: "private",
+        ownerSub: "user:owner",
+        withThumb: true,
+      });
+      expect((await get(`/thumb/${collectionName}/${name}`)).statusCode).toBe(401);
+
+      verifyMock.mockResolvedValue({ sub: "user:other", roles: [] } as never);
+      expect((await get(`/thumb/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(403);
+
+      verifyMock.mockResolvedValue({ sub: "user:owner", roles: [] } as never);
+      expect((await get(`/thumb/${collectionName}/${name}`, { authorization: "Bearer x" })).statusCode).toBe(200);
+    });
+
+    it("a collection-gated file's thumbnail 404s at its readable path while its /thumb/t/<token> still delivers", async () => {
+      const { collectionName, name, linkToken } = await seed({
+        protection: "public",
+        collectionProtection: "secret",
+        withThumb: true,
+      });
+      expect((await get(`/thumb/${collectionName}/${name}`)).statusCode).toBe(404);
+      expect((await get(`/thumb/t/${linkToken}`)).statusCode).toBe(200);
+    });
+
+    it("serves a private file's thumbnail given a valid, unexpired /thumb/s/:id signature - no Bearer needed", async () => {
+      const { fileId, thumbName } = await seed({ protection: "private", ownerSub: "user:owner", withThumb: true });
+      const exp = Math.floor(Date.now() / 1000) + 300;
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+
+      const res = await get(`/thumb/s/${fileId}?exp=${exp}&sig=${sig}`);
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["x-accel-redirect"]).toMatch(new RegExp(`/internal-storage/2026/07/${thumbName}$`));
+    });
+
+    it("404s an expired or tampered /thumb/s/:id signature, same as the full-bytes route", async () => {
+      const { fileId } = await seed({ protection: "private", ownerSub: "user:owner", withThumb: true });
+      const expiredExp = Math.floor(Date.now() / 1000) - 10;
+      const expiredSig = signDelivery(config.deliverySigningSecret, fileId, expiredExp);
+      expect((await get(`/thumb/s/${fileId}?exp=${expiredExp}&sig=${expiredSig}`)).statusCode).toBe(404);
+
+      const exp = Math.floor(Date.now() / 1000) + 300;
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+      const tampered = sig.slice(0, -1) + (sig.at(-1) === "A" ? "B" : "A");
+      expect((await get(`/thumb/s/${fileId}?exp=${exp}&sig=${tampered}`)).statusCode).toBe(404);
+    });
+
+    it("a signed thumbnail request for a file with no thumbnail 404s rather than serving the original", async () => {
+      const { fileId } = await seed({ protection: "private", ownerSub: "user:owner", withThumb: false });
+      const exp = Math.floor(Date.now() / 1000) + 300;
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+      expect((await get(`/thumb/s/${fileId}?exp=${exp}&sig=${sig}`)).statusCode).toBe(404);
     });
   });
 });

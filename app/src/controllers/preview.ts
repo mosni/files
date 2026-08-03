@@ -8,7 +8,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
 import { isSuperuser } from "../lib/roles.ts";
-import { buildFileUrls } from "../lib/fileUrls.ts";
+import { buildFileUrls, buildThumbUrl } from "../lib/fileUrls.ts";
 import { safeSegments } from "../lib/paths.ts";
 import { readablePathResolves } from "../lib/protection.ts";
 import { buildPreviewContext, previewKindFor, type PreviewContext } from "../lib/previewContext.ts";
@@ -114,9 +114,26 @@ async function displayPathFor(record: ResolvedFile): Promise<string[]> {
   return [...collectionSegments, record.name];
 }
 
+// D-137/D-136: bundles buildFileUrls with its thumbnail and avatar counterparts so every PreviewContext
+// call site builds every URL the same way, rather than three copies of the same null-guard logic.
+function previewUrlsFor(
+  config: Config,
+  record: ResolvedFile,
+  segments: readonly string[],
+): { previewUrl: string; directUrl: string; thumbUrl: string | null; uploaderAvatarUrl: string | null } {
+  return {
+    ...buildFileUrls(config, record.effectiveProtection, segments, record.linkToken),
+    thumbUrl: buildThumbUrl(config, record.effectiveProtection, segments, record.linkToken, record.thumbName !== null),
+    // D-92/D-136: files.-relative always - never auth.mosni.dev/avatar/<sub> directly, which would put the
+    // raw sub in an <img src> on a public page. buildPreviewContext nulls this again when uploaderName is
+    // null, so this unconditional construction is safe even for a file with no captured name.
+    uploaderAvatarUrl: `${config.appOrigin}/api/avatar/${record.id}`,
+  };
+}
+
 async function sendDocument(reply: FastifyReply, config: Config, record: ResolvedFile): Promise<void> {
   const segments = await displayPathFor(record);
-  const urls = buildFileUrls(config, record.effectiveProtection, segments, record.linkToken);
+  const urls = previewUrlsFor(config, record, segments);
   const ctx = buildPreviewContext(record, segments.join("/"), urls);
   // D-72/D-75: a private file's document reveals nothing to an anonymous requester - no OG, no embedded
   // context, not even the filename. Only the API (given a Bearer) may describe it. Gated on the
@@ -212,14 +229,24 @@ async function hasElevatedAccess(
   );
 }
 
-// D-84: only an authenticated, authorized request for a `private` file gets a signed directUrl - never
-// the anonymous embedded document (D-75 stands: it reveals nothing). Gated on the EFFECTIVE level (D-96):
-// a file gated only by its collection needs the same signed-URL treatment as one stored private itself.
+// D-84/D-137/D-136: only an authenticated, authorized request for a `private` file gets a signed directUrl
+// (and, when a thumbnail/avatar exist, signed thumbUrl/uploaderAvatarUrl too) - never the anonymous
+// embedded document (D-75 stands: it reveals nothing). Gated on the EFFECTIVE level (D-96): a file gated
+// only by its collection needs the same signed-URL treatment as one stored private itself.
 function withSignedDirectUrl(ctx: PreviewContext, config: Config, record: ResolvedFile): PreviewContext {
   if (record.effectiveProtection !== "private") return ctx;
   const expiresAt = Math.floor(Date.now() / 1000) + config.deliveryUrlTtlSeconds;
   const sig = signDelivery(config.deliverySigningSecret, record.id, expiresAt);
-  return { ...ctx, directUrl: `${config.dlOrigin}/s/${record.id}?exp=${expiresAt}&sig=${sig}` };
+  return {
+    ...ctx,
+    directUrl: `${config.dlOrigin}/s/${record.id}?exp=${expiresAt}&sig=${sig}`,
+    thumbUrl:
+      record.thumbName === null ? null : `${config.dlOrigin}/thumb/s/${record.id}?exp=${expiresAt}&sig=${sig}`,
+    // A browser <img> cannot attach a Bearer to the avatar proxy either - same fix, same signature (it
+    // signs only the file id, generic to whatever resource is asking).
+    uploaderAvatarUrl:
+      ctx.uploaderAvatarUrl === null ? null : `${config.appOrigin}/api/avatar/${record.id}?exp=${expiresAt}&sig=${sig}`,
+  };
 }
 
 // The context an already-authorized owner sees: current display path, current URLs (which change shape
@@ -234,7 +261,7 @@ function withSignedDirectUrl(ctx: PreviewContext, config: Config, record: Resolv
 export async function ownerContextFor(config: Config, record: FileRecord): Promise<PreviewContext> {
   const resolved = await resolveEffective(record);
   const segments = await displayPathFor(resolved);
-  const urls = buildFileUrls(config, resolved.effectiveProtection, segments, record.linkToken);
+  const urls = previewUrlsFor(config, resolved, segments);
   const ctx: PreviewContext = {
     ...buildPreviewContext(resolved, segments.join("/"), urls),
     isOwner: true,
@@ -264,7 +291,7 @@ async function sendContext(
   }
 
   const segments = await displayPathFor(record);
-  const urls = buildFileUrls(config, record.effectiveProtection, segments, record.linkToken);
+  const urls = previewUrlsFor(config, record, segments);
   const displayPath = segments.join("/");
 
   const ctx = buildPreviewContext(record, displayPath, urls);
@@ -382,7 +409,7 @@ export async function oembedForUrl(
   }
 
   const displaySegments = await displayPathFor(record);
-  const urls = buildFileUrls(config, record.effectiveProtection, displaySegments, record.linkToken);
+  const urls = previewUrlsFor(config, record, displaySegments);
   const ctx = buildPreviewContext(record, displaySegments.join("/"), urls);
   const isPhoto = previewKindFor(record.name) === "image" && ctx.width !== null && ctx.height !== null;
 

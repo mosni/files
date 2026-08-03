@@ -9,10 +9,10 @@ import { stripInPlace } from "../../src/storage/strip.ts";
 
 const execFileAsync = promisify(execFile);
 
-// D-60: images via sharp, video containers via ffmpeg (stream-copy only). Against real sharp/ffmpeg
-// (D-45's whole rationale - a native module's behavior is exactly the class of thing that must be
-// exercised, not assumed).
-describe("stripInPlace() (D-60)", () => {
+// D-60/D-143: images via sharp, video containers via ffmpeg (stream-copy only), classified from the
+// BYTES - never the filename (D-143). Against real sharp/ffmpeg (D-45's whole rationale - a native
+// module's behavior is exactly the class of thing that must be exercised, not assumed).
+describe("stripInPlace() (D-60/D-143)", () => {
   let dir: string;
 
   beforeAll(async () => {
@@ -49,6 +49,35 @@ describe("stripInPlace() (D-60)", () => {
     expect(secondResult).toBe(false);
   });
 
+  // D-143's core claim: the extension is never consulted, so it cannot lie its way out of stripping. A
+  // GPS-bearing JPEG named "photo.txt" - or with no extension at all - is exactly the case the OLD
+  // extension-allowlist design silently skipped (stripStrategyFor("photo.txt") === "none").
+  it("strips a GPS-bearing JPEG named 'photo.txt' - the extension never decides (D-143)", async () => {
+    const lyingPath = path.join(dir, "photo.txt");
+    await sharp({ create: { width: 10, height: 10, channels: 3, background: { r: 1, g: 2, b: 3 } } })
+      .jpeg()
+      .withExif({ IFD3: { GPSLatitude: "1/1 0/1 0/1", GPSLatitudeRef: "N" } })
+      .toFile(lyingPath);
+
+    expect((await sharp(lyingPath).metadata()).exif).toBeDefined();
+    const result = await stripInPlace(lyingPath);
+    expect(result).toBe(true);
+    expect((await sharp(lyingPath).metadata()).exif).toBeUndefined();
+  });
+
+  it("strips a GPS-bearing JPEG with NO extension at all (D-143)", async () => {
+    const noExtPath = path.join(dir, "photo-no-extension");
+    await sharp({ create: { width: 10, height: 10, channels: 3, background: { r: 4, g: 5, b: 6 } } })
+      .jpeg()
+      .withExif({ IFD3: { GPSLatitude: "2/1 0/1 0/1", GPSLatitudeRef: "N" } })
+      .toFile(noExtPath);
+
+    expect((await sharp(noExtPath).metadata()).exif).toBeDefined();
+    const result = await stripInPlace(noExtPath);
+    expect(result).toBe(true);
+    expect((await sharp(noExtPath).metadata()).exif).toBeUndefined();
+  });
+
   it("removes container-level metadata from an mp4 via stream copy, without re-encoding (D-20)", async () => {
     const mp4Path = path.join(dir, "video.mp4");
     await execFileAsync("ffmpeg", [
@@ -75,6 +104,47 @@ describe("stripInPlace() (D-60)", () => {
     expect(probeAfter.streams[0].bit_rate).toBe(probeBefore.streams[0].bit_rate);
   });
 
+  it("strips metadata from a .mov carrying GPS (D-143) - undetected by the old extension allowlist", async () => {
+    const movPath = path.join(dir, "iphone-clip.mov");
+    await execFileAsync("ffmpeg", [
+      "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=64x64:rate=5",
+      "-metadata", "location=+51.5074-000.1278/", // the GPS ISO 6709 tag an iPhone writes
+      "-c:v", "libx264", "-b:v", "500k", "-pix_fmt", "yuv420p", "-f", "mov", movPath,
+    ]);
+
+    const probeBefore = await ffprobe(movPath);
+    expect(probeBefore.format.tags.location).toBeDefined();
+
+    const result = await stripInPlace(movPath);
+    expect(result).toBe(true);
+
+    const probeAfter = await ffprobe(movPath);
+    expect(probeAfter.format.tags.location).toBeUndefined();
+    expect(probeAfter.streams[0].codec_name).toBe(probeBefore.streams[0].codec_name);
+  });
+
+  it("strips metadata from a .mkv carrying GPS (D-143) - undetected by the old extension allowlist", async () => {
+    const mkvPath = path.join(dir, "clip.mkv");
+    await execFileAsync("ffmpeg", [
+      "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=64x64:rate=5",
+      "-metadata", "comment=secret-gps-location",
+      "-c:v", "libx264", "-b:v", "500k", "-pix_fmt", "yuv420p", "-f", "matroska", mkvPath,
+    ]);
+
+    // Matroska surfaces simple tags UPPERCASE via ffprobe ("COMMENT", not "comment" as mp4 does) - verified
+    // empirically. hasNonBenignTags() in strip.ts lowercases keys before comparing, so this casing
+    // difference does not affect stripping itself, only this test's own assertion.
+    const probeBefore = await ffprobe(mkvPath);
+    expect(probeBefore.format.tags.COMMENT).toBe("secret-gps-location");
+
+    const result = await stripInPlace(mkvPath);
+    expect(result).toBe(true);
+
+    const probeAfter = await ffprobe(mkvPath);
+    expect(probeAfter.format.tags.COMMENT).toBeUndefined();
+    expect(probeAfter.streams[0].codec_name).toBe(probeBefore.streams[0].codec_name);
+  });
+
   it("leaves an animated GIF with no detectable metadata untouched (more than one frame survives)", async () => {
     // Empirical finding (session finding, not an assumption per D-55): this repo's pinned sharp/libvips
     // version does not read or write exif/icc/xmp for GIF at all, on either the read or write side -
@@ -96,14 +166,15 @@ describe("stripInPlace() (D-60)", () => {
     expect(after.pages).toBe(before.pages);
   });
 
-  it("validates the animated write recipe directly: {animated:true} + .gif() preserves every frame on an actual rewrite", async () => {
+  it("validates the animated write recipe directly: {animated:true} + toFormat('gif') preserves every frame on an actual rewrite", async () => {
     // Companion to the test above. Because sharp cannot be driven to report GIF metadata (confirmed
     // empirically), stripInPlace()'s public, inspect-gated API can never be forced into its GIF rewrite
     // branch through a black-box fixture. This test instead validates the exact sharp recipe
-    // storage/strip.ts's stripImage() uses (read with `{ animated: true }`, write via `.gif()`) against
-    // the real risk D-60 calls out by name: omitting `animated: true` flattens a multi-frame GIF/WebP to
-    // its first frame. If this ever regresses, an eventual GIF rewrite (once triggered, by this sharp
-    // version or a future one that does detect GIF metadata) would silently lose every frame but one.
+        // storage/strip.ts's stripImage() uses (read with `{ animated: true }`, write via `.toFormat()`)
+    // against the real risk D-60 calls out by name: omitting `animated: true` flattens a multi-frame
+    // GIF/WebP to its first frame. If this ever regresses, an eventual GIF rewrite (once triggered, by
+    // this sharp version or a future one that does detect GIF metadata) would silently lose every frame
+    // but one.
     const gifPath = path.join(dir, "anim-for-recipe-check.gif");
     await execFileAsync("ffmpeg", [
       "-y", "-f", "lavfi", "-i", "testsrc=duration=1.5:size=20x20:rate=2", gifPath,
@@ -112,27 +183,60 @@ describe("stripInPlace() (D-60)", () => {
     expect(before.pages).toBeGreaterThan(1);
 
     const rewritten = path.join(dir, "anim-rewritten.gif");
-    await sharp(gifPath, { animated: true }).gif().toFile(rewritten);
+    await sharp(gifPath, { animated: true }).toFormat("gif").toFile(rewritten);
 
     const after = await sharp(rewritten, { animated: true }).metadata();
     expect(after.pages).toBe(before.pages);
   });
 
+  it("strips a TIFF (D-143's named leak format) if this sharp build supports round-tripping it", async () => {
+    // Named explicitly in D-143 alongside .heic/.avif as a format the old extension allowlist silently
+    // skipped. tiff-dev is present in this build (Dockerfile/docker-compose.verify.yml), so this asserts
+    // real behaviour rather than skipping - unlike heic/avif, whose encoder support in this minimal Alpine
+    // libvips build is not guaranteed, this format's presence IS guaranteed here.
+    //
+    // Empirical finding (D-55 - checked, not assumed): this sharp/libvips build does NOT embed EXIF into a
+    // TIFF via withExif() at all (metadata().exif comes back undefined after write, verified directly
+    // against this container) - the same class of gap the GIF test above already documents for a
+    // different format/tag combination. An embedded ICC profile DOES round-trip for TIFF in this build
+    // (verified directly), and hasImageMetadata() treats icc/exif/iptc/xmp uniformly, so this exercises the
+    // exact same code path stripInPlace() uses for any other image metadata kind.
+    const tiffPath = path.join(dir, "scan.tiff");
+    await sharp({ create: { width: 12, height: 8, channels: 3, background: { r: 9, g: 8, b: 7 } } })
+      .tiff()
+      .withMetadata({ icc: "srgb" })
+      .toFile(tiffPath);
+
+    expect((await sharp(tiffPath).metadata()).icc).toBeDefined();
+    const result = await stripInPlace(tiffPath);
+    expect(result).toBe(true);
+    expect((await sharp(tiffPath).metadata()).icc).toBeUndefined();
+  });
+
   it("on failure, cleans up the temp file, leaves the original untouched, and rejects", async () => {
-    const corruptPath = path.join(dir, "corrupt.jpg");
-    await writeFile(corruptPath, Buffer.from("not a real jpeg"));
-    const originalBytes = await readFile(corruptPath);
+    // A real container ffprobe correctly detects as VIDEO (it has a genuine video stream - classify()
+    // must not reject this file as "unknown"), but whose probed format this module has no muxer mapping
+    // for (A6.2's deliberately small, explicit map only covers mp4/mov-family/webm/matroska - the two
+    // formats this epic actually cares about, D-143). This is a real, detectable-but-unstrippable file,
+    // exactly the case A6.4 requires to fail closed - not a fabricated corrupt-bytes case, which (correctly,
+    // under content-based classification) is no longer distinguishable from "not a photo or video at all".
+    const aviPath = path.join(dir, "legacy.avi");
+    await execFileAsync("ffmpeg", [
+      "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=32x32:rate=5",
+      "-c:v", "mpeg4", "-f", "avi", aviPath,
+    ]);
+    const originalBytes = await readFile(aviPath);
 
-    await expect(stripInPlace(corruptPath)).rejects.toThrow();
+    await expect(stripInPlace(aviPath)).rejects.toThrow();
 
-    const stillThere = await readFile(corruptPath);
+    const stillThere = await readFile(aviPath);
     expect(stillThere).toEqual(originalBytes);
 
-    const tempPath = path.join(dir, ".corrupt.jpg.stripping");
+    const tempPath = path.join(dir, ".legacy.avi.stripping");
     await expect(stat(tempPath)).rejects.toThrow();
   });
 
-  it("returns false without touching disk for a strategy of 'none' (e.g. pdf, txt)", async () => {
+  it("returns false without touching disk for a non-media file (pdf, txt) - out of scope, not a gap (D-143)", async () => {
     const txtPath = path.join(dir, "notes.txt");
     await writeFile(txtPath, "hello");
     const before = await readFile(txtPath);
@@ -141,6 +245,22 @@ describe("stripInPlace() (D-60)", () => {
     expect(result).toBe(false);
 
     const after = await readFile(txtPath);
+    expect(after).toEqual(before);
+  });
+
+  it("a genuinely non-media file uploads as-is even with a LYING image extension (D-143 - the extension never decides)", async () => {
+    // Under the OLD extension-based design this file (garbage bytes named ".png") would have been
+    // classified "image" by name alone and would fail hasImageMetadata()'s sharp.metadata() call. Under
+    // content-based classification it is correctly "unknown" - not a detectable photo or video - which is
+    // exactly the same bucket a .zip or .pdf falls into, regardless of what its extension claims.
+    const lyingPath = path.join(dir, "not-really-a.png");
+    await writeFile(lyingPath, Buffer.from("just some bytes, not an image"));
+    const before = await readFile(lyingPath);
+
+    const result = await stripInPlace(lyingPath);
+    expect(result).toBe(false);
+
+    const after = await readFile(lyingPath);
     expect(after).toEqual(before);
   });
 });

@@ -97,6 +97,7 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       ownerSub: opts.ownerSub ?? "user:no-owner-placeholder",
       uploaderSub: opts.ownerSub ?? "user:owner",
       protection: opts.protection,
+      uploaderName: null,
     });
     const abs = path.join(root, ...diskRelPath(claimed).split("/"));
     await mkdir(path.dirname(abs), { recursive: true });
@@ -107,6 +108,7 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       height: opts.height ?? null,
       durationSeconds: null,
       textPreview: null,
+      thumbName: null,
     });
     return {
       collectionId: collection.id,

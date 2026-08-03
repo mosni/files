@@ -66,6 +66,7 @@ function makeFile(overrides: Partial<BrowseFile> = {}): BrowseFile {
     reason: "own",
     previewUrl: "https://files.mosni.dev/f/photo.png",
     directUrl: "https://dl.mosni.dev/photo.png",
+    thumbUrl: null,
     width: 800,
     height: 600,
     durationSeconds: null,
@@ -1086,6 +1087,41 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     const rows = container.querySelectorAll("[data-row-id]");
     expect(rows[0]!.querySelector("mosni-icon")?.getAttribute("name")).toBe("folder");
     expect(rows[1]!.querySelector("mosni-icon")?.getAttribute("name")).toBe("file");
+  });
+
+  // D-137/AC9: a row with a thumbnail renders it instead of the generic file icon; a row with none keeps
+  // the icon. The server already gated thumbUrl identically to the file itself (delivery.test.ts), so the
+  // client has nothing left to decide beyond "render what I was given, or not".
+  it("a file row with a thumbnail renders it instead of the file icon; one with none keeps the icon", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          makeResponse({
+            files: [
+              makeFile({ id: "with-thumb", reason: "public", thumbUrl: "https://dl.mosni.dev/thumb/photo.png" }),
+              makeFile({ id: "no-thumb", name: "notes.txt", reason: "public", thumbUrl: null }),
+            ],
+          }),
+        ),
+      ),
+    );
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+    });
+    await flush();
+
+    const withThumbRow = container.querySelector('[data-row-id="with-thumb"]')!;
+    const iconCell = withThumbRow.querySelector("td:first-child")!;
+    const img = iconCell.querySelector("img");
+    expect(img?.getAttribute("src")).toBe("https://dl.mosni.dev/thumb/photo.png");
+    expect(iconCell.querySelector("mosni-icon")).toBeNull();
+
+    const noThumbRow = container.querySelector('[data-row-id="no-thumb"]')!;
+    const noThumbIconCell = noThumbRow.querySelector("td:first-child")!;
+    expect(noThumbIconCell.querySelector("img")).toBeNull();
+    expect(noThumbIconCell.querySelector("mosni-icon")?.getAttribute("name")).toBe("file");
   });
 
   // AC3's "Copy link" item, the one action every viewer gets regardless of ownership (unlike the old

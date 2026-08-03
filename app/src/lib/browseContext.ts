@@ -28,6 +28,8 @@ export type BrowseFile = {
   reason: VisibilityReason;
   previewUrl: string;
   directUrl: string;
+  thumbUrl: string | null; // D-137: same gating/null-semantics as PreviewContext.thumbUrl. Null for
+  // non-images/video, a generation failure, or a pre-E5 row (D-138 - never backfilled).
   width: number | null;
   height: number | null;
   durationSeconds: number | null;

@@ -28,7 +28,7 @@ x-node-build: &node-build
     # that ships - which is not a gate. Costs one cached layer.
     RUN apk add --no-cache ffmpeg vips vips-dev build-base pkgconfig python3
     WORKDIR /repo
-    COPY package.json package-lock.json ./
+    COPY package.json package-lock.json .npmrc ./
     RUN npm ci
     COPY . .
 
@@ -100,7 +100,7 @@ services:
       dockerfile_inline: |
         FROM node:24-alpine
         WORKDIR /repo
-        COPY package.json package-lock.json ./
+        COPY package.json package-lock.json .npmrc ./
         RUN npm ci --omit=optional --ignore-scripts
         COPY e2e/mock-idp.mjs ./e2e/mock-idp.mjs
     command: ["node", "e2e/mock-idp.mjs", "9000"]
@@ -235,7 +235,7 @@ services:
       dockerfile_inline: |
         FROM mcr.microsoft.com/playwright:v1.61.1-noble
         WORKDIR /repo
-        COPY package.json package-lock.json ./
+        COPY package.json package-lock.json .npmrc ./
         RUN npm ci
         COPY . .
     working_dir: /repo

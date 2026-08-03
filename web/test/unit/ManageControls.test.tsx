@@ -18,6 +18,7 @@ function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
     createdAt: "2026-07-21T00:00:00.000Z",
     previewUrl: "https://files.mosni.dev/f/mine/photo.png",
     directUrl: "https://dl.mosni.dev/mine/photo.png",
+    thumbUrl: null,
     kind: "image",
     mimeType: "image/png",
     inline: true,
@@ -25,6 +26,8 @@ function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
     height: 600,
     durationSeconds: null,
     textPreview: null,
+    uploaderName: null,
+    uploaderAvatarUrl: null,
     isOwner: true,
     ...overrides,
   };

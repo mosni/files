@@ -402,7 +402,22 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
     <>
       <tr data-row-id={row.id}>
         <td>
-          <mosni-icon name="file" size="18" />
+          {/* D-137: a thumbnail is a display nicety, not a security boundary - the server already gated
+              row.thumbUrl identically to the file itself, so the client just renders whatever it was
+              handed. alt="" - the adjacent name link already names the file; a screen reader does not need
+              this image announced twice. */}
+          {row.thumbUrl !== null ? (
+            <img
+              src={row.thumbUrl}
+              alt=""
+              width={18}
+              height={18}
+              loading="lazy"
+              style={{ objectFit: "cover", borderRadius: 2 }}
+            />
+          ) : (
+            <mosni-icon name="file" size="18" />
+          )}
         </td>
         <td>
           {/* Hannah's call: leave a FILE's name as a full-page link - opening a file is a full page load,

@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { Redis } from "ioredis";
 import sharp from "sharp";
+
+const execFileAsync = promisify(execFile);
 
 // auth.mosni.dev is not reachable from this sandbox - there is no live IdP to test against here (unlike
 // MariaDB/redis, which are real Docker services this suite already depends on). Mocking verify() is the
@@ -469,19 +473,65 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     createdOwnerSubs.push(uploaderSub);
     mockAuthorizedAs(uploaderSub);
 
-    // sharp rejects a file with a real image extension but garbage content - stripStrategyFor("bad.png")
-    // is "image", so stripInPlace attempts to run sharp on it and fails.
-    const garbage = Buffer.from("not actually a png");
-    const createRes = await createUpload(uploaderSub, garbage.length, { filename: "bad.png" });
+    // D-143: classification is content-based, so this must be a file ffprobe genuinely detects as a video
+    // (a real video stream) but whose probed container has no entry in strip.ts's deliberately small
+    // muxer map (mp4/mov-family/webm/matroska only - the formats this epic actually cares about) - a real
+    // detected-but-unstrippable file, not garbage bytes wearing a misleading extension (which is no longer
+    // distinguishable from "not a photo or video at all" - see the test below).
+    const aviDir = await mkdtemp(path.join(os.tmpdir(), "upload-avi-fixture-"));
+    const aviPath = path.join(aviDir, "legacy.avi");
+    await execFileAsync("ffmpeg", [
+      "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=32x32:rate=5",
+      "-c:v", "mpeg4", "-f", "avi", aviPath,
+    ]);
+    const aviBytes = await readFile(aviPath);
+    await rm(aviDir, { recursive: true, force: true });
+
+    const createRes = await createUpload(uploaderSub, aviBytes.length, { filename: "legacy.avi" });
     const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
-    const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, garbage);
+    const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, aviBytes);
     expect(patchRes.status).toBe(422);
 
-    expect(await resolveByNames(["bad.png"])).toBeNull();
+    expect(await resolveByNames(["legacy.avi"])).toBeNull();
     const [rows] = await getPool().query(
       "SELECT COUNT(*) AS n FROM files WHERE collection_id = '' AND owner_sub = ?",
       [uploaderSub],
     );
     expect((rows as { n: number }[])[0]?.n).toBe(0);
+  });
+
+  it("a genuinely non-media file uploads normally even with a misleading image extension (D-143 - AC19c)", async () => {
+    const uploaderSub = `user:${randomUUID()}`;
+    createdOwnerSubs.push(uploaderSub);
+    mockAuthorizedAs(uploaderSub);
+
+    // Under the OLD extension-based design this would have been classified "image" by name alone and
+    // rejected as an unstrippable one (422). Content-based classification correctly puts it in the same
+    // "unknown, out of scope" bucket as a .zip or .pdf - the extension never decides, in either direction.
+    const notAnImage = Buffer.from("just some bytes, not a real image");
+    const createRes = await createUpload(uploaderSub, notAnImage.length, { filename: "not-really.png" });
+    const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
+    const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, notAnImage);
+    expect(patchRes.status).toBe(200);
+
+    const record = await resolveByNames(["not-really.png"]);
+    expect(record).not.toBeNull();
+  });
+
+  it("a non-media file (.zip) uploads successfully and is stored as-is - out of scope for invariant 5 (AC19c)", async () => {
+    const uploaderSub = `user:${randomUUID()}`;
+    createdOwnerSubs.push(uploaderSub);
+    mockAuthorizedAs(uploaderSub);
+
+    const zipBytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0]); // a minimal local-file-header
+    const createRes = await createUpload(uploaderSub, zipBytes.length, { filename: "archive.zip" });
+    const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
+    const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, zipBytes);
+    expect(patchRes.status).toBe(200);
+
+    const record = await resolveByNames(["archive.zip"]);
+    expect(record).not.toBeNull();
+    const onDisk = await readFile(path.join(root, diskRelPath(record!)));
+    expect(onDisk).toEqual(zipBytes);
   });
 });

@@ -305,11 +305,12 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
         ownerSub: "user:a",
         uploaderSub: "user:a",
         protection: "unlisted",
+        uploaderName: null,
       });
       const abs = path.join(root, ...diskRelPath(claimed).split("/"));
       await mkdir(path.dirname(abs), { recursive: true });
       await writeFile(abs, "bytes");
-      await commitFileRow(claimed.id, { bytes: 5, width: null, height: null, durationSeconds: null, textPreview: null });
+      await commitFileRow(claimed.id, { bytes: 5, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null });
 
       const { deletedFileIds } = await deleteCollectionRecursive(top.id);
       expect(deletedFileIds).toEqual([claimed.id]);
@@ -347,13 +348,14 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
         ownerSub: "user:a",
         uploaderSub: "user:a",
         protection: "unlisted",
+        uploaderName: null,
       });
       // resolveById() below stat()s the real bytes and self-heals (deletes the row) if they're missing -
       // matching deleteCollectionRecursive's own test just above, which writes them for the same reason.
       const abs = path.join(root, ...diskRelPath(claimed).split("/"));
       await mkdir(path.dirname(abs), { recursive: true });
       await writeFile(abs, "bytes");
-      await commitFileRow(claimed.id, { bytes: 5, width: null, height: null, durationSeconds: null, textPreview: null });
+      await commitFileRow(claimed.id, { bytes: 5, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null });
 
       const counts = await countDescendants(top.id);
       expect(counts).toEqual({ collectionCount: 2, fileCount: 1 });

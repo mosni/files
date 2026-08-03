@@ -90,6 +90,7 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
       ownerSub: opts.ownerSub === undefined ? "user:owner" : (opts.ownerSub ?? "no-owner-placeholder"),
       uploaderSub: "user:owner",
       protection: opts.protection ?? "unlisted",
+      uploaderName: null,
     });
     createdFileIds.push(claimed.id);
 
@@ -103,6 +104,7 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
       height: null,
       durationSeconds: null,
       textPreview: null,
+      thumbName: null,
     });
 
     return { id: claimed.id, diskDir, diskName: claimed.diskName, linkToken: claimed.linkToken };
@@ -131,6 +133,7 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
       ownerSub: "user:owner",
       uploaderSub: "user:owner",
       protection: "unlisted",
+      uploaderName: null,
     });
     createdFileIds.push(claimed.id);
 
@@ -191,6 +194,7 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
       ownerSub: "user:owner",
       uploaderSub: "user:owner",
       protection: "unlisted",
+      uploaderName: null,
     });
     createdFileIds.push(claimed.id);
     const abs = path.join(root, ...diskRelPath(claimed).split("/"));
@@ -203,6 +207,7 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
       height: 480,
       durationSeconds: 12.5,
       textPreview: null,
+      thumbName: null,
     });
     expect(committed.uploaderSub).toBe("user:owner");
     expect(committed.linkToken).toMatch(/^[A-Za-z0-9]{5}$/);
@@ -223,6 +228,7 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
       ownerSub: "user:owner",
       uploaderSub: "user:owner",
       protection: "unlisted",
+      uploaderName: null,
     });
     await abandonFileRow(claimed.id);
     const [rows] = await getPool().query("SELECT COUNT(*) AS n FROM files WHERE id = ?", [claimed.id]);
@@ -383,6 +389,7 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
         ownerSub: "user:owner",
         uploaderSub: "user:owner",
         protection: "unlisted",
+        uploaderName: null,
       });
       createdFileIds.push(claimed.id);
       return claimed;

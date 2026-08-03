@@ -31,12 +31,19 @@ function makeRecord(overrides: Partial<ResolvedFile> = {}): ResolvedFile {
     height: 600,
     durationSeconds: null,
     textPreview: null,
+    uploaderName: null,
+    thumbName: null,
     ...overrides,
   };
 }
 
 const displayPath = "dir/photo.png";
-const urls = { previewUrl: "https://files.mosni.dev/f/dir/photo.png", directUrl: "https://dl.mosni.dev/dir/photo.png" };
+const urls = {
+  previewUrl: "https://files.mosni.dev/f/dir/photo.png",
+  directUrl: "https://dl.mosni.dev/dir/photo.png",
+  thumbUrl: null as string | null,
+  uploaderAvatarUrl: "https://files.mosni.dev/api/avatar/file0000000000id",
+};
 
 describe("humanSize() - binary units, 1 decimal place", () => {
   it("renders plain bytes below 1 KiB with no decimal", () => {
@@ -90,6 +97,7 @@ describe("buildPreviewContext()", () => {
       createdAt: "2026-07-21T12:00:00.000Z",
       previewUrl: urls.previewUrl,
       directUrl: urls.directUrl,
+      thumbUrl: null,
       kind: "image",
       mimeType: "image/png",
       inline: true,
@@ -97,6 +105,8 @@ describe("buildPreviewContext()", () => {
       height: 600,
       durationSeconds: null,
       textPreview: null,
+      uploaderName: null,
+      uploaderAvatarUrl: null,
       isOwner: false,
     });
   });
@@ -118,6 +128,24 @@ describe("buildPreviewContext()", () => {
   it("isOwner is false even when the record has an ownerSub", () => {
     const ctx = buildPreviewContext(makeRecord({ ownerSub: "someone" }), displayPath, urls);
     expect(ctx.isOwner).toBe(false);
+  });
+
+  it("maps thumbUrl straight through from urls (D-137)", () => {
+    const withThumb = { ...urls, thumbUrl: "https://dl.mosni.dev/thumb/dir/photo.png" };
+    const ctx = buildPreviewContext(makeRecord(), displayPath, withThumb);
+    expect(ctx.thumbUrl).toBe("https://dl.mosni.dev/thumb/dir/photo.png");
+  });
+
+  it("maps uploaderName straight through, and uploaderAvatarUrl alongside it (D-136)", () => {
+    const ctx = buildPreviewContext(makeRecord({ uploaderName: "Hannah" }), displayPath, urls);
+    expect(ctx.uploaderName).toBe("Hannah");
+    expect(ctx.uploaderAvatarUrl).toBe(urls.uploaderAvatarUrl);
+  });
+
+  it("uploaderAvatarUrl is null whenever uploaderName is null - never an avatar with no name (D-92/D-136)", () => {
+    const ctx = buildPreviewContext(makeRecord({ uploaderName: null }), displayPath, urls);
+    expect(ctx.uploaderName).toBeNull();
+    expect(ctx.uploaderAvatarUrl).toBeNull();
   });
 
   it("carries a non-allowlisted extension through as kind other, inline false", () => {

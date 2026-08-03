@@ -13,6 +13,7 @@ import { renderToString } from "react-dom/server";
 import type { PreviewContext } from "../lib/previewContext.ts";
 import { describeFile } from "../lib/previewContext.ts";
 import type { CollectionLocation } from "../lib/browseContext.ts";
+import { thumbDimensionsFor } from "../lib/thumbs.ts";
 
 const SITE_NAME = "Hannah's File Drop";
 
@@ -74,10 +75,19 @@ function MinimalHead() {
 }
 
 function FullHead({ ctx, appOrigin }: { ctx: PreviewContext; appOrigin: string }) {
-  const { name, previewUrl, directUrl, kind, mimeType, protection, width, height, durationSeconds } = ctx;
+  const { name, previewUrl, directUrl, thumbUrl, kind, mimeType, protection, width, height, durationSeconds } = ctx;
   const description = describeFile(ctx);
   // unlisted/secret must never enter a search index (D-59) - that is the level's entire purpose.
   const robots = protection === "public" ? "index, follow" : "noindex, nofollow";
+
+  // B2/D-137: og:image/twitter:image prefer the thumbnail when one exists, falling back to directUrl for
+  // a pre-E5 file (D-138: never backfilled). og:image:width/height MUST then describe the THUMBNAIL, not
+  // the source - emitting the source's real dimensions alongside a thumbnail URL is exactly the mismatch
+  // that makes Discord render a bare link instead of a card (see lib/thumbs.ts's thumbDimensionsFor).
+  const imageUrl = thumbUrl ?? directUrl;
+  const imageDimensions =
+    thumbUrl !== null ? (thumbDimensionsFor(width, height) ?? { width: null, height: null }) : { width, height };
+  const imageType = thumbUrl !== null ? "image/webp" : mimeType;
 
   return (
     <>
@@ -96,11 +106,15 @@ function FullHead({ ctx, appOrigin }: { ctx: PreviewContext; appOrigin: string }
 
       {kind === "image" && (
         <>
-          <meta property="og:image" content={directUrl} />
-          <meta property="og:image:secure_url" content={directUrl} />
-          <meta property="og:image:type" content={mimeType} />
-          {width !== null && <meta property="og:image:width" content={String(width)} />}
-          {height !== null && <meta property="og:image:height" content={String(height)} />}
+          <meta property="og:image" content={imageUrl} />
+          <meta property="og:image:secure_url" content={imageUrl} />
+          <meta property="og:image:type" content={imageType} />
+          {imageDimensions.width !== null && (
+            <meta property="og:image:width" content={String(imageDimensions.width)} />
+          )}
+          {imageDimensions.height !== null && (
+            <meta property="og:image:height" content={String(imageDimensions.height)} />
+          )}
           <meta property="og:image:alt" content={name} />
         </>
       )}
@@ -123,7 +137,7 @@ function FullHead({ ctx, appOrigin }: { ctx: PreviewContext; appOrigin: string }
       {kind === "image" ? (
         <>
           <meta name="twitter:card" content="summary_large_image" />
-          <meta name="twitter:image" content={directUrl} />
+          <meta name="twitter:image" content={imageUrl} />
           <meta name="twitter:image:alt" content={name} />
         </>
       ) : (

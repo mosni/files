@@ -35,6 +35,7 @@ type BrowseResponse = {
     reason: string;
     previewUrl: string;
     directUrl: string;
+    thumbUrl: string | null;
   }[];
   nextOffset: number | null;
   canUpload: boolean;
@@ -122,7 +123,13 @@ describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scop
     return collection;
   }
 
-  async function seedFile(opts: { collectionId: string; ownerSub: string; protection: Protection; name?: string }) {
+  async function seedFile(opts: {
+    collectionId: string;
+    ownerSub: string;
+    protection: Protection;
+    name?: string;
+    withThumb?: boolean;
+  }) {
     const name = opts.name ?? `f-${randomUUID()}.txt`;
     const claimed = await claimFileRow({
       collectionId: opts.collectionId,
@@ -132,11 +139,16 @@ describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scop
       ownerSub: opts.ownerSub,
       uploaderSub: opts.ownerSub,
       protection: opts.protection,
+      uploaderName: null,
     });
     const abs = path.join(root, ...diskRelPath(claimed).split("/"));
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, "content");
-    await commitFileRow(claimed.id, { bytes: 7, width: null, height: null, durationSeconds: null, textPreview: null });
+    const thumbName = opts.withThumb === true ? `${claimed.id}-thumb.webp` : null;
+    if (thumbName !== null) {
+      await writeFile(path.join(path.dirname(abs), thumbName), "fake-thumbnail-bytes");
+    }
+    await commitFileRow(claimed.id, { bytes: 7, width: null, height: null, durationSeconds: null, textPreview: null, thumbName });
     return claimed;
   }
 
@@ -195,6 +207,22 @@ describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scop
       expect(body.files.map((f) => f.id)).toContain(file.id);
       expect(body.files.find((f) => f.id === file.id)?.reason).toBe("public");
       expect(body.files.find((f) => f.id === file.id)?.effectiveProtection).toBe("public");
+    });
+
+    it("a listed row's thumbUrl reflects whether it has a thumbnail (D-137) - null for a pre-E5/non-image row", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "public" });
+      const withThumb = await seedFile({
+        collectionId: collection.id,
+        ownerSub: "user:a",
+        protection: "public",
+        withThumb: true,
+      });
+      const noThumb = await seedFile({ collectionId: collection.id, ownerSub: "user:a", protection: "public" });
+
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`);
+      const body = res.json() as BrowseResponse;
+      expect(body.files.find((f) => f.id === withThumb.id)?.thumbUrl).toContain("/thumb/");
+      expect(body.files.find((f) => f.id === noThumb.id)?.thumbUrl).toBeNull();
     });
 
     it("a file gated by its collection is absent from every anonymous listing even if stored public itself, and the target 404s without leaking the collection name (never-delete, D-100)", async () => {

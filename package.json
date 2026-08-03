@@ -28,7 +28,10 @@
     "node-addon-api": "^8.5.0",
     "node-gyp": "^11.0.0",
     "tus-js-client": "^4.0.0",
-    "react-router": "8.2.0"
+    "react-router": "8.2.0",
+    "@vidstack/react": "^0.6.15",
+    "mux.js": "^6.3.0",
+    "@zip.js/zip.js": "^2.7.0"
   },
   "devDependencies": {
     "typescript": "^5.8.0",

@@ -31,6 +31,8 @@ export type FileRecord = {
   height: number | null;
   durationSeconds: number | null; // video only
   textPreview: string | null; // .txt only
+  uploaderName: string | null; // display name from claims.name at upload (D-136). NEVER the sub (D-92).
+  thumbName: string | null; // bare filename within diskDir, or null (non-image / generation failed / pre-E5, D-137)
 };
 
 let storageRoot: string | undefined;
@@ -49,6 +51,14 @@ function getStorageRoot(): string {
 // The relative path handed to X-Accel-Redirect - the ONLY place disk layout is assembled.
 export function diskRelPath(record: Pick<FileRecord, "diskDir" | "diskName">): string {
   return `${record.diskDir}/${record.diskName}`;
+}
+
+// D-137: the thumbnail's own relative disk path, alongside diskRelPath() for the source - null when no
+// thumbnail exists (non-image/video, generation failed, or a pre-E5 row). `thumb_name` is bare and lives
+// in the SAME directory as the source (migration 004), so this is the second (and only other) disk-path
+// assembly point besides diskRelPath().
+export function thumbRelPath(record: Pick<FileRecord, "diskDir" | "thumbName">): string | null {
+  return record.thumbName === null ? null : `${record.diskDir}/${record.thumbName}`;
 }
 
 // D-82's "<YYYY>/<mm>" ingest-time disk directory, fixed forever once a file claims it. Pure and
@@ -76,10 +86,12 @@ interface FileRow extends RowDataPacket {
   height: number | null;
   duration_seconds: string | null; // mysql2 returns DECIMAL as a string
   text_preview: string | null;
+  uploader_name: string | null;
+  thumb_name: string | null;
 }
 
 const SELECT_COLUMNS =
-  "id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, uploader_sub, created_at, width, height, duration_seconds, text_preview";
+  "id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, uploader_sub, created_at, width, height, duration_seconds, text_preview, uploader_name, thumb_name";
 
 function rowToRecord(row: FileRow, bytes: number): FileRecord {
   return {
@@ -98,6 +110,8 @@ function rowToRecord(row: FileRow, bytes: number): FileRecord {
     height: row.height,
     durationSeconds: row.duration_seconds === null ? null : Number(row.duration_seconds),
     textPreview: row.text_preview,
+    uploaderName: row.uploader_name,
+    thumbName: row.thumb_name,
   };
 }
 
@@ -303,6 +317,8 @@ export async function claimFileRow(params: {
   ownerSub: string;
   uploaderSub: string;
   protection: Protection;
+  uploaderName: string | null; // D-136: claims.name at upload time, captured now since it never changes
+  // after the strip/probe/thumbnail pass. NEVER the sub (D-92).
 }): Promise<FileRecord> {
   const pool = getPool();
   const id = params.id ?? generateId();
@@ -318,8 +334,8 @@ export async function claimFileRow(params: {
     try {
       await pool.query(
         `INSERT INTO files
-          (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, uploader_sub, created_at)
-          VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'pending', ?, ?, ?)`,
+          (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, uploader_sub, created_at, uploader_name)
+          VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'pending', ?, ?, ?, ?)`,
         [
           id,
           params.collectionId,
@@ -331,6 +347,7 @@ export async function claimFileRow(params: {
           params.ownerSub,
           params.uploaderSub,
           createdAt,
+          params.uploaderName,
         ],
       );
       return {
@@ -349,6 +366,8 @@ export async function claimFileRow(params: {
         height: null,
         durationSeconds: null,
         textPreview: null,
+        uploaderName: params.uploaderName,
+        thumbName: null,
       };
     } catch (err) {
       if (isDuplicateOf(err, /link_token|uniq_link_token/)) continue; // regenerate the token and retry
@@ -374,12 +393,13 @@ export async function commitFileRow(
     height: number | null;
     durationSeconds: number | null;
     textPreview: string | null;
+    thumbName: string | null; // D-137: null for a non-image, a generation failure, or a pre-E5 file
   },
 ): Promise<FileRecord> {
   await getPool().query(
-    `UPDATE files SET bytes = ?, width = ?, height = ?, duration_seconds = ?, text_preview = ?, state = 'committed'
+    `UPDATE files SET bytes = ?, width = ?, height = ?, duration_seconds = ?, text_preview = ?, thumb_name = ?, state = 'committed'
      WHERE id = ?`,
-    [params.bytes, params.width, params.height, params.durationSeconds, params.textPreview, id],
+    [params.bytes, params.width, params.height, params.durationSeconds, params.textPreview, params.thumbName, id],
   );
   const [rows] = await getPool().query<FileRow[]>(`SELECT ${SELECT_COLUMNS} FROM files WHERE id = ?`, [id]);
   const row = rows[0];

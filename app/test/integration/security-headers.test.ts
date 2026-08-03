@@ -83,6 +83,20 @@ describe("security headers", () => {
     expect(frameAncestors).toContain("https://files.mosni.dev");
   });
 
+  // D-135 (E5): the client-side archive feature (D-133) needs to fetch() file bytes cross-origin from
+  // dl.mosni.dev. connect-src governs where our JS may READ from; script-src would govern EXECUTION - that
+  // distinction is the security boundary, so dl. must join the former and never the latter.
+  it("CSP allows dl.mosni.dev as a connect-src (D-135) but still forbids it as script-src", async () => {
+    const res = await app.inject({ method: "GET", url: "/health" });
+    const csp = res.headers["content-security-policy"] as string;
+    const connectSrc = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("connect-src"));
+    const scriptSrc = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("script-src"));
+
+    expect(connectSrc).toBeDefined();
+    expect(connectSrc).toContain("https://dl.mosni.dev");
+    expect(scriptSrc).not.toContain("dl.mosni.dev");
+  });
+
   it("CSP allows data:/blob: as img-src, for the drop zone's local thumbnail preview (F1)", async () => {
     const res = await app.inject({ method: "GET", url: "/health" });
     const csp = res.headers["content-security-policy"] as string;

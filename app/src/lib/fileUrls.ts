@@ -38,6 +38,23 @@ export function buildFileUrls(
   };
 }
 
+// D-137: a thumbnail's dl. URL, same shape family as directUrl above but under a `/thumb` prefix (a
+// SEPARATE delivery route in controllers/delivery.ts, gated identically to the source - see B1). Null
+// when the record has no thumbnail at all, so callers never construct a URL for bytes that don't exist.
+export function buildThumbUrl(
+  origins: { dlOrigin: string },
+  protection: Protection,
+  pathSegments: readonly string[],
+  linkToken: string,
+  hasThumb: boolean,
+): string | null {
+  if (!hasThumb) return null;
+  if (readablePathResolves(protection)) {
+    return `${origins.dlOrigin}/thumb/${encodeSegments(pathSegments)}`;
+  }
+  return `${origins.dlOrigin}/thumb/t/${linkToken}`;
+}
+
 // D-98: a collection's own share link, same shape as a file's previewUrl - collections have no bytes of
 // their own, so there is no equivalent of directUrl. Used by the browse API (controllers/browse.ts) for
 // each listed collection row.

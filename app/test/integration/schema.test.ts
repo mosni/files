@@ -142,6 +142,31 @@ describe("numbered migrations (storage/db.ts, D-83)", () => {
       await c.end();
     }
   });
+
+  it("records version 4 in schema_version (E5 §1.1)", async () => {
+    const c = await conn();
+    try {
+      const [rows] = await c.execute("SELECT version FROM schema_version ORDER BY version");
+      const versions = (rows as { version: number }[]).map((row) => row.version);
+      expect(versions).toEqual(expect.arrayContaining([1, 2, 3, 4]));
+    } finally {
+      await c.end();
+    }
+  });
+
+  it("files carries uploader_name and thumb_name, both nullable (D-136/D-137, no backfill per D-138)", async () => {
+    const c = await conn();
+    try {
+      const [rows] = await c.execute("DESCRIBE files");
+      const columns = rows as { Field: string; Null: string }[];
+      const uploaderName = columns.find((r) => r.Field === "uploader_name");
+      const thumbName = columns.find((r) => r.Field === "thumb_name");
+      expect(uploaderName?.Null).toBe("YES");
+      expect(thumbName?.Null).toBe("YES");
+    } finally {
+      await c.end();
+    }
+  });
 });
 
 // Wave 0.2: the migration itself only ADDs the columns (link_token defaulting to '' for every existing

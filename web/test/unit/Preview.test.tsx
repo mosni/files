@@ -20,6 +20,7 @@ function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
     createdAt: "2026-07-21T00:00:00.000Z",
     previewUrl: "https://files.mosni.dev/f/photo.png",
     directUrl: "https://dl.mosni.dev/photo.png",
+    thumbUrl: null,
     kind: "image",
     mimeType: "image/png",
     inline: true,
@@ -27,6 +28,8 @@ function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
     height: 600,
     durationSeconds: null,
     textPreview: null,
+    uploaderName: null,
+    uploaderAvatarUrl: null,
     isOwner: false,
     ...overrides,
   };
@@ -270,6 +273,41 @@ describe("PreviewPage", () => {
     await flush();
 
     expect(container.textContent).toContain("You own this file");
+  });
+
+  it("renders the uploader's name and avatar when uploaderName is present (D-136)", () => {
+    embedContext(
+      makeContext({ uploaderName: "Hannah", uploaderAvatarUrl: "https://files.mosni.dev/api/avatar/file0000000000id" }),
+    );
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/photo.png");
+
+    expect(container.textContent).toContain("Hannah");
+    const avatar = container.querySelector("img[alt='']");
+    expect(avatar?.getAttribute("src")).toBe("https://files.mosni.dev/api/avatar/file0000000000id");
+  });
+
+  it("renders no uploader block at all when uploaderName is null - never 'Unknown' (D-92/D-136)", () => {
+    embedContext(makeContext({ uploaderName: null, uploaderAvatarUrl: null }));
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/photo.png");
+
+    expect(container.textContent).not.toContain("Unknown");
+    expect(container.querySelector("img[alt='']")).toBeNull();
+  });
+
+  it("renders the uploader's name with no avatar image when uploaderAvatarUrl is null but a name exists", () => {
+    // Not a real production state today (both are set together) but the component contract should not
+    // assume they always travel as a pair.
+    embedContext(makeContext({ uploaderName: "Hannah", uploaderAvatarUrl: null }));
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/photo.png");
+
+    expect(container.textContent).toContain("Hannah");
+    expect(container.querySelector("img[alt='']")).toBeNull();
   });
 
   it("renders a plain <video controls> for kind video (not Vidstack)", () => {
