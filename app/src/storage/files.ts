@@ -461,4 +461,17 @@ export async function deleteFile(id: string): Promise<void> {
   if (absolutePath !== null) {
     await unlink(absolutePath).catch(() => {});
   }
+
+  // D-137 (E5): the thumbnail is a SECOND on-disk artifact per file, so a hard delete has to remove it
+  // too - otherwise every deleted image/video leaves an orphaned `<id>-thumb.webp` behind forever, and
+  // "a hard delete removes the row, its ACL rows, AND the bytes" (D-16) quietly stops being true. Not a
+  // serving leak (with the row gone nothing can ever hand nginx an X-Accel-Redirect for it, D-16), but it
+  // is unbounded dead disk on a box that has little to spare. Added in review session 034.
+  const thumbRel = thumbRelPath({ diskDir: row.disk_dir, thumbName: row.thumb_name });
+  if (thumbRel !== null) {
+    const thumbAbsolutePath = resolveRelPath(root, thumbRel);
+    if (thumbAbsolutePath !== null) {
+      await unlink(thumbAbsolutePath).catch(() => {});
+    }
+  }
 }

@@ -18,7 +18,20 @@ describe("embedContentSecurityPolicy() (E5 Wave H, D-140)", () => {
 
   it("widens frame-ancestors to the named platform origins, never the default 'self'", () => {
     const frameAncestors = directive("frame-ancestors");
-    expect(frameAncestors).toBe("frame-ancestors https://twitter.com https://x.com");
+    expect(frameAncestors).toBe(
+      "frame-ancestors https://twitter.com https://x.com https://discord.com " +
+        "https://canary.discord.com https://ptb.discord.com",
+    );
+  });
+
+  // A CSP origin match is exact - discord.com does not cover canary/ptb, which are the same application
+  // on separate origins. Added in review session 034 (Hannah's call: Discord is named in Wave H's own
+  // manual check, so with Twitter/X alone its player embed would simply be refused).
+  it("names each Discord origin individually, since an origin match is exact", () => {
+    const frameAncestors = directive("frame-ancestors") ?? "";
+    for (const origin of ["https://discord.com", "https://canary.discord.com", "https://ptb.discord.com"]) {
+      expect(frameAncestors).toContain(origin);
+    }
   });
 
   it("never emits a wildcard frame-ancestors", () => {

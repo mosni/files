@@ -18,7 +18,18 @@ export const CSP_DIRECTIVES = {
 // concrete, immediate consumer (`twitter:card=player`, PreviewHead.tsx). Named origins only, never a
 // wildcard - widening this list is a judgment call worth a deliberate look (flagged in the session log),
 // not something to extend casually.
-const EMBED_FRAME_ANCESTORS = ["https://twitter.com", "https://x.com"];
+//
+// Discord added in review session 034 (Hannah's call): it is named in Wave H's own manual check, and with
+// Twitter/X alone a Discord player embed would simply be refused by this header. `canary`/`ptb` are the
+// same application on separate origins - a CSP origin match is exact, so they need naming individually or
+// they are refused too.
+const EMBED_FRAME_ANCESTORS = [
+  "https://twitter.com",
+  "https://x.com",
+  "https://discord.com",
+  "https://canary.discord.com",
+  "https://ptb.discord.com",
+];
 
 function toKebabCase(directiveName: string): string {
   return directiveName.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);

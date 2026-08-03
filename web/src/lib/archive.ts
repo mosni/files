@@ -26,8 +26,41 @@ function isArchiveProgressMessage(data: unknown): data is ArchiveProgressMessage
 // G1: registration is defensive (main.tsx) - a browser with no service-worker support, or one where
 // registration failed, simply never gets a controller, so this degrades to "archive unavailable" rather
 // than a broken button.
+//
+// ⚠ This is a CAPABILITY check, not a readiness check: it is true on any browser that exposes the API,
+// including one where registration subsequently failed. Readiness is decided in downloadArchive() below,
+// which is why that function must never wait indefinitely.
 export function isArchiveSupported(): boolean {
   return typeof navigator !== "undefined" && "serviceWorker" in navigator;
+}
+
+// `navigator.serviceWorker.ready` resolves only once a registration for this scope becomes ACTIVE - if
+// registration failed (or was never attempted), it simply NEVER settles. Awaiting it bare is what left the
+// UI stuck on "Archiving 0/N…" forever with no error and no way back (found in review session 034, after
+// the module-registration bug meant registration failed on every browser). A bounded wait converts that
+// silent hang into a real, surfaced failure, which is what G1's "degrade to archive unavailable" requires.
+const WORKER_READY_TIMEOUT_MS = 10_000;
+
+async function readyController(): Promise<ServiceWorker> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error("the archive worker isn't available in this browser")),
+      WORKER_READY_TIMEOUT_MS,
+    );
+  });
+  try {
+    await Promise.race([navigator.serviceWorker.ready, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+  const controller = navigator.serviceWorker.controller;
+  if (!controller) {
+    // A genuinely first load before the service worker has started controlling this page - reload picks
+    // it up (G1's clients.claim() covers every load after the first).
+    throw new Error("the archive worker isn't controlling this page yet - reload and try again");
+  }
+  return controller;
 }
 
 // D-21/D-134: store mode only - media is already compressed, so there is nothing here for the box's own
@@ -42,13 +75,7 @@ export async function downloadArchive(
     throw new Error("service workers are not supported in this browser");
   }
 
-  await navigator.serviceWorker.ready;
-  const controller = navigator.serviceWorker.controller;
-  if (!controller) {
-    // A genuinely first load before the service worker has started controlling this page - reload picks
-    // it up (G1's clients.claim() covers every load after the first).
-    throw new Error("the archive worker isn't controlling this page yet - reload and try again");
-  }
+  const controller = await readyController();
 
   const id = crypto.randomUUID();
 

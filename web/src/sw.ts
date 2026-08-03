@@ -78,16 +78,60 @@ scope.addEventListener("message", (event) => {
   pendingArchives.set(data.id, { name: data.name, files: data.files, source: messageEvent.source });
 });
 
+// Only a transient failure is worth another attempt. A 404/403 is the server's settled answer (most often
+// a row the viewer may not see, or one deleted since the listing was fetched) - retrying it twice more
+// just delays the archive. 429 IS retryable, and matters here: dl. delivery sits behind the app's global
+// 100/min per-IP limiter (server.ts), which an archive of a large collection can genuinely trip.
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function fetchWithRetries(url: string): Promise<Response | null> {
   for (let attempt = 0; attempt < MAX_FETCH_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      // Exponential backoff. The original tight loop burned all three attempts within a few milliseconds,
+      // which against a rate limiter guaranteed every one of them failed.
+      await delay(2 ** (attempt - 1) * 500);
+    }
     try {
       const response = await fetch(url);
       if (response.ok && response.body !== null) return response;
+      if (!isRetryableStatus(response.status)) return null;
     } catch {
       // network hiccup - fall through and retry
     }
   }
   return null;
+}
+
+// ⚠ zip.js's ZipWriterStream cannot survive an ABORTED entry, and `pipeTo` aborts its destination by
+// default the moment the source errors. Verified directly against the library (review session 034): after
+// one aborted entry, `zipStream.close()` rejects AND `zipStream.readable` never ends - neither closed nor
+// errored - so the browser's download sits at "in progress" forever. That is why this pumps the body by
+// hand instead of using pipeTo, and ALWAYS closes the entry cleanly even when the source dies mid-file.
+// A truncated entry (reported to the page as failed) is a far better outcome than a hung download.
+// Returns false when the body did not arrive in full.
+async function writeEntry(body: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>): Promise<boolean> {
+  const writer = writable.getWriter();
+  const reader = body.getReader();
+  let complete = true;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await writer.write(value);
+    }
+  } catch {
+    // The fetch succeeded and the body then failed part-way through (dropped connection mid-file).
+    complete = false;
+  }
+  // Never abort - see above. A close() that throws must not escape either, or it becomes the same hang.
+  await writer.close().catch(() => {});
+  return complete;
 }
 
 function reportProgress(
@@ -112,18 +156,26 @@ function buildArchiveResponse(id: string, archive: PendingArchive): Response {
 
   void (async () => {
     let completed = 0;
-    for (const file of archive.files) {
-      const response = await fetchWithRetries(file.url);
-      if (response === null || response.body === null) {
-        // G2: skip this one file rather than aborting the whole archive - the rest still downloads.
-        failed.push(file.name);
-      } else {
-        await response.body.pipeTo(zipStream.writable(file.name));
+    try {
+      for (const file of archive.files) {
+        const response = await fetchWithRetries(file.url);
+        if (response === null || response.body === null) {
+          // G2: skip this one file rather than aborting the whole archive - the rest still downloads.
+          failed.push(file.name);
+        } else if (!(await writeEntry(response.body, zipStream.writable(file.name)))) {
+          // Arrived only partially - the entry is in the zip but truncated, so it is still reported as a
+          // file that could not be included properly.
+          failed.push(file.name);
+        }
+        completed++;
+        reportProgress(archive.source, id, completed, total, failed);
       }
-      completed++;
-      reportProgress(archive.source, id, completed, total, failed);
+    } finally {
+      // ALWAYS close, on every path. An unterminated zip stream is a download that hangs rather than one
+      // that ends - strictly worse than a short archive. close() itself can throw when an entry was left
+      // broken by a mid-stream failure above, and that must not resurface as an unhandled rejection.
+      await zipStream.close().catch(() => {});
     }
-    await zipStream.close();
   })();
 
   return new Response(zipStream.readable, {

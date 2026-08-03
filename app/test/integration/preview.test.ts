@@ -467,6 +467,34 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
     });
   });
 
+  // Review session 034: E5's unfurl half repointed og:image/twitter:image at the thumbnail (Wave B2) so
+  // consumers stop pulling the multi-MB original - and left oEmbed's own `thumbnail_url`, the field
+  // literally named "thumbnail", pointing at that original.
+  it("GET /api/oembed advertises the THUMBNAIL as thumbnail_url when one exists (D-137)", async () => {
+    const { collectionName, fileId } = await seed({
+      name: "photo.png",
+      protection: "public",
+      width: 640,
+      height: 480,
+    });
+    await getPool().query("UPDATE files SET thumb_name = ? WHERE id = ?", [`${fileId}-thumb.webp`, fileId]);
+    const previewUrl = `https://${FILES_HOST}/f/${collectionName}/photo.png`;
+
+    const res = await get(`/api/oembed?url=${encodeURIComponent(previewUrl)}&format=json`);
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.thumbnail_url).toContain("/thumb/");
+    expect(body.thumbnail_url).not.toBe(body.url); // never the full original any more
+  });
+
+  it("GET /api/oembed still falls back to directUrl as thumbnail_url for a pre-E5 file (D-138)", async () => {
+    const { collectionName } = await seed({ name: "old.png", protection: "public", width: 640, height: 480 });
+    const previewUrl = `https://${FILES_HOST}/f/${collectionName}/old.png`;
+
+    const body = (await get(`/api/oembed?url=${encodeURIComponent(previewUrl)}`)).json();
+    expect(body.thumbnail_url).toBe(body.url);
+  });
+
   it("GET /api/oembed falls back to type link for a non-image kind", async () => {
     const { collectionName } = await seed({ name: "notes.txt", protection: "public" });
     const previewUrl = `https://${FILES_HOST}/f/${collectionName}/notes.txt`;

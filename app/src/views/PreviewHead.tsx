@@ -78,12 +78,18 @@ function embedUrlFor(ctx: PreviewContext, appOrigin: string): string {
 // renders (D-72's private-only MinimalHead gate) - a secret file's display path is redacted to its bare
 // name (D-100), which the embed route's readable-path resolution would not reliably resolve back to this
 // same file, and H2 requires secret to never render there regardless.
+//
+// A thumbnail is required too (added in review session 034): the Player Card spec also mandates
+// `twitter:image` - the still shown in place of the player wherever an iframe cannot run. Emitting a
+// player card without one publishes an INVALID card, which is strictly worse than the "summary" fallback,
+// so a video with no thumbnail (a pre-E5 upload - D-138 never backfills) correctly stays on summary.
 function isPlayerEmbeddable(ctx: PreviewContext): boolean {
   return (
     ctx.kind === "video" &&
     (ctx.protection === "public" || ctx.protection === "unlisted") &&
     ctx.width !== null &&
-    ctx.height !== null
+    ctx.height !== null &&
+    ctx.thumbUrl !== null
   );
 }
 
@@ -154,6 +160,27 @@ function FullHead({ ctx, appOrigin }: { ctx: PreviewContext; appOrigin: string }
           {durationSeconds !== null && (
             <meta property="og:video:duration" content={String(Math.round(durationSeconds))} />
           )}
+          {/* D-137 amended (video thumbnails) + review session 034: a video's keyframe thumbnail was
+              being GENERATED and then used by nothing - og:image was emitted for images only, so an
+              unfurled video had no poster frame at all. og:image alongside og:video is what gives Discord
+              (and every other consumer that cannot play the video inline) a still to show. Dimensions
+              describe the THUMBNAIL, exactly as the image branch above does. Omitted entirely for a
+              pre-E5 video with no thumbnail - never falls back to directUrl here, which for a video would
+              hand a consumer a multi-MB video file in an <img> slot. */}
+          {thumbUrl !== null && (
+            <>
+              <meta property="og:image" content={thumbUrl} />
+              <meta property="og:image:secure_url" content={thumbUrl} />
+              <meta property="og:image:type" content="image/webp" />
+              {imageDimensions.width !== null && (
+                <meta property="og:image:width" content={String(imageDimensions.width)} />
+              )}
+              {imageDimensions.height !== null && (
+                <meta property="og:image:height" content={String(imageDimensions.height)} />
+              )}
+              <meta property="og:image:alt" content={name} />
+            </>
+          )}
         </>
       )}
 
@@ -174,6 +201,10 @@ function FullHead({ ctx, appOrigin }: { ctx: PreviewContext; appOrigin: string }
           <meta name="twitter:player" content={embedUrlFor(ctx, appOrigin)} />
           <meta name="twitter:player:width" content={String(width)} />
           <meta name="twitter:player:height" content={String(height)} />
+          {/* Required by the Player Card spec, not optional decoration: the still shown wherever the
+              iframe cannot run. isPlayerEmbeddable() guarantees thumbUrl is non-null here. */}
+          <meta name="twitter:image" content={imageUrl} />
+          <meta name="twitter:image:alt" content={name} />
         </>
       ) : (
         <meta name="twitter:card" content="summary" />

@@ -189,11 +189,14 @@ describe("renderPreviewHead() - image kind WITH a thumbnail (D-137)", () => {
 });
 
 describe("renderPreviewHead() - video kind", () => {
+  // thumbUrl is set because D-137 (as amended during E5 Session 1) gives VIDEOS a keyframe thumbnail
+  // too - so a thumbnail is the normal case for a video uploaded since E5, not the exception.
   const ctx = makeCtx({
     name: "clip.mp4",
     path: "dir/clip.mp4",
     kind: "video",
     mimeType: "video/mp4",
+    thumbUrl: "https://dl.mosni.dev/thumb/dir/clip.mp4",
     width: 1920,
     height: 1080,
     durationSeconds: 90,
@@ -209,8 +212,24 @@ describe("renderPreviewHead() - video kind", () => {
     expect(head).toContain('property="og:video:duration" content="90"');
   });
 
-  it("does not carry any og:image tag", () => {
-    expect(head).not.toContain("og:image");
+  // Review session 034: a video's keyframe thumbnail was generated and then used by nothing - og:image
+  // was image-only, so an unfurled video had no poster frame for any consumer that cannot play it inline.
+  it("carries og:image from the THUMBNAIL, with thumbnail dimensions, alongside og:video", () => {
+    expect(head).toContain(`property="og:image" content="${ctx.thumbUrl}"`);
+    expect(head).toContain(`property="og:image:secure_url" content="${ctx.thumbUrl}"`);
+    expect(head).toContain('property="og:image:type" content="image/webp"');
+    // 1920x1080 constrained to a 512px longest edge - the THUMBNAIL's size, never the video's.
+    expect(head).toContain('property="og:image:width" content="512"');
+    expect(head).toContain('property="og:image:height" content="288"');
+    expect(head).toContain('property="og:image:alt" content="clip.mp4"');
+  });
+
+  it("omits og:image entirely for a pre-E5 video with no thumbnail - never falls back to the video itself", () => {
+    const noThumb = renderPreviewHead(
+      makeCtx({ kind: "video", mimeType: "video/mp4", thumbUrl: null, width: 1920, height: 1080 }),
+      APP_ORIGIN,
+    );
+    expect(noThumb).not.toContain("og:image");
   });
 
   // H3 (E5 Wave H, D-140): a public/unlisted video with known dimensions now gets the "player" card,
@@ -236,8 +255,21 @@ describe("renderPreviewHead() - video kind", () => {
   });
 
   it("also uses twitter:card=player for an unlisted video (the embed route's readable path still resolves)", () => {
-    const unlistedHead = renderPreviewHead(makeCtx({ kind: "video", protection: "unlisted" }), APP_ORIGIN);
+    const unlistedHead = renderPreviewHead({ ...ctx, protection: "unlisted" }, APP_ORIGIN);
     expect(unlistedHead).toContain('name="twitter:card" content="player"');
+  });
+
+  // The Player Card spec mandates twitter:image (the still shown where the iframe cannot run), so a card
+  // emitted without one is invalid - worse than not emitting a player card at all.
+  it("carries twitter:image on the player card", () => {
+    expect(head).toContain(`name="twitter:image" content="${ctx.thumbUrl}"`);
+    expect(head).toContain('name="twitter:image:alt" content="clip.mp4"');
+  });
+
+  it("falls back to twitter:card=summary when the video has no thumbnail - a player card needs twitter:image", () => {
+    const noThumb = renderPreviewHead({ ...ctx, thumbUrl: null }, APP_ORIGIN);
+    expect(noThumb).toContain('name="twitter:card" content="summary"');
+    expect(noThumb).not.toContain("twitter:player");
   });
 
   it("falls back to twitter:card=summary when dimensions are unknown - twitter:player:width/height are mandatory", () => {

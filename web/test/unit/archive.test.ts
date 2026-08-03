@@ -75,6 +75,27 @@ describe("downloadArchive() (D-133)", () => {
     await expect(downloadArchive("name", [])).rejects.toThrow(/isn't controlling this page/);
   });
 
+  // Review session 034, from a defect Hannah hit on a real phone: the archive sat on "Archiving 0/N…"
+  // forever. `navigator.serviceWorker.ready` resolves only once a registration becomes ACTIVE - when
+  // registration FAILED it never settles at all, so awaiting it bare hung indefinitely with no error and
+  // no way back. G1 requires "degrade to archive unavailable", which means this has to be a bounded wait.
+  it("rejects rather than hanging forever when registration failed and `ready` never settles", async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(navigator, "serviceWorker", {
+      configurable: true,
+      // The exact shape of a failed registration: the API exists, so isArchiveSupported() is true, but
+      // `ready` is a promise that will never resolve.
+      value: { ready: new Promise(() => {}), controller: null },
+    });
+
+    const pending = downloadArchive("name", []);
+    const assertion = expect(pending).rejects.toThrow(/isn't available in this browser/);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
+
+    vi.useRealTimers();
+  });
+
   it("throws when service workers are unsupported, without touching navigator.serviceWorker at all", async () => {
     // `delete`, not a defined-but-undefined value - isArchiveSupported()'s `"serviceWorker" in navigator`
     // check would otherwise still see the (undefined-valued) property and report true.

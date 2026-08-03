@@ -139,6 +139,77 @@ describe("archive fetch interception (D-133)", () => {
     fetchSpy.mockRestore();
   }, 10000);
 
+  // Review session 034. fetchWithRetries only guards the FETCH; a body that fails part-way through
+  // (dropped connection mid-file) rejected inside the writer loop, so zipStream.close() never ran and the
+  // response stream never terminated - the browser's download hung at "in progress" forever instead of
+  // ending short. The archive must still close, with the broken file reported as failed.
+  it("closes the archive when a file's body fails MID-STREAM, rather than hanging forever", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "https://dl.mosni.dev/ok.txt") return new Response("fine");
+      // A response whose body errors after the headers have already been handed over.
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("partial"));
+            controller.error(new Error("connection reset mid-file"));
+          },
+        }),
+      );
+    });
+
+    let lastProgress: { failed: string[]; completed: number; total: number } | undefined;
+    const source = {
+      postMessage: vi.fn((message: unknown) => {
+        lastProgress = message as typeof lastProgress;
+      }),
+    };
+
+    dispatchMessage(
+      {
+        type: "archive-manifest",
+        id: "archive-midstream",
+        name: "Midstream",
+        files: [
+          { name: "broken.txt", url: "https://dl.mosni.dev/broken.txt" },
+          { name: "ok.txt", url: "https://dl.mosni.dev/ok.txt" },
+        ],
+      },
+      source,
+    );
+
+    const { respondWith } = dispatchFetch("https://files.mosni.dev/__archive/archive-midstream/Midstream.zip");
+    const response = await respondWith.mock.calls[0][0];
+
+    // The decisive assertion: this resolves at all. Before the fix it never settled.
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    expect(bytes.byteLength).toBeGreaterThan(0);
+    expect(lastProgress).toMatchObject({ completed: 2, total: 2, failed: ["broken.txt"] });
+
+    fetchSpy.mockRestore();
+  }, 15000);
+
+  it("does not retry a settled 404 - only 429/5xx are worth another attempt", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => new Response(null, { status: 404 }));
+
+    dispatchMessage({
+      type: "archive-manifest",
+      id: "archive-404",
+      name: "Gone",
+      files: [{ name: "gone.txt", url: "https://dl.mosni.dev/gone.txt" }],
+    });
+
+    const { respondWith } = dispatchFetch("https://files.mosni.dev/__archive/archive-404/Gone.zip");
+    const response = await respondWith.mock.calls[0][0];
+    await response.arrayBuffer();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    fetchSpy.mockRestore();
+  }, 15000);
+
   it("consumes the manifest exactly once - a repeat request for the same id is not ours any more", () => {
     dispatchMessage({ type: "archive-manifest", id: "archive-3", name: "Once", files: [] });
 

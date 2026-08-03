@@ -420,6 +420,12 @@ export async function oembedForUrl(
     provider_url: config.appOrigin,
     title: ctx.name,
     url: ctx.directUrl,
-    ...(isPhoto ? { width: ctx.width, height: ctx.height, thumbnail_url: ctx.directUrl } : {}),
+    // D-137 (E5, corrected in review session 034): `thumbnail_url` must prefer the actual THUMBNAIL. The
+    // unfurl half of E5 repointed og:image/twitter:image at it (Wave B2) precisely so a consumer stops
+    // pulling the multi-MB original, and this field - the one literally named "thumbnail" - was left on
+    // directUrl. Falls back to directUrl for a pre-E5 file with no thumbnail (D-138: never backfilled).
+    ...(isPhoto
+      ? { width: ctx.width, height: ctx.height, thumbnail_url: ctx.thumbUrl ?? ctx.directUrl }
+      : {}),
   });
 }

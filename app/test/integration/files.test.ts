@@ -20,6 +20,7 @@ import {
   setFileProtection,
 } from "../../src/storage/files.ts";
 import { createCollection, setCollectionProtection } from "../../src/storage/collections.ts";
+import { thumbNameFor } from "../../src/lib/thumbs.ts";
 import type { Protection } from "../../src/lib/protection.ts";
 
 // Against real MariaDB and a real temp directory. D-81/D-85: a file's identity is a surrogate id, and
@@ -263,6 +264,23 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
       expect((aclRows as { n: number }[])[0]?.n).toBe(0);
       const fs = await import("node:fs/promises");
       await expect(fs.stat(path.join(root, diskDir, diskName))).rejects.toThrow();
+    });
+
+    // Review session 034: E5 (D-137) gave every image/video a SECOND on-disk artifact, and this delete
+    // path was never taught about it - so each deleted image left an orphaned `<id>-thumb.webp` behind
+    // forever, quietly falsifying D-16's "row + acl + bytes". Not a serving leak (with the row gone,
+    // nothing can hand nginx an X-Accel-Redirect for it) but unbounded dead disk on a box with little.
+    it("removes the thumbnail as well as the source bytes (D-137)", async () => {
+      const { id, diskDir } = await seedCommittedFile({ name: "shot.jpg" });
+      const thumbName = thumbNameFor(id);
+      await getPool().query("UPDATE files SET thumb_name = ? WHERE id = ?", [thumbName, id]);
+      const thumbAbs = path.join(root, diskDir, thumbName);
+      await writeFile(thumbAbs, "thumb-bytes");
+
+      await deleteFile(id);
+
+      const fs = await import("node:fs/promises");
+      await expect(fs.stat(thumbAbs)).rejects.toThrow();
     });
 
     it("is idempotent - deleting an already-gone id does nothing and does not throw", async () => {
