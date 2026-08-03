@@ -191,6 +191,7 @@ describe("renderPreviewHead() - image kind WITH a thumbnail (D-137)", () => {
 describe("renderPreviewHead() - video kind", () => {
   const ctx = makeCtx({
     name: "clip.mp4",
+    path: "dir/clip.mp4",
     kind: "video",
     mimeType: "video/mp4",
     width: 1920,
@@ -212,9 +213,37 @@ describe("renderPreviewHead() - video kind", () => {
     expect(head).not.toContain("og:image");
   });
 
-  it("uses twitter:card=summary, never player", () => {
-    expect(head).toContain('name="twitter:card" content="summary"');
-    expect(head).not.toContain("player");
+  // H3 (E5 Wave H, D-140): a public/unlisted video with known dimensions now gets the "player" card,
+  // pointing at the embeddable route - D-74's original "never player" was deliberate ONLY until that
+  // route existed.
+  it("uses twitter:card=player for a public video with known dimensions, pointing at the embed route", () => {
+    expect(head).toContain('name="twitter:card" content="player"');
+    expect(head).toContain(`name="twitter:player" content="${APP_ORIGIN}/embed/f/dir/clip.mp4"`);
+    expect(head).toContain('name="twitter:player:width" content="1920"');
+    expect(head).toContain('name="twitter:player:height" content="1080"');
+  });
+
+  it("falls back to twitter:card=summary for a secret video - the embed route never serves one (H2)", () => {
+    const secretHead = renderPreviewHead(makeCtx({ kind: "video", protection: "secret" }), APP_ORIGIN);
+    expect(secretHead).toContain('name="twitter:card" content="summary"');
+    expect(secretHead).not.toContain("twitter:player");
+  });
+
+  it("falls back to twitter:card=summary for a private video too (H2, belt-and-braces)", () => {
+    const privateHead = renderPreviewHead(makeCtx({ kind: "video", protection: "private" }), APP_ORIGIN);
+    expect(privateHead).toContain('name="twitter:card" content="summary"');
+    expect(privateHead).not.toContain("twitter:player");
+  });
+
+  it("also uses twitter:card=player for an unlisted video (the embed route's readable path still resolves)", () => {
+    const unlistedHead = renderPreviewHead(makeCtx({ kind: "video", protection: "unlisted" }), APP_ORIGIN);
+    expect(unlistedHead).toContain('name="twitter:card" content="player"');
+  });
+
+  it("falls back to twitter:card=summary when dimensions are unknown - twitter:player:width/height are mandatory", () => {
+    const noDims = renderPreviewHead(makeCtx({ kind: "video", width: null, height: null }), APP_ORIGIN);
+    expect(noDims).toContain('name="twitter:card" content="summary"');
+    expect(noDims).not.toContain("twitter:player");
   });
 
   it("omits og:video:duration when durationSeconds is null", () => {

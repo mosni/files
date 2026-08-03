@@ -36,6 +36,7 @@ import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../../
 import { formatUploadDate, humanSize } from "../../../app/src/lib/previewContext.ts";
 import { toastMutationFailure } from "../lib/mutationError.ts";
 import { fetchCollections, type CollectionOption } from "../lib/collections.ts";
+import { downloadArchive, isArchiveSupported, type ArchiveProgress } from "../lib/archive.ts";
 import { DropZone } from "./DropZone.tsx";
 import { ProtectionControl } from "./ProtectionControl.tsx";
 import { VisibilityIndicator } from "./VisibilityIndicator.tsx";
@@ -708,6 +709,9 @@ export function FileBrowser({
   // happens until confirm, and cancel touches nothing.
   const [creatingCollection, setCreatingCollection] = useState(false);
   const tabsRef = useRef<HTMLElement>(null);
+  // E5 Wave G (D-133): "Download all" progress, tracked purely client-side against the archive service
+  // worker's own postMessage updates - null when no download is in flight.
+  const [archiveProgress, setArchiveProgress] = useState<ArchiveProgress | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -831,6 +835,29 @@ export function FileBrowser({
     setCreatingCollection(false);
   }
 
+  // E5 Wave G (D-133): archives exactly the FILE rows this page already has (never a second, separately-
+  // fetched file list - see archive.ts's header comment) under the collection's own display name (the
+  // breadcrumb's last, current-location crumb).
+  async function handleDownloadAll() {
+    if (data === null) return;
+    const collectionName = data.breadcrumb.at(-1)?.name ?? "archive";
+    setArchiveProgress({ completed: 0, total: data.files.length, failed: [] });
+    try {
+      await downloadArchive(
+        collectionName,
+        data.files.map((file) => ({ name: file.name, url: file.directUrl })),
+        setArchiveProgress,
+      );
+    } catch (err) {
+      setArchiveProgress(null);
+      if (typeof window.mosni !== "undefined" && window.mosni.toast) {
+        window.mosni.toast(err instanceof Error ? err.message : "Could not start the download", {
+          variant: "error",
+        });
+      }
+    }
+  }
+
   if (scope === null) {
     return <span className="spinner" role="status" aria-label="Loading" />;
   }
@@ -933,6 +960,32 @@ export function FileBrowser({
               );
             })}
           </nav>
+
+          {/* E5 Wave G (D-133): "Download all" - only on a collection's own page, only when there is at
+              least one file to archive, and only when this browser can even run the service worker the
+              archive depends on (isArchiveSupported/G1's defensive registration). */}
+          {isCollectionRoute && data.files.length > 0 && isArchiveSupported() && (
+            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+              <button
+                type="button"
+                className="btn-ghost btn-sm"
+                style={{ justifySelf: "start", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+                disabled={archiveProgress !== null && archiveProgress.completed < archiveProgress.total}
+                onClick={() => void handleDownloadAll()}
+              >
+                <mosni-icon name="download" size="16" /> Download all
+              </button>
+              {archiveProgress !== null && (
+                <span className="little-link">
+                  {archiveProgress.completed < archiveProgress.total
+                    ? `Archiving ${archiveProgress.completed}/${archiveProgress.total}…`
+                    : archiveProgress.failed.length > 0
+                      ? `Done - ${pluralize(archiveProgress.failed.length, "file")} could not be included`
+                      : "Archive ready"}
+                </span>
+              )}
+            </div>
+          )}
 
           {/* E4.1 Wave E/D-79: hiding .table-col-secondary columns (mosni-chrome) still left this
               specific row (icon + name + visibility indicator + the Actions dropdown) ~46px over a

@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { contentDisposition, INLINE_ALLOWLIST, isInlineAllowed, mimeTypeFor } from "../../src/lib/mime.ts";
 
 describe("INLINE_ALLOWLIST", () => {
-  it("is exactly the nine documented types", () => {
+  it("is exactly the twelve documented types (D-144 widened it with mov/m4v/mkv)", () => {
     expect([...INLINE_ALLOWLIST].sort()).toEqual(
-      ["gif", "jpeg", "jpg", "mp4", "pdf", "png", "txt", "webm", "webp"].sort(),
+      ["gif", "jpeg", "jpg", "m4v", "mkv", "mov", "mp4", "pdf", "png", "txt", "webm", "webp"].sort(),
     );
   });
 });
@@ -56,6 +56,9 @@ describe("mimeTypeFor() (D-74)", () => {
   it.each([
     ["mp4", "video/mp4"],
     ["webm", "video/webm"],
+    ["mov", "video/quicktime"],
+    ["m4v", "video/x-m4v"],
+    ["mkv", "video/x-matroska"],
     ["jpg", "image/jpeg"],
     ["jpeg", "image/jpeg"],
     ["png", "image/png"],
@@ -75,5 +78,14 @@ describe("mimeTypeFor() (D-74)", () => {
     expect(mimeTypeFor("archive.zip")).toBe("application/octet-stream");
     expect(mimeTypeFor("README")).toBe("application/octet-stream");
     expect(mimeTypeFor("")).toBe("application/octet-stream");
+  });
+
+  // AC19e: INLINE_ALLOWLIST and MIME_TYPES must cover exactly the same extensions - an inline-allowed
+  // extension with no real MIME_TYPES entry resolves to application/octet-stream, which `nosniff` then
+  // blocks from ever rendering, silently defeating the allowlist (D-144's landmine).
+  it("every INLINE_ALLOWLIST extension has a real (non-fallback) MIME_TYPES entry - no drift", () => {
+    for (const ext of INLINE_ALLOWLIST) {
+      expect(mimeTypeFor(`file.${ext}`)).not.toBe("application/octet-stream");
+    }
   });
 });

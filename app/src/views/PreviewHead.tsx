@@ -62,6 +62,31 @@ function oembedHrefFor(ctx: PreviewContext, appOrigin: string): string {
   return `${appOrigin}/api/oembed?url=${encodeURIComponent(ctx.previewUrl)}&format=json`;
 }
 
+// E5 Wave H (D-140): the embeddable player route's URL for this file. `ctx.path` is already the display
+// path (collection names + the file's own name, D-100-redacted when it must be); re-splitting and
+// re-encoding each segment mirrors lib/fileUrls.ts's own encodeSegments() exactly, since a display name can
+// never itself contain "/" (safeSegment() rules that out elsewhere).
+function embedUrlFor(ctx: PreviewContext, appOrigin: string): string {
+  const encoded = ctx.path.split("/").map(encodeURIComponent).join("/");
+  return `${appOrigin}/embed/f/${encoded}`;
+}
+
+// twitter:player is only valid when the embed route can ACTUALLY serve this file (controllers/embed.ts's
+// own gate: readable path, not private, video kind) and both dimensions are known - Twitter's Player Card
+// requires twitter:player:width/height, so a missing probe result must fall back to "summary" rather than
+// publish an invalid card. `secret`/`private` are excluded even though a secret file's FullHead otherwise
+// renders (D-72's private-only MinimalHead gate) - a secret file's display path is redacted to its bare
+// name (D-100), which the embed route's readable-path resolution would not reliably resolve back to this
+// same file, and H2 requires secret to never render there regardless.
+function isPlayerEmbeddable(ctx: PreviewContext): boolean {
+  return (
+    ctx.kind === "video" &&
+    (ctx.protection === "public" || ctx.protection === "unlisted") &&
+    ctx.width !== null &&
+    ctx.height !== null
+  );
+}
+
 // ctx === null is the private/anonymous case (D-72/D-75): a private file's document must reveal nothing
 // to an anonymous requester. No OG, no description, no canonical (a canonical URL would confirm the path
 // exists), no filename anywhere.
@@ -140,9 +165,17 @@ function FullHead({ ctx, appOrigin }: { ctx: PreviewContext; appOrigin: string }
           <meta name="twitter:image" content={imageUrl} />
           <meta name="twitter:image:alt" content={name} />
         </>
+      ) : isPlayerEmbeddable(ctx) ? (
+        // H3 (E5 Wave H, D-140): now that the embeddable player route exists, emit the "player" card D-74
+        // deliberately dropped for lack of one. width/height are the file's real probed dimensions - same
+        // source og:video:width/height already uses.
+        <>
+          <meta name="twitter:card" content="player" />
+          <meta name="twitter:player" content={embedUrlFor(ctx, appOrigin)} />
+          <meta name="twitter:player:width" content={String(width)} />
+          <meta name="twitter:player:height" content={String(height)} />
+        </>
       ) : (
-        // Deliberately never "player" (D-74): that card requires a twitter:player URL pointing at an
-        // iframe-embeddable page, which this app does not have. An embeddable player route is E5's.
         <meta name="twitter:card" content="summary" />
       )}
 

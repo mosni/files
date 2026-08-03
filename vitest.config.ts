@@ -34,7 +34,11 @@ export default defineConfig({
       // headroom the baseline grants server bootstrap/config loading. The one guarantee it DOES carry -
       // D-1/D-93's DropZone-then-FileBrowser order on "/" - is asserted on that exact composition by
       // web/test/unit/mainLayout.test.tsx instead.
-      exclude: ["**/*.test.{ts,tsx}", "web/src/main.tsx"],
+      // web/src/embed.tsx (E5 Wave H): the same class of DOM-mount glue, for the same reason - it mounts
+      // eagerly against document#root at import time. VideoPreview.tsx (the thing it mounts) carries its
+      // own full test coverage; this file has nothing left to assert beyond "did it call createRoot",
+      // which is exactly main.tsx's own excluded territory.
+      exclude: ["**/*.test.{ts,tsx}", "web/src/main.tsx", "web/src/embed.tsx"],
       thresholds: { lines: 90 },
     },
   },

@@ -5,6 +5,7 @@
   "type": "module",
   "description": "files.mosni.dev - Hannah's File Drop",
   "scripts": {
+    "postinstall": "node scripts/patch-vidstack-types.mjs",
     "dev": "vite",
     "build": "vite build && vite build --config vite.ssr.config.ts",
     "test:unit": "docker compose -f docker-compose.verify.yml run --build --rm -T verify-unit",
@@ -30,7 +31,7 @@
     "tus-js-client": "^4.0.0",
     "react-router": "8.2.0",
     "@vidstack/react": "^0.6.15",
-    "mux.js": "^6.3.0",
+    "vidstack": "0.6.15",
     "@zip.js/zip.js": "^2.7.0"
   },
   "devDependencies": {

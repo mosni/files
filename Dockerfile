@@ -2,6 +2,9 @@
 FROM node:24-alpine AS build
 WORKDIR /repo
 COPY package*.json .npmrc ./
+# scripts/patch-vidstack-types.mjs is npm's own `postinstall` hook (package.json) - it must exist before
+# `npm ci` runs, same reason the package files themselves are copied ahead of the rest of the source.
+COPY scripts ./scripts
 RUN npm ci
 COPY . .
 RUN npx vite build
@@ -28,6 +31,7 @@ FROM node:24-alpine
 RUN apk add --no-cache ffmpeg vips vips-cpp
 WORKDIR /app
 COPY package*.json .npmrc ./
+COPY scripts ./scripts
 # vips-dev's presence at install time is what makes sharp's installer choose a source build over its
 # prebuilt binary; node-addon-api and node-gyp must be real dependencies (not devDependencies) for that
 # build to work under --omit=dev. The toolchain is a virtual package so it can be dropped again in the

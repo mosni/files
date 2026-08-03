@@ -1,9 +1,18 @@
 // Security invariant 3 (technical-baseline.md §1): anything not on this allowlist is served
 // `Content-Disposition: attachment`. Fail closed - an unrecognised or ambiguous filename is never inline.
 
+// D-144 (E5 Wave F0, "plays where it plays"): mov/m4v/mkv join the video containers a browser MAY
+// plausibly play - amending security invariant 3 deliberately (recorded here, not slipped in). This is
+// judged acceptable because these are video CONTAINERS, not markup: unlike .svg/.html they are not a
+// script-execution vector, they are served from the dl. containment origin (no cookie, no SDK - D-33), and
+// `nosniff` still applies. Playability itself is decided at RUNTIME per browser (canPlayType()/error, never
+// sniffed) - see web/src/components/PreviewCard.tsx. Do NOT use this as precedent to add a markup format.
 export const INLINE_ALLOWLIST = [
   "mp4",
   "webm",
+  "mov",
+  "m4v",
+  "mkv",
   "jpg",
   "jpeg",
   "png",
@@ -37,6 +46,12 @@ export function contentDisposition(filename: string): "inline" | "attachment" {
 const MIME_TYPES: Record<string, string> = {
   mp4: "video/mp4",
   webm: "video/webm",
+  // D-144: the matching real types for the widened INLINE_ALLOWLIST above - both halves are required in
+  // the same change. An unmapped extension falls back to application/octet-stream, which `nosniff` then
+  // blocks from rendering no matter what Content-Disposition says, silently defeating the widening above.
+  mov: "video/quicktime",
+  m4v: "video/x-m4v",
+  mkv: "video/x-matroska",
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
   png: "image/png",

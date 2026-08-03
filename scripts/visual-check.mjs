@@ -145,6 +145,14 @@ const txt = await seed(conn, {
   bytes: Buffer.from(TXT_BODY),
   textPreview: TXT_BODY,
 });
+// E5 Wave E (D-141): deliberately ABOVE the 256KB full-preview cap, so PreviewCard's snippet+download
+// fallback (the OTHER branch TextPreview can render) gets its own visual-check state too, not just the
+// below-cap "full preview" case the existing `txt` fixture (well under the cap) now exercises.
+const bigTxt = await seed(conn, {
+  relPath: `vis-${run}/big-log.txt`,
+  bytes: Buffer.alloc(300 * 1024, "x"),
+  textPreview: "first line of a much larger log file...",
+});
 const zip = await seed(conn, { relPath: `vis-${run}/archive.zip`, bytes: Buffer.from("PK fake zip") });
 const priv = await seed(conn, { relPath: `vis-${run}/confidential.txt`, bytes: Buffer.from("secret"), protection: "private" });
 const secret = await seed(conn, { relPath: `vis-${run}/hidden.txt`, bytes: Buffer.from("hidden"), protection: "secret" });
@@ -169,7 +177,7 @@ async function seedBrowserCollection({ parentId = "", name, ownerSub, protection
   return id;
 }
 
-async function seedBrowserFile(collectionId, name, ownerSub, protection = "public") {
+async function seedBrowserFile(collectionId, name, ownerSub, protection = "public", { thumb = false } = {}) {
   const fileId = newId();
   const diskDir = "2026/07";
   const diskName = `${fileId}-${name}`;
@@ -177,10 +185,17 @@ async function seedBrowserFile(collectionId, name, ownerSub, protection = "publi
   await mkdir(path.dirname(abs), { recursive: true });
   await writeFile(abs, "browser fixture bytes");
   const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
+  // D-137 (E5): `thumbName` mirrors thumbNameFor(fileId) exactly - the disk bytes don't need to be a REAL
+  // webp for this check (dl.mosni.dev's own bytes are unreachable in this sandbox regardless, same known
+  // limitation as every other dl.-hosted subresource here - see IGNORE_TLS's header comment); what this
+  // state validates is that a listing row renders an <img>, not the generic file icon, once thumbUrl is
+  // non-null.
+  const thumbName = thumb ? `${fileId}-thumb.webp` : null;
+  if (thumb) await writeFile(path.join(STORAGE_ROOT, diskDir, thumbName), PNG_1PX);
   await conn.execute(
-    `INSERT INTO files (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'committed', ?)`,
-    [fileId, collectionId, name, diskDir, diskName, 21, protection, linkToken, ownerSub],
+    `INSERT INTO files (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, thumb_name)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'committed', ?, ?)`,
+    [fileId, collectionId, name, diskDir, diskName, 21, protection, linkToken, ownerSub, thumbName],
   );
   return fileId;
 }
@@ -190,6 +205,8 @@ async function seedBrowserFile(collectionId, name, ownerSub, protection = "publi
 // breadcrumb for.
 const browserRoot = await seedBrowserCollection({ name: `vis-${run}-public`, ownerSub: WRITER.sub, protection: "public" });
 await seedBrowserFile(browserRoot, "welcome.txt", WRITER.sub, "public");
+// E5 (D-137): a row with a thumbnail, so the listing renders an <img> instead of the generic file icon.
+await seedBrowserFile(browserRoot, "thumbed-photo.jpg", WRITER.sub, "public", { thumb: true });
 const browserNested = await seedBrowserCollection({ parentId: browserRoot, name: "nested", ownerSub: WRITER.sub, protection: "public" });
 await seedBrowserFile(browserNested, "deep-file.txt", WRITER.sub, "public");
 // WRITER's own collection with a nested child + files, for the recursive-delete confirmation state (D-104)
@@ -291,9 +308,31 @@ const PAGES = [
     init: signedInAs(NO_ROLE),
   },
   { id: "preview-image", label: "Preview - image", url: `/f/${image.relPath}`, note: "<title> fix: must show the filename, not the bare site name" },
-  { id: "preview-video", label: "Preview - video", url: `/f/${video.relPath}`, note: "Plain <video controls> - not Vidstack (E5)" },
+  {
+    id: "preview-video",
+    label: "Preview - video",
+    url: `/f/${video.relPath}`,
+    note: "E5 Wave F: the lazy-loaded Vidstack player (D-144), not a bare <video controls>. The fixture's " +
+      "bytes are not a real mp4 and dl.mosni.dev is unreachable in this sandbox, so which exact sub-state " +
+      "renders (styled controls before the load fails, or the runtime download-card fallback once it does) " +
+      "is not guaranteed - either is informative; a bare unstyled <video> tag would be the actual defect.",
+  },
   { id: "preview-pdf", label: "Preview - PDF", url: `/f/${pdf.relPath}`, note: "iframe to dl. - the frame-src/frame-ancestors fix (D-77)" },
-  { id: "preview-text", label: "Preview - text", url: `/f/${txt.relPath}`, note: "iframe to dl." },
+  {
+    id: "preview-text",
+    label: "Preview - text, full content (below the 256KB cap)",
+    url: `/f/${txt.relPath}`,
+    note: "E5 Wave E (D-141): renders via <mosni-code>, fetching the FULL file from dl. rather than the " +
+      "400-char snippet. dl.mosni.dev is unreachable in this sandbox, so the fetch fails and the ingest " +
+      "snippet (seeded above) is what actually shows - a real deploy fetches the real full file.",
+  },
+  {
+    id: "preview-text-above-cap",
+    label: "Preview - text, above the 256KB cap (snippet + download fallback)",
+    url: `/f/${bigTxt.relPath}`,
+    note: "E5 Wave E (D-141): the OTHER TextPreview branch - no fetch attempt at all, just the ingest " +
+      "snippet plus a 'Download to view in full' action.",
+  },
   { id: "preview-download-card", label: "Preview - download card", url: `/f/${zip.relPath}`, note: "Non-inline type falls back to the download card" },
   { id: "preview-secret-token", label: "Preview - secret via /t/<token>", url: `/t/${secret.linkToken}`, note: "The only way to reach a secret file (D-59)" },
   { id: "preview-private-anon", label: "Preview - private, signed out", url: `/f/${priv.relPath}`, note: "Must reveal nothing: shared not-found panel (D-72/D-75)" },
@@ -511,6 +550,21 @@ const PAGES = [
       await p.waitForSelector("text=This can't be undone.", { timeout: 10_000 }).catch(() => {});
       await p.waitForTimeout(150);
     },
+  },
+  {
+    id: "embed-player-route",
+    label: "Embeddable player route (E5 Wave H, D-140)",
+    url: `/embed/f/${video.relPath}`,
+    note: "No app chrome at all - no <mosni-header>, no auth SDK script tags (H1). Same lazy Vidstack " +
+      "player as the ordinary preview page; the fixture's fake bytes and unreachable dl.mosni.dev apply " +
+      "here too (see preview-video's note).",
+  },
+  {
+    id: "embed-player-route-rejected",
+    label: "Embeddable player route - a private file must 404 (H2, never-delete)",
+    url: `/embed/f/${priv.relPath}`,
+    note: "The styled NotFound view, not a player - a private (or secret) file must never render here " +
+      "even though its ordinary /f/ path would 200 anonymously with a reveal-nothing shell.",
   },
 ];
 

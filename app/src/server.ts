@@ -21,6 +21,9 @@ import { registerPreviewRoutes } from "./routes/preview.ts";
 import { registerManageRoutes } from "./routes/manage.ts";
 import { registerBrowseRoutes } from "./routes/browse.ts";
 import { registerAvatarRoutes } from "./routes/avatar.ts";
+import { registerEmbedRoutes } from "./routes/embed.ts";
+import { initEmbedShell } from "./storage/embedShell.ts";
+import { CSP_DIRECTIVES } from "./lib/csp.ts";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 // D-48: the SPA is built into the image (web/dist, alongside this built server at app/dist/server.js)
@@ -45,49 +48,14 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
   await app.register(helmet, {
     referrerPolicy: { policy: "no-referrer" },
     contentSecurityPolicy: {
+      // The directives themselves live in lib/csp.ts (CSP_DIRECTIVES) - shared with the embeddable player
+      // route (E5 Wave H), which builds its own, separately-serialized CSP string from the same base
+      // rather than a second, drifting copy. See that module for the directive-by-directive rationale
+      // (frame-src/frame-ancestors' D-70 history, dl.'s img-src/media-src/connect-src grants and why it
+      // must never reach script-src, etc.) - only `upgradeInsecureRequests` stays here, since it is nulled
+      // out of helmet's own merged defaults rather than being a real directive value.
       directives: {
-        defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "https://ui.mosni.dev", "https://auth.mosni.dev"],
-        styleSrc: ["'self'", "https://ui.mosni.dev", "'unsafe-inline'"],
-        // frame-src: auth's SDK does its silent-refresh in a hidden iframe pointing at
-        // https://auth.mosni.dev/authorize. With no frame-src directive, helmet's CSP fell back to
-        // default-src 'self' and silently blocked it - sessions would die at token expiry instead of
-        // renewing (session 006 finding, Wave A5). dl.mosni.dev is here too (D-70/Wave C5 bug fix): the
-        // preview page embeds a pdf/txt in an <iframe src="https://dl.mosni.dev/...">, which this
-        // directive was blocking under our own CSP until now. Never add dl. to scriptSrc - that would
-        // undo D-4's containment.
-        frameSrc: ["'self'", "https://auth.mosni.dev", "https://dl.mosni.dev"],
-        // The reciprocal half of the frame-src fix above, found only by actually executing a preview page
-        // with a real browser (D-70 Wave D e2e run): frame-src on the PARENT document controls what it may
-        // point an <iframe> at, but whether the framing succeeds ALSO depends on the CHILD response's own
-        // frame-ancestors header - and helmet is registered once, globally, so dl.'s delivery responses
-        // carry the exact same directives as files.'s pages, including the default-merged
-        // `frame-ancestors 'self'`. That silently blocked every dl. iframe in production too, not just
-        // here - Wave C5's frame-src fix alone was never sufficient. Explicitly allowing files.mosni.dev is
-        // the minimal permission this app ever needs (files. embeds dl. content; nothing else must).
-        frameAncestors: ["'self'", "https://files.mosni.dev"],
-        // data:/blob: let the drop zone show a local thumbnail before the upload completes (F1).
-        // ui.mosni.dev is here because <mosni-logo> (shipped inside <mosni-header>) loads
-        // `${assetBase}mosni.svg` from wherever mosnicat.js was served - i.e. the design system's own
-        // origin. mosni.dev (the bare apex) is here because mosnicat.js hard-codes a favicon
-        // `<link rel="icon" href="https://mosni.dev/images/icon.png">` on every page, and favicons are
-        // governed by img-src - without it the favicon 404s under our own CSP in production. Both are
-        // first-party mosni origins the shared chrome needs; the same shape as D-77 (our own CSP blocking
-        // our own chrome), found the same way (a real browser against the deployed app).
-        imgSrc: [
-          "'self'",
-          "https://mosni.dev",
-          "https://ui.mosni.dev",
-          "https://dl.mosni.dev",
-          "data:",
-          "blob:",
-        ],
-        mediaSrc: ["'self'", "https://dl.mosni.dev"],
-        // D-135 (E5): dl.mosni.dev joins connect-src so the client-side archive feature (D-133) can
-        // `fetch()` file bytes cross-origin to zip them. connect-src governs where our OWN JS may read
-        // from; it is not script-src, which would grant EXECUTION - that distinction is the security
-        // boundary, and dl. must never join script-src (D-4/D-33's containment).
-        connectSrc: ["'self'", "https://auth.mosni.dev", "https://dl.mosni.dev"],
+        ...CSP_DIRECTIVES,
         // helmet's `useDefaults` (on by default, never explicitly chosen here) merges in
         // `upgrade-insecure-requests`, which silently rewrites every same-origin http: subresource URL
         // (the SPA's own relative /assets/*.js script tag included) to https: before the browser even
@@ -127,6 +95,10 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
   // D-70: reads web/dist/index.html once at boot - controllers/preview.ts splices the server-rendered
   // <head> into it. Same missing-web/dist tolerance as fastifyStatic above (falls back to a minimal shell).
   initSpaShell(SPA_ROOT);
+  // E5 Wave H: reads web/dist/embed.html once at boot, the same way and for the same reason as the SPA
+  // shell above - the embeddable player route splices its own minimal <head> into THIS shell, never the
+  // SPA's (which carries <mosni-header>, the auth SDK and mosnicat.js - exactly what an embed must not).
+  initEmbedShell(SPA_ROOT);
 
   // E2/E5a. Each registers its own host constraint (files.mosni.dev vs dl.mosni.dev) so the origin split
   // (D-4) holds even though both hosts are proxied to this same process. Delivery is dl-only; preview,
@@ -145,6 +117,8 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
   // E5/D-136: the uploader avatar proxy. files.mosni.dev-only, same containment reasoning as above - the
   // raw sub never reaches the client (see controllers/avatar.ts).
   await registerAvatarRoutes(app, config);
+  // E5 Wave H/D-140: the embeddable player route (twitter:card=player's target). files.mosni.dev-only.
+  await registerEmbedRoutes(app, config);
 
   // Renders a real .tsx view through renderToString (technical-baseline.md §1: React SSR via JSX). This
   // is also what makes D-44 verifiable rather than assumed - JSX cannot be type-stripped, so a server

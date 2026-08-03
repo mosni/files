@@ -11,7 +11,11 @@
 export type MediaExtensionKind = "image" | "video" | "none";
 
 export const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "gif"] as const;
-export const VIDEO_EXTENSIONS = ["mp4", "webm"] as const;
+// D-144 (E5 Wave F0): mov/m4v/mkv join the display-only video guess, matching the widened INLINE_ALLOWLIST
+// (mime.ts) - previewKindFor() (lib/previewContext.ts) reads this to pick the video player component, and
+// thumbnailApplies() (lib/thumbs.ts) reads it to decide whether a keyframe-grab thumbnail applies; both are
+// correct extensions for these containers to gain.
+export const VIDEO_EXTENSIONS = ["mp4", "webm", "mov", "m4v", "mkv"] as const;
 
 // The final extension only, matching Node's own path.extname() convention: a purely leading-dot name
 // (".txt") has NO extension by this rule (fail closed on the ambiguous case) - only text after a dot that

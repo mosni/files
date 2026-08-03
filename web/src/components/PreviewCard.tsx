@@ -3,10 +3,18 @@
 // shrinks media and omits the owner banner (an upload's own drop zone has no reason to tell you that
 // you own the file you just uploaded).
 
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
+import { languageFor, TEXT_FULL_MAX_BYTES } from "../../../app/src/lib/textPreview.ts";
 import { CopyLink } from "./CopyLink.tsx";
 import { ManageControls } from "./ManageControls.tsx";
+
+// E5 Wave F: lazy, not a static import. Vidstack (VideoPreview.tsx's own dependency) is genuinely heavy
+// (~350KB) - a static import here would pull it into the SAME bundle main.tsx loads for `/`, the drop
+// zone, on EVERY visit (confirmed empirically: it appeared as a blocking `modulepreload`/stylesheet in
+// index.html, D-1's fast path paying for a player nothing on that page ever renders). `React.lazy` makes
+// this a genuine separate chunk, fetched only when a video is actually being previewed.
+const VideoPreview = lazy(() => import("./VideoPreview.tsx").then((m) => ({ default: m.VideoPreview })));
 
 const FIT: React.CSSProperties = { maxWidth: "100%", height: "auto", display: "block" };
 const FRAME: React.CSSProperties = { width: "100%", height: "min(70vh, 640px)", border: 0, display: "block" };
@@ -29,6 +37,48 @@ function CodeBlock({ text, language }: { text: string; language?: string }) {
     return () => host.replaceChildren();
   }, [text, language]);
   return <div ref={hostRef} />;
+}
+
+// E5 Wave E (D-141): full text/code preview, capped at TEXT_FULL_MAX_BYTES. Above the cap, rendering the
+// whole file through Prism risks locking the tab - the snippet already captured at ingest plus a download
+// action stays the answer there. Below the cap, this fetches the full file from `directUrl` (cross-origin
+// to dl., which is why this depends on Wave D's CORS/connect-src) and swaps it in once loaded - while
+// fetching, the ingest snippet (if any) keeps the block non-empty rather than showing nothing.
+function TextPreview({ ctx }: { ctx: PreviewContext }) {
+  const withinCap = ctx.bytes <= TEXT_FULL_MAX_BYTES;
+  const [fullText, setFullText] = useState<string | null>(null);
+
+  useEffect(() => {
+    setFullText(null);
+    if (!withinCap) return;
+    let cancelled = false;
+    fetch(ctx.directUrl)
+      .then((res) => (res.ok ? res.text() : null))
+      .then((text) => {
+        if (!cancelled) setFullText(text);
+      })
+      .catch(() => {
+        // Network failure - keep showing the ingest snippet (or nothing, for a file that has none).
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ctx.directUrl, withinCap]);
+
+  const language = languageFor(ctx.name) ?? undefined;
+
+  if (!withinCap) {
+    return (
+      <div className="panel" style={{ display: "grid", gap: "0.75rem" }}>
+        {ctx.textPreview !== null && <CodeBlock text={ctx.textPreview} language={language} />}
+        <a className="btn" href={ctx.directUrl}>
+          Download to view in full
+        </a>
+      </div>
+    );
+  }
+
+  return <CodeBlock text={fullText ?? ctx.textPreview ?? ""} language={language} />;
 }
 
 function renderMedia(ctx: PreviewContext) {
@@ -56,20 +106,20 @@ function renderMedia(ctx: PreviewContext) {
         />
       );
     case "video":
-      // Plain <video controls> - not Vidstack, that's E5's (out of scope here).
-      return <video src={ctx.directUrl} controls style={FIT} />;
+      // E5 Wave F: the Vidstack player, with a runtime capability fallback (D-144) - see VideoPreview.tsx.
+      // Suspense's fallback covers only the brief gap while the lazy chunk fetches; VideoPreview's own
+      // internal states (checking/unsupported/playable) take over immediately once it's loaded.
+      return (
+        <Suspense fallback={<span className="spinner" role="status" aria-label="Loading player" />}>
+          <VideoPreview ctx={ctx} />
+        </Suspense>
+      );
     case "pdf":
       return <iframe src={ctx.directUrl} title={ctx.name} style={FRAME} />;
     case "text":
-      // The design system's own code block, not an iframe to dl. (Hannah, session 010). This renders the
-      // snippet already captured at ingest into the context (D-74's text_preview), so it costs no extra
-      // request and no byte-streaming through Node. Rendering the FULL file - with syntax highlighting and
-      // scrolling - remains E5's "text/code preview"; this is the first 400 characters.
-      return ctx.textPreview ? (
-        <CodeBlock text={ctx.textPreview} />
-      ) : (
-        <iframe src={ctx.directUrl} title={ctx.name} style={FRAME} />
-      );
+      // E5 Wave E (D-141): full text/code preview via TextPreview, capped at TEXT_FULL_MAX_BYTES - see its
+      // own comment. The design system's own code block, not an iframe to dl. (Hannah, session 010).
+      return <TextPreview ctx={ctx} />;
     default:
       return null;
   }

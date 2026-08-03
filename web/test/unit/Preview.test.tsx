@@ -63,6 +63,18 @@ async function flush() {
   });
 }
 
+// E5 Wave F: PreviewCard's video branch is a React.lazy() chunk (VideoPreview.tsx, kept out of the main
+// bundle - see PreviewCard.tsx's own comment). The FIRST load of a lazy chunk in this test environment can
+// take longer than one macrotask to resolve, unlike a fetch mock's already-queued promise - poll rather
+// than assume a fixed number of flush()es is enough.
+async function flushUntil(predicate: () => boolean, attempts = 20) {
+  for (let i = 0; i < attempts && !predicate(); i++) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+  }
+}
+
 function routes() {
   return (
     <Routes>
@@ -310,24 +322,46 @@ describe("PreviewPage", () => {
     expect(container.querySelector("img[alt='']")).toBeNull();
   });
 
-  it("renders a plain <video controls> for kind video (not Vidstack)", () => {
+  // E5 Wave F: kind video now renders VideoPreview (Vidstack + a runtime capability fallback), not a bare
+  // <video controls> - see web/test/unit/VideoPreview.test.tsx for that component's own coverage. This
+  // just confirms PreviewCard wires the video kind to it at all.
+  it("renders the video preview (VideoPreview) for kind video", async () => {
+    vi.spyOn(window.HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably");
     embedContext(makeContext({ kind: "video", mimeType: "video/mp4", name: "clip.mp4", width: 1920, height: 1080 }));
     vi.stubGlobal("fetch", vi.fn());
 
     renderAt("/f/clip.mp4");
+    await flushUntil(() => container.querySelector("media-player") !== null);
 
-    const video = container.querySelector("video");
-    expect(video).not.toBeNull();
-    expect(video?.hasAttribute("controls")).toBe(true);
+    expect(container.querySelector("media-player")).not.toBeNull();
   });
 
-  it("renders an iframe for kind text when there is no captured textPreview", () => {
+  it("falls back to a download card for a video the browser reports it cannot play at all", async () => {
+    vi.spyOn(window.HTMLMediaElement.prototype, "canPlayType").mockReturnValue("");
+    embedContext(makeContext({ kind: "video", mimeType: "video/x-matroska", name: "clip.mkv", width: 1920, height: 1080 }));
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/clip.mkv");
+    await flushUntil(() => container.textContent?.includes("This video can't play") ?? false);
+
+    expect(container.querySelector("media-player")).toBeNull();
+    expect(container.textContent).toContain("This video can't play in this browser.");
+  });
+
+  // E5 Wave E (D-141): the plain iframe-to-dl. fallback for a snippet-less text file is gone - above the
+  // 256KB cap (makeContext's default `bytes` is 2.4MB) with no ingest snippet, the panel offers only the
+  // download action; nothing renders for content that does not exist.
+  it("renders only the download action for kind text when there is no captured textPreview and the file is above the cap", () => {
     embedContext(makeContext({ kind: "text", mimeType: "text/plain", name: "notes.txt", textPreview: null }));
     vi.stubGlobal("fetch", vi.fn());
 
     renderAt("/f/notes.txt");
 
-    expect(container.querySelector("iframe")).not.toBeNull();
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(container.querySelector("mosni-code")).toBeNull();
+    const link = container.querySelector(".panel a.btn") as HTMLAnchorElement;
+    expect(link.textContent).toBe("Download to view in full");
+    expect(link.getAttribute("href")).toBe("https://dl.mosni.dev/photo.png");
   });
 
   // session 013 debt: PreviewCard's CodeBlock (mosni-code wrapper) had no coverage at any tier.
@@ -343,6 +377,109 @@ describe("PreviewPage", () => {
     const code = container.querySelector("mosni-code");
     expect(code).not.toBeNull();
     expect(code?.textContent).toBe("Hello from the file.");
+  });
+
+  // E5 Wave E (D-141): a text file within the 256KB cap fetches and renders its FULL content, not just
+  // the 400-char ingest snippet.
+  describe("full text preview (E5 Wave E)", () => {
+    it("fetches and renders the full file when within the 256KB cap", async () => {
+      embedContext(
+        makeContext({
+          kind: "text",
+          mimeType: "text/plain",
+          name: "notes.txt",
+          bytes: 1000,
+          textPreview: "short snippet",
+        }),
+      );
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, text: () => Promise.resolve("the full file body") });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      renderAt("/f/notes.txt");
+
+      await flush();
+
+      expect(fetchSpy).toHaveBeenCalledWith("https://dl.mosni.dev/photo.png");
+      const code = container.querySelector("mosni-code");
+      expect(code?.textContent).toBe("the full file body");
+    });
+
+    it("keeps showing the ingest snippet while the full-text fetch is in flight - never an empty block", () => {
+      embedContext(
+        makeContext({ kind: "text", mimeType: "text/plain", name: "notes.txt", bytes: 1000, textPreview: "short snippet" }),
+      );
+      // A fetch that never resolves within this test - simulates "still in flight".
+      vi.stubGlobal("fetch", vi.fn().mockReturnValue(new Promise(() => {})));
+
+      renderAt("/f/notes.txt");
+
+      const code = container.querySelector("mosni-code");
+      expect(code?.textContent).toBe("short snippet");
+    });
+
+    it("falls back to the ingest snippet when the full-text fetch fails", async () => {
+      embedContext(
+        makeContext({ kind: "text", mimeType: "text/plain", name: "notes.txt", bytes: 1000, textPreview: "short snippet" }),
+      );
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+
+      renderAt("/f/notes.txt");
+      await flush();
+
+      const code = container.querySelector("mosni-code");
+      expect(code?.textContent).toBe("short snippet");
+    });
+
+    it("stays on the snippet+download fallback above the cap and never fetches", () => {
+      embedContext(
+        makeContext({
+          kind: "text",
+          mimeType: "text/plain",
+          name: "notes.txt",
+          bytes: 500_000,
+          textPreview: "short snippet",
+        }),
+      );
+      const fetchSpy = vi.fn();
+      vi.stubGlobal("fetch", fetchSpy);
+
+      renderAt("/f/notes.txt");
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(container.querySelector("mosni-code")?.textContent).toBe("short snippet");
+      expect(container.querySelector(".panel a.btn")?.textContent).toBe("Download to view in full");
+    });
+
+    it("passes a language derived from the filename's inner extension to mosni-code", async () => {
+      embedContext(
+        makeContext({
+          kind: "text",
+          mimeType: "text/plain",
+          name: "script.py.txt",
+          bytes: 1000,
+          textPreview: "print('hi')",
+        }),
+      );
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, text: () => Promise.resolve("print('hi')") });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      renderAt("/f/script.py.txt");
+      await flush();
+
+      const code = container.querySelector("mosni-code");
+      expect(code?.getAttribute("language")).toBe("python");
+    });
+
+    it("passes no language attribute for a plain .txt file - Prism degrades to unhighlighted", () => {
+      embedContext(
+        makeContext({ kind: "text", mimeType: "text/plain", name: "notes.txt", bytes: 500_000, textPreview: "plain text" }),
+      );
+      vi.stubGlobal("fetch", vi.fn());
+
+      renderAt("/f/notes.txt");
+
+      expect(container.querySelector("mosni-code")?.hasAttribute("language")).toBe(false);
+    });
   });
 
   it("renders the download card for kind other", () => {

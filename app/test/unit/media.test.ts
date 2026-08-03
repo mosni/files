@@ -9,7 +9,7 @@ describe("mediaKindByExtension() - extension-based media-kind guess for display/
     expect(mediaKindByExtension(`photo.${ext}`)).toBe("image");
   });
 
-  it.each(["mp4", "webm"])("classifies .%s as video", (ext) => {
+  it.each(["mp4", "webm", "mov", "m4v", "mkv"])("classifies .%s as video", (ext) => {
     expect(mediaKindByExtension(`video.${ext}`)).toBe("video");
   });
 
