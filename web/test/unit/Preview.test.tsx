@@ -360,13 +360,23 @@ describe("PreviewPage", () => {
     expect(container.querySelector("img[alt='']")).toBeNull();
   });
 
+  // Mirrors PreviewCard.tsx's own local-time formatting - the point under test is the SHAPE/ordering of
+  // the rendered line, not a specific timezone offset (which depends on wherever this suite runs).
+  function expectedLocalDateTime(iso: string): string {
+    const d = new Date(iso);
+    const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const time = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    return `${date} ${time}`;
+  }
+
   // E5.1 live-testing round 2 ("the section should probably say something like 'uploaded 2026-08-04
-  // 12:20 by [image] hannah'"): one line, always showing the upload timestamp, "by <avatar> <name>"
-  // appended only when there is an uploader to show.
-  it("renders 'uploaded <when> by <who>' as one line, with the upload date always present (E5.1 live-testing round 2)", () => {
+  // 12:20 by [image] hannah', also make it local time"): one line, always showing the upload timestamp in
+  // the VIEWER'S OWN local time, "by <avatar> <name>" appended only when there is an uploader to show.
+  it("renders 'uploaded <when> by <who>' as one line, in local time, with the upload date always present", () => {
+    const createdAt = "2026-08-04T12:20:00.000Z";
     embedContext(
       makeContext({
-        createdAt: "2026-08-04T12:20:00.000Z",
+        createdAt,
         uploaderName: "hannah",
         uploaderAvatarUrl: "https://files.mosni.dev/api/avatar/file0000000000id",
       }),
@@ -377,19 +387,44 @@ describe("PreviewPage", () => {
 
     // Adjacent <span>s carry no literal whitespace between them (real visual spacing comes from the
     // flex row's `gap`, not text content) - assert the pieces exist in order, not a literal joined string.
-    expect(container.textContent).toContain("uploaded 2026-08-04 12:20 UTC");
+    expect(container.textContent).toContain(`uploaded ${expectedLocalDateTime(createdAt)}`);
+    expect(container.textContent).not.toContain("UTC");
     expect(container.textContent).toContain("by");
     expect(container.textContent).toContain("hannah");
   });
 
   it("still shows the upload date when there is no uploader to show at all", () => {
-    embedContext(makeContext({ createdAt: "2026-08-04T12:20:00.000Z", uploaderAvatarUrl: null }));
+    const createdAt = "2026-08-04T12:20:00.000Z";
+    embedContext(makeContext({ createdAt, uploaderAvatarUrl: null }));
     vi.stubGlobal("fetch", vi.fn());
 
     renderAt("/f/photo.png");
 
-    expect(container.textContent).toContain("uploaded 2026-08-04 12:20 UTC");
+    expect(container.textContent).toContain(`uploaded ${expectedLocalDateTime(createdAt)}`);
     expect(container.textContent).not.toContain(" by ");
+  });
+
+  // E5.1 live-testing round 2 (found live, second report - "not fixed, now shows '...UTC by' (nothing
+  // else)"): an avatar that fails to LOAD client-side, with no captured name to fall back to, must not
+  // leave a dangling "by" with nothing after it - the whole "by ..." segment must disappear.
+  it("shows no 'by' segment at all when the avatar fails to load and there is no name either", () => {
+    embedContext(
+      makeContext({
+        uploaderName: null,
+        uploaderAvatarUrl: "https://files.mosni.dev/api/avatar/file0000000000id",
+      }),
+    );
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/photo.png");
+
+    const img = container.querySelector("img[alt='']") as HTMLImageElement;
+    act(() => {
+      img.dispatchEvent(new Event("error"));
+    });
+
+    expect(container.textContent).not.toContain("by");
+    expect(container.querySelector("img[alt='']")).toBeNull();
   });
 
   // E5.1 live-testing round 2 (avatar 404 found live): a broken avatar image must never show the
@@ -455,6 +490,24 @@ describe("PreviewPage", () => {
       expect(container.querySelector(".panel")?.textContent).not.toContain("photo.png");
     });
 
+    // "can we just make the existing title editable without turning it into an input?" - the SAME <h1>
+    // gains `contentEditable`, rather than being swapped for a separate <input>. Simulated the way a real
+    // contentEditable edit lands in the DOM: set `.textContent` directly on the still-mounted <h1>, then
+    // dispatch the "input" event React listens for.
+    it("editing turns the SAME <h1> contentEditable, rather than swapping in an <input>", () => {
+      embedContext(ownedContext());
+      vi.stubGlobal("fetch", vi.fn());
+
+      renderAt("/f/photo.png");
+      const heading = container.querySelector("h1") as HTMLHeadingElement;
+      act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
+
+      expect(container.querySelector("h1")).toBe(heading); // the SAME element, not remounted
+      expect(heading.getAttribute("contenteditable")).toBe("true");
+      expect(heading.getAttribute("aria-label")).toBe("File name");
+      expect(container.querySelector('input[aria-label="File name"]')).toBeNull();
+    });
+
     it("submitting the header rename PATCHes /api/files/:id and updates the rendered name", async () => {
       installMosni("test-token");
       embedContext(ownedContext());
@@ -468,11 +521,10 @@ describe("PreviewPage", () => {
       renderAt("/f/photo.png");
       act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
 
-      const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      const heading = container.querySelector('h1[aria-label="File name"]') as HTMLHeadingElement;
       act(() => {
-        setter.call(input, "renamed.png");
-        input.dispatchEvent(new Event("input", { bubbles: true }));
+        heading.textContent = "renamed.png";
+        heading.dispatchEvent(new Event("input", { bubbles: true }));
       });
 
       await act(async () => {
@@ -485,6 +537,103 @@ describe("PreviewPage", () => {
         expect.objectContaining({ method: "PATCH", body: JSON.stringify({ name: "renamed.png" }) }),
       );
       expect(container.querySelector("h1")?.textContent).toBe("renamed.png");
+    });
+
+    it("pressing Escape discards the edit and restores the original name in the DOM", () => {
+      embedContext(ownedContext());
+      vi.stubGlobal("fetch", vi.fn());
+
+      renderAt("/f/photo.png");
+      act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
+
+      const heading = container.querySelector('h1[aria-label="File name"]') as HTMLHeadingElement;
+      act(() => {
+        heading.textContent = "typed-but-abandoned.png";
+        heading.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      act(() => {
+        heading.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      });
+
+      expect(container.querySelector("h1")?.textContent).toBe("photo.png");
+      expect(container.querySelector("h1")?.getAttribute("contenteditable")).not.toBe("true");
+    });
+
+    it("Save stays disabled until the text actually changes", () => {
+      embedContext(ownedContext());
+      vi.stubGlobal("fetch", vi.fn());
+
+      renderAt("/f/photo.png");
+      act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
+
+      const save = container.querySelector('button[aria-label="Save name"]') as HTMLButtonElement;
+      expect(save.disabled).toBe(true);
+
+      const heading = container.querySelector('h1[aria-label="File name"]') as HTMLHeadingElement;
+      act(() => {
+        heading.textContent = "renamed.png";
+        heading.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+
+      expect(save.disabled).toBe(false);
+    });
+  });
+
+  // E5.1 live-testing round 2 ("move trash next to pencil"): delete moved out of ManageControls.tsx into
+  // the SAME header row as rename - see web/test/unit/ManageControls.test.tsx for confirmation that
+  // component no longer renders it at all.
+  describe("delete (header)", () => {
+    function ownedContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
+      return makeContext({ isOwner: true, ...overrides });
+    }
+
+    it("sits next to the rename pencil as a bare trash icon, and requires a confirm step", async () => {
+      installMosni("test-token");
+      embedContext(ownedContext());
+      const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 204 });
+      vi.stubGlobal("fetch", fetchSpy);
+      const assignSpy = vi.fn();
+      vi.stubGlobal("location", { ...window.location, assign: assignSpy });
+
+      renderAt("/f/photo.png");
+
+      const renameButton = container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement;
+      const deleteButton = container.querySelector('button[aria-label="Delete file"]') as HTMLButtonElement;
+      expect(deleteButton).not.toBeNull();
+      expect(deleteButton.className).toContain("btn-icon");
+      expect(renameButton.parentElement).toBe(deleteButton.parentElement); // same row
+
+      // installMosni's Bearer triggers Preview.tsx's own background owner-status refetch on mount, so
+      // "no request yet" is scoped to the DELETE call specifically, not fetch overall.
+      act(() => deleteButton.click());
+      expect(fetchSpy).not.toHaveBeenCalledWith("/api/files/file0000000000id", expect.objectContaining({ method: "DELETE" }));
+      expect(container.textContent).toContain("Delete permanently?");
+      // Rename is hidden while the delete confirmation is showing - one mode at a time.
+      expect(container.querySelector('button[aria-label="Rename"]')).toBeNull();
+
+      await act(async () => {
+        (container.querySelector('button[aria-label="Yes, delete"]') as HTMLButtonElement).click();
+        await flush();
+      });
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "/api/files/file0000000000id",
+        expect.objectContaining({ method: "DELETE", headers: expect.objectContaining({ Authorization: "Bearer test-token" }) }),
+      );
+      expect(assignSpy).toHaveBeenCalledWith("/");
+    });
+
+    it("cancelling the delete confirmation issues no request and restores the pencil/trash row", () => {
+      embedContext(ownedContext());
+      vi.stubGlobal("fetch", vi.fn());
+
+      renderAt("/f/photo.png");
+      act(() => (container.querySelector('button[aria-label="Delete file"]') as HTMLButtonElement).click());
+      act(() => (container.querySelector('button[aria-label="Cancel delete"]') as HTMLButtonElement).click());
+
+      expect(container.querySelector('button[aria-label="Delete file"]')).not.toBeNull();
+      expect(container.querySelector('button[aria-label="Rename"]')).not.toBeNull();
+      expect(container.textContent).not.toContain("Delete permanently?");
     });
   });
 

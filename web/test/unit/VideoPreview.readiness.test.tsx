@@ -18,8 +18,7 @@ import { createRoot, type Root } from "react-dom/client";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 
 type CapturedProps = {
-  src?: string;
-  type?: string;
+  src?: string | { src: string; type?: string };
   onCanPlay?: () => void;
   onLoadedData?: () => void;
   onLoadStart?: () => void;
@@ -198,31 +197,36 @@ describe("VideoPreview readiness gate (D2, E5.1 Wave D)", () => {
     }
   });
 
-  // D-167 (E5.1 live-testing round 2): a `private` file's owner gets an EXTENSIONLESS signed URL
-  // (`dl.mosni.dev/s/<id>?exp=...&sig=...`, controllers/preview.ts's withSignedDirectUrl) - Vidstack's own
-  // VideoProviderLoader.canPlay() decides whether to attach a <video> at all by testing the URL STRING
-  // against a fixed extension regex (`/\.(mp4|og[gv]|webm|mov|m4v)($|\?)/i`) OR the declared `type` against
-  // its own allowlist - with neither an extension NOR a type, it picks no provider, no <video> ever
-  // attaches, and D2's readiness gate times out to the download card every time. Confirmed empirically
-  // against `node_modules/vidstack`. Vidstack's allowlist includes "video/mp4"/"video/webm" but EXCLUDES
-  // "video/quicktime"/"video/x-m4v"/"video/x-matroska" outright (D1's original finding) - so the type hint
-  // must be passed for the two SAFE types (fixing the extensionless-URL gap) and stay omitted for the three
-  // exotic ones (preserving D1's fix).
-  it("passes a type hint for mp4/webm (D-167) but omits it for mov/m4v/mkv (D1, unchanged)", async () => {
+  // D-167 (E5.1 live-testing round 2, reported twice): a `private` file's owner gets an EXTENSIONLESS
+  // signed URL (`dl.mosni.dev/s/<id>?exp=...&sig=...`, controllers/preview.ts's withSignedDirectUrl).
+  // Vidstack's canPlay() decides whether to attach a <video> at all by testing the URL STRING against a
+  // fixed extension regex OR the `type` field it reads EXCLUSIVELY off the `src` PROP'S OWN SHAPE
+  // (normalizeSrc(), node_modules/vidstack/dist/*/media-core.js) - there is no separate `type` prop on
+  // `<MediaPlayer>` (confirmed against `PlayerProps`'s `.d.ts`: only `src: MediaSrc`). The first
+  // live-testing-round-2 attempt passed `src={string}` plus a sibling `type={...}` prop - it compiled,
+  // and even reached the DOM (MediaOutlet reflects it onto a `<source type="...">`), but
+  // `SourceSelection` never reads it, so it changed NOTHING and the live regression persisted after that
+  // "fix" shipped. Confirmed with a throwaway Playwright harness driving the real, unmocked
+  // `@vidstack/react`: only `src={{src, type}}` (this test's shape) lets canPlay() succeed for an
+  // extensionless URL. So this test asserts the prop VIDEO PREVIEW ACTUALLY PASSES is the object form,
+  // not just that some `type` value exists somewhere in the props bag - the earlier version of this test
+  // asserted the latter and passed cleanly against the broken code, which is exactly how the regression
+  // shipped a second time under a fully green suite.
+  it("passes src as {src, type} - the type hint set for mp4/webm (D-167), omitted for mov/m4v/mkv (D1)", async () => {
     await mount(makeContext({ directUrl: "https://dl.mosni.dev/s/file0000000000id?exp=1&sig=abc", mimeType: "video/mp4" }));
-    expect(captured.type).toBe("video/mp4");
+    expect(captured.src).toEqual({ src: "https://dl.mosni.dev/s/file0000000000id?exp=1&sig=abc", type: "video/mp4" });
 
     await mount(makeContext({ mimeType: "video/webm" }));
-    expect(captured.type).toBe("video/webm");
+    expect(captured.src).toMatchObject({ type: "video/webm" });
 
     await mount(makeContext({ mimeType: "video/quicktime" }));
-    expect(captured.type).toBeUndefined();
+    expect(captured.src).toMatchObject({ type: undefined });
 
     await mount(makeContext({ mimeType: "video/x-m4v" }));
-    expect(captured.type).toBeUndefined();
+    expect(captured.src).toMatchObject({ type: undefined });
 
     await mount(makeContext({ mimeType: "video/x-matroska" }));
-    expect(captured.type).toBeUndefined();
+    expect(captured.src).toMatchObject({ type: undefined });
   });
 
   it("stops resetting the deadline once ready - a later onProgress after onCanPlay does not reopen the window", async () => {

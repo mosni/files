@@ -14,28 +14,42 @@
 //
 // E5.1 Wave D (D-164 root cause, D-157, D-158): three things changed here in one pass, deliberately as one
 // change (§D0 of the hand-off explicitly requires it):
-//   D0 - `src` is now a STABLE PRIMITIVE (a string), never an inline object literal. The object literal
-//        this used to pass (`{ src: ctx.directUrl, type: ctx.mimeType }`) was a NEW object on every
-//        render, and Vidstack's React wrapper compares its source prop by identity - so an unrelated
-//        re-render (the owner's Bearer re-fetch in pages/Preview.tsx guarantees one) tore the provider
-//        down and never rebuilt it, leaving a ~2px <media-player> with no <video> and no `error` (finding
-//        5, D-164). A signed-out visitor never re-renders that way, which is why 874 tests and every
-//        anonymous check passed while this was broken for the only person using the app. If a future
-//        change ever needs the object form back, it MUST be memoised (`useMemo` on `[ctx.directUrl]`) -
-//        an inline object literal in this prop is a latent teardown and must never be reintroduced.
-//   D1 - the `type` hint is passed ONLY for the two containers Vidstack's own provider-selection
-//        allowlist accepts (`video/mp4`, `video/webm` - see VIDSTACK_ACCEPTED_TYPES below), never for the
+//   D0 - `src` is a MEMOISED value (`useMemo` on `[ctx.directUrl, ctx.mimeType]`), never a fresh object
+//        literal on every render. The original bug (D-164): passing `{ src: ctx.directUrl, type:
+//        ctx.mimeType }` inline created a NEW object every render, and Vidstack's React wrapper compares
+//        its source prop by identity - so an unrelated re-render (the owner's Bearer re-fetch in
+//        pages/Preview.tsx guarantees one) tore the provider down and never rebuilt it, leaving a ~2px
+//        <media-player> with no <video> and no `error` (finding 5). A signed-out visitor never re-renders
+//        that way, which is why 874 tests and every anonymous check passed while this was broken for the
+//        only person using the app. The fix is memoisation, NOT dropping the object form entirely -
+//        session 035 tried that (a bare string `src`) and it independently broke provider selection for
+//        every extensionless URL (D-167 below). Never pass this prop as a fresh literal.
+//   D1 - the `type` field is set ONLY for the two containers Vidstack's own provider-selection allowlist
+//        accepts (`video/mp4`, `video/webm` - see VIDSTACK_ACCEPTED_TYPES below), `undefined` for the
 //        other three. Vidstack refuses a source on its declared MIME type outright for `video/quicktime`,
 //        `video/x-m4v` and `video/x-matroska` (measured session 035) - exactly what D-144's own MIME
-//        widening produces for `.mov`/`.m4v`/`.mkv`, so a blanket type hint was short-circuiting three of
-//        the five allowlisted containers to the download card even when the BROWSER could play the bytes.
-//        Session 035 fixed that by dropping the hint entirely - but Vidstack's canPlay() ALSO accepts a
-//        source purely by matching the URL's file extension, and a `private` file's owner gets an
-//        EXTENSIONLESS signed URL (D-84's `/s/<id>?exp=...&sig=...`), so with no type AND no extension to
-//        match, Vidstack selected no provider at all for `video/mp4`/`video/webm` too - every video the
-//        owner previewed, not just the three exotic containers (D-167, found live on the deployed build).
+//        widening produces for `.mov`/`.m4v`/`.mkv`, so a blanket type hint short-circuits three of the
+//        five allowlisted containers to the download card even when the BROWSER could play the bytes.
 //        Never map the exotic types to `video/mp4` to sneak them past the check - that lies to the player
 //        about the container and is a different bug wearing a hat.
+//   D-167 (E5.1 live-testing round 2, the SAME regression reported twice - see below for why): a
+//        `private` file's owner gets an EXTENSIONLESS D-84 signed URL (`dl.mosni.dev/s/<id>?exp=...&sig=`).
+//        Vidstack's `canPlay()` selects a provider from EITHER the URL's file extension OR a `type` field
+//        it reads EXCLUSIVELY off the `src` PROP'S OWN SHAPE (`normalizeSrc()`,
+//        node_modules/vidstack/dist/*/media-core.js) - there is no separate `type` prop on `<MediaPlayer>`
+//        at all (confirmed against `PlayerProps`'s own `.d.ts`: it declares only `src: MediaSrc`, where
+//        `MediaSrc = MediaResource | { src, type? } | { src, type? }[]`). Passing `src` as a bare string
+//        plus a SEPARATE `type={...}` prop (this file's first live-testing-round-2 attempt) compiles fine
+//        and even reaches the DOM (MediaOutlet renders a `<source type="...">` reflecting it) - but
+//        `SourceSelection._findNewSource()` never reads that attribute, only `normalizeSrc(this._media.
+//        $props.src())`, which drops any type info not co-located INSIDE the `src` value. Confirmed
+//        empirically with a throwaway Playwright harness (`web/src/__probe__.tsx`, not committed) driving
+//        the real, unmocked `@vidstack/react` against a real WebM fixture: `src={{src, type}}` (this fix)
+//        reaches `readyState 4`/`canplaythrough` for an extensionless URL; `src={string}` with a sibling
+//        `type` prop, and a bare `src={string}` alone, both leave `canPlay()` unable to select ANY
+//        provider - console: "[vidstack] could not find a loader for any of the given media sources,
+//        consider providing `type`" - EVEN THOUGH a `type` prop was being passed. The fix must be the
+//        OBJECT form of `src` itself, memoised (D0), never a same-level sibling prop.
 //   D2 - the player is optimistic no longer. It used to render unconditionally and only fall back on an
 //        affirmative `error` - so a failure that raised no `error` (confirmed: a stalled source sitting at
 //        readyState 0 with no error and no card) rendered as nothing at all, which is what made finding 5
@@ -50,7 +64,7 @@
 import "vidstack/styles/base.css";
 import "vidstack/styles/community-skin/video.css";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MediaCommunitySkin, MediaOutlet, MediaPlayer } from "@vidstack/react";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 
@@ -59,16 +73,9 @@ import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 // (horizontal scrub) gestures. Applied to both the wrapper and the player element itself.
 const FIT: React.CSSProperties = { maxWidth: "100%", display: "block", touchAction: "pan-y" };
 
-// D-167 (E5.1 live-testing round 2): mirrors Vidstack's OWN VideoProviderLoader.canPlay() allowlist
+// Mirrors Vidstack's OWN VideoProviderLoader.canPlay() allowlist
 // (node_modules/vidstack/dist/*/providers/audio/loader.js's VIDEO_TYPES) exactly - "video/mp4" and
-// "video/webm" only. Vidstack picks a provider from EITHER the URL's file extension OR this declared
-// type; a `private` file's owner gets an EXTENSIONLESS signed URL (dl.mosni.dev/s/<id>?exp=...&sig=...,
-// controllers/preview.ts's withSignedDirectUrl) with no extension to sniff, so omitting the type entirely
-// (D1's fix) left Vidstack unable to select ANY provider for it - no <video> ever attached, and D2's
-// deadline always expired to the download card, for every video on that URL shape. D1's original finding
-// still holds for the other three allowlisted containers ("video/quicktime"/"video/x-m4v"/
-// "video/x-matroska") - Vidstack refuses those outright when given as a type, so the hint must stay
-// omitted for exactly those three, never widened to "helpfully" cover them too.
+// "video/webm" only, never the three D-144 also widened to (D1 above).
 const VIDSTACK_ACCEPTED_TYPES = new Set(["video/mp4", "video/webm"]);
 
 // D2: starting values, not measured ones - say so in the session log, and expect a review to challenge
@@ -133,6 +140,17 @@ export function VideoPreview({ ctx }: { ctx: PreviewContext }) {
 
   const errored = erroredUrl === ctx.directUrl;
 
+  // D0/D-167: the OBJECT form, memoised - see the header comment for why both halves are load-bearing.
+  // `type` is set only for the two containers Vidstack's own allowlist accepts; `undefined` for the rest,
+  // letting canPlay() fall back to (successful, for those) extension matching instead.
+  const source = useMemo(
+    () => ({
+      src: ctx.directUrl,
+      type: VIDSTACK_ACCEPTED_TYPES.has(ctx.mimeType) ? ctx.mimeType : undefined,
+    }),
+    [ctx.directUrl, ctx.mimeType],
+  );
+
   // A fresh file always re-enters "checking" with its own deadline - never carries over a previous file's
   // confirmed/fallback state (VideoPreview itself does not remount across files; only MediaPlayer does,
   // via its own `key` below).
@@ -195,8 +213,7 @@ export function VideoPreview({ ctx }: { ctx: PreviewContext }) {
     <div ref={wrapperRef} style={FIT}>
       <MediaPlayer
         key={ctx.directUrl}
-        src={ctx.directUrl}
-        type={VIDSTACK_ACCEPTED_TYPES.has(ctx.mimeType) ? ctx.mimeType : undefined}
+        src={source}
         playsInline
         style={FIT}
         // F0.2/F0.3: a container `canPlayType()` reported as merely "maybe"/"probably" (it cannot see

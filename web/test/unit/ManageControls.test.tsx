@@ -54,7 +54,7 @@ function setNativeInputValue(input: HTMLInputElement | HTMLSelectElement, value:
 let container: HTMLDivElement;
 let root: Root;
 
-describe("ManageControls (D-89: protection, delete - owner-only)", () => {
+describe("ManageControls (D-89: protection - owner-only)", () => {
   beforeEach(() => {
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -166,62 +166,17 @@ describe("ManageControls (D-89: protection, delete - owner-only)", () => {
     );
   });
 
-  it("compact mode renders ONLY the protection selector - no delete", () => {
+  // E5.1 live-testing round 2 ("move trash next to pencil"): delete moved out of this component
+  // entirely too, into PreviewCard.tsx's own header next to rename - see Preview.test.tsx's "delete
+  // (header)" block for that coverage now. This component renders only the protection selector.
+  it("renders only the protection selector, nothing else", () => {
     vi.stubGlobal("fetch", vi.fn());
     act(() => {
-      root.render(<ManageControls context={makeContext()} compact />);
+      root.render(<ManageControls context={makeContext()} />);
     });
 
     expect(container.querySelector("select")).not.toBeNull();
     expect(container.querySelector('button[aria-label="Delete file"]')).toBeNull();
-  });
-
-  // E5.1 live-testing round 2 ("bottom panel should be reworked to be more icon based"): delete is now a
-  // bare trash icon (D-111: btn-icon), revealing the SAME confirm/cancel icon pair the header's rename
-  // control uses (InlineRename.tsx), not a full-width "Delete file" text button.
-  it("delete requires a confirm step before calling DELETE /api/files/:id", async () => {
-    (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
-    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 204 });
-    vi.stubGlobal("fetch", fetchSpy);
-    const assignSpy = vi.fn();
-    vi.stubGlobal("location", { ...window.location, assign: assignSpy });
-
-    act(() => {
-      root.render(<ManageControls context={makeContext()} />);
-    });
-
-    // First click only reveals the confirmation - no request yet.
-    const deleteButton = container.querySelector('button[aria-label="Delete file"]') as HTMLButtonElement;
-    expect(deleteButton.className).toContain("btn-icon");
-    act(() => deleteButton.click());
-    expect(fetchSpy).not.toHaveBeenCalled();
-    expect(container.querySelector('[role="alertdialog"]')).not.toBeNull();
-
-    const confirmButton = container.querySelector('button[aria-label="Yes, delete"]') as HTMLButtonElement;
-    await act(async () => {
-      confirmButton.click();
-      await flush();
-    });
-
-    expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/files/file0000000000id",
-      expect.objectContaining({ method: "DELETE", headers: expect.objectContaining({ Authorization: "Bearer test-token" }) }),
-    );
-    expect(assignSpy).toHaveBeenCalledWith("/");
-  });
-
-  it("cancelling the delete confirmation issues no request", () => {
-    vi.stubGlobal("fetch", vi.fn());
-    act(() => {
-      root.render(<ManageControls context={makeContext()} />);
-    });
-
-    const deleteButton = container.querySelector('button[aria-label="Delete file"]') as HTMLButtonElement;
-    act(() => deleteButton.click());
-    const cancelButton = container.querySelector('button[aria-label="Cancel delete"]') as HTMLButtonElement;
-    act(() => cancelButton.click());
-
-    expect(container.querySelector('button[aria-label="Delete file"]')).not.toBeNull();
-    expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Rename"]')).toBeNull();
   });
 });

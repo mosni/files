@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildPreviewContext,
   describeFile,
-  formatUploadDateTime,
+  formatUploadDateTimeLocal,
   humanSize,
   previewKindFor,
   type PreviewContext,
@@ -265,13 +265,26 @@ describe("describeFile()", () => {
   });
 });
 
-// E5.1 live-testing round 2: PreviewCard's "uploaded <when> by <who>" line - UTC, zero-padded, sortable.
-describe("formatUploadDateTime()", () => {
-  it("renders a zero-padded UTC 'YYYY-MM-DD HH:MM UTC' timestamp", () => {
-    expect(formatUploadDateTime("2026-08-04T12:20:00.000Z")).toBe("2026-08-04 12:20 UTC");
+// E5.1 live-testing round 2: PreviewCard's "uploaded <when> by <who>" line - the VIEWER'S OWN local time
+// (Hannah's explicit call), zero-padded, sortable. Expectations are built from the SAME local Date
+// getters the implementation uses, not a hardcoded string - the point under test is the padding/shape
+// logic, not a specific timezone offset (which depends on wherever this suite happens to run).
+function expectedLocal(iso: string): string {
+  const d = new Date(iso);
+  const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const time = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return `${date} ${time}`;
+}
+
+describe("formatUploadDateTimeLocal()", () => {
+  it("renders a zero-padded local 'YYYY-MM-DD HH:MM' timestamp, no UTC label", () => {
+    const iso = "2026-08-04T12:20:00.000Z";
+    expect(formatUploadDateTimeLocal(iso)).toBe(expectedLocal(iso));
+    expect(formatUploadDateTimeLocal(iso)).not.toContain("UTC");
   });
 
   it("zero-pads single-digit month/day/hour/minute", () => {
-    expect(formatUploadDateTime("2026-01-02T03:04:00.000Z")).toBe("2026-01-02 03:04 UTC");
+    const iso = "2026-01-02T03:04:00.000Z";
+    expect(formatUploadDateTimeLocal(iso)).toBe(expectedLocal(iso));
   });
 });

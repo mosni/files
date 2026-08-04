@@ -6,12 +6,12 @@
 import { Component, lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
-import { formatUploadDateTime } from "../../../app/src/lib/previewContext.ts";
+import { formatUploadDateTimeLocal } from "../../../app/src/lib/previewContext.ts";
 import type { Protection } from "../../../app/src/lib/protection.ts";
 import { languageFor, TEXT_FULL_MAX_BYTES } from "../../../app/src/lib/textPreview.ts";
 import { CopyLink } from "./CopyLink.tsx";
-import { IconConfirmCancel, RenameInput } from "./InlineRename.tsx";
-import { patchFile, updatedContext } from "../lib/filePatch.ts";
+import { IconConfirmCancel } from "./InlineRename.tsx";
+import { authHeaders, patchFile, updatedContext } from "../lib/filePatch.ts";
 import { ManageControls } from "./ManageControls.tsx";
 import { DownloadFallback } from "./VideoPreview.tsx";
 
@@ -176,36 +176,50 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
   const [ctx, setCtx] = useState(context);
   useEffect(() => setCtx(context), [context]);
 
-  // E5.1 live-testing round 2 (finding: "the rename pencil should be in the title header, not the bottom
-  // panel, we do not need to show the file name twice"). Moved here, verbatim, from ManageControls.tsx -
-  // the header is now the ONLY place the name renders or is edited; ManageControls keeps protection and
-  // delete only.
-  const [editingName, setEditingName] = useState(false);
-  const [name, setName] = useState(ctx.name);
+  // E5.1 live-testing round 2: rename AND delete both live in the header now ("the rename pencil should
+  // be in the title header, not the bottom panel" + "move trash next to pencil"), as mutually exclusive
+  // MODES rather than two independent booleans that could theoretically both be true at once. Rename's
+  // own logic moved here, verbatim in spirit, from ManageControls.tsx - the header is now the ONLY place
+  // the name renders or is edited; ManageControls keeps protection only.
+  const [headerMode, setHeaderMode] = useState<"view" | "renaming" | "deleting">("view");
   const [renaming, setRenaming] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  // "make the existing title editable without turning it into an input" - the <h1> itself becomes
+  // `contentEditable` rather than being swapped for a separate <input>. Uncontrolled deliberately: the
+  // JSX children below stay the literal `{ctx.name}` throughout an edit session (never re-derived from
+  // `currentText`), so React's reconciler sees no diff on any OTHER state change (renameError, `renaming`)
+  // during editing and never touches the live DOM text - which is what keeps the caret in place. Only
+  // `currentText` (read via onInput) tracks what the user has actually typed, purely to drive the
+  // Save button's disabled state the same way the old controlled `name` state did.
+  const nameRef = useRef<HTMLHeadingElement>(null);
+  const [currentText, setCurrentText] = useState(ctx.name);
 
   function startRename() {
-    setName(ctx.name);
     setRenameError(null);
-    setEditingName(true);
+    setCurrentText(ctx.name);
+    setHeaderMode("renaming");
   }
 
   function cancelRename() {
-    setName(ctx.name);
     setRenameError(null);
-    setEditingName(false);
+    setHeaderMode("view");
+    // Discard whatever the user typed - the DOM text was live-edited by contentEditable, and React will
+    // not correct it back on its own since `{ctx.name}` (the JSX children) never changed.
+    if (nameRef.current !== null) nameRef.current.textContent = ctx.name;
   }
 
   async function submitRename() {
-    if (name === ctx.name || renaming) return;
+    const newName = (nameRef.current?.textContent ?? "").trim();
+    if (newName === ctx.name || renaming) return;
 
     setRenaming(true);
     setRenameError(null);
     try {
-      const res = await patchFile(ctx.id, { name });
+      const res = await patchFile(ctx.id, { name: newName });
       if (res.status === 409) {
-        setRenameError(`"${name}" is already used here - choose another name.`);
+        setRenameError(`"${newName}" is already used here - choose another name.`);
         return;
       }
       // The server validates a display name exactly as it validates an uploaded filename (it becomes a
@@ -218,10 +232,44 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
         setRenameError("Rename failed.");
         return;
       }
-      setCtx(await updatedContext(res, { ...ctx, name }));
-      setEditingName(false);
+      setCtx(await updatedContext(res, { ...ctx, name: newName }));
+      setHeaderMode("view");
     } finally {
       setRenaming(false);
+    }
+  }
+
+  // Focuses the title and selects its full text the moment editing starts - the same affordance
+  // `autoFocus` gave the old <input>.
+  useEffect(() => {
+    if (headerMode !== "renaming") return;
+    const el = nameRef.current;
+    if (el === null) return;
+    el.focus();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }, [headerMode]);
+
+  function startDelete() {
+    setHeaderMode("deleting");
+  }
+
+  function cancelDelete() {
+    setHeaderMode("view");
+  }
+
+  async function confirmDelete() {
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/files/${ctx.id}`, { method: "DELETE", headers: authHeaders() });
+      if (res.ok) {
+        window.location.assign("/");
+      }
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -232,6 +280,15 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
   // VideoPreview's `erroredUrl` - a stale failure from a PREVIOUS file can never leak onto a new one.
   const [avatarFailedUrl, setAvatarFailedUrl] = useState<string | null>(null);
   const avatarFailed = avatarFailedUrl === ctx.uploaderAvatarUrl;
+  const hasAvatarUrl = ctx.uploaderAvatarUrl !== null;
+  const showAvatar = hasAvatarUrl && !avatarFailed;
+  // C1/C4: gated on there being an avatar URL AT ALL - never falls back to showing just a name when
+  // uploaderAvatarUrl is null (that state should not happen per previewContext.ts's own contract, but
+  // this component must not assume it, same as the C1 test that predates this line). Within that, the
+  // "by <avatar> <name>" segment must never render with nothing after "by" - a captured avatar URL that
+  // then fails to LOAD client-side (found live: the proxy 404s) is exactly as empty as no uploader at all
+  // once there is also no name to fall back to.
+  const showByLine = hasAvatarUrl && (showAvatar || ctx.uploaderName !== null);
 
   return (
     // minmax(0, 1fr): see Preview.tsx - a grid item's automatic minimum size is its content, and a long
@@ -239,33 +296,71 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
     <div style={{ display: "grid", gap: "1.25rem", gridTemplateColumns: "minmax(0, 1fr)" }}>
       <div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
-          {editingName ? (
+          <h1
+            ref={nameRef}
+            contentEditable={headerMode === "renaming"}
+            suppressContentEditableWarning
+            role={headerMode === "renaming" ? "textbox" : undefined}
+            aria-label={headerMode === "renaming" ? "File name" : undefined}
+            style={{
+              margin: 0,
+              ...(headerMode === "renaming"
+                ? { outline: "1px dashed var(--mosni-purple, #996bef)", borderRadius: "4px", padding: "0 0.25rem" }
+                : {}),
+            }}
+            onInput={(event) => setCurrentText(event.currentTarget.textContent ?? "")}
+            onKeyDown={(event) => {
+              if (headerMode !== "renaming") return;
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void submitRename();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                cancelRename();
+              }
+            }}
+            onPaste={(event) => {
+              if (headerMode !== "renaming") return;
+              // Plain text only - contentEditable otherwise pastes rich HTML into a title.
+              event.preventDefault();
+              document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
+            }}
+          >
+            {ctx.name}
+          </h1>
+          {ctx.isOwner && headerMode === "view" && (
+            // D-111: btn-icon, never a bare <button> - mosni-chrome's _button.scss styles the bare
+            // `button` element as a filled purple primary with no opt-out.
             <>
-              <RenameInput
-                value={name}
-                onChange={setName}
-                onSubmit={() => void submitRename()}
-                onCancel={cancelRename}
-                ariaLabel="File name"
-              />
-              <IconConfirmCancel
-                onConfirm={() => void submitRename()}
-                onCancel={cancelRename}
-                confirmDisabled={renaming || name === ctx.name}
-                confirmLabel="Save name"
-                cancelLabel="Cancel rename"
-              />
+              <button type="button" className="btn-icon" aria-label="Rename" onClick={startRename}>
+                <mosni-icon name="pencil" size="16" />
+              </button>
+              <button type="button" className="btn-icon" aria-label="Delete file" onClick={startDelete}>
+                <mosni-icon name="trash-2" size="16" />
+              </button>
             </>
-          ) : (
+          )}
+          {headerMode === "renaming" && (
+            <IconConfirmCancel
+              onConfirm={() => void submitRename()}
+              onCancel={cancelRename}
+              confirmDisabled={renaming || currentText.trim() === ctx.name}
+              confirmLabel="Save name"
+              cancelLabel="Cancel rename"
+            />
+          )}
+          {headerMode === "deleting" && (
             <>
-              <h1 style={{ margin: 0 }}>{ctx.name}</h1>
-              {ctx.isOwner && (
-                // D-111: btn-icon, never a bare <button> - mosni-chrome's _button.scss styles the bare
-                // `button` element as a filled purple primary with no opt-out.
-                <button type="button" className="btn-icon" aria-label="Rename" onClick={startRename}>
-                  <mosni-icon name="pencil" size="16" />
-                </button>
-              )}
+              <span className="little-link" style={{ marginLeft: 0 }}>
+                Delete permanently?
+              </span>
+              <IconConfirmCancel
+                onConfirm={() => void confirmDelete()}
+                onCancel={cancelDelete}
+                confirmDisabled={deleting}
+                confirmLabel="Yes, delete"
+                cancelLabel="Cancel delete"
+              />
             </>
           )}
         </div>
@@ -293,21 +388,22 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
         </p>
 
         {/* E5.1 live-testing round 2: "uploaded <when> by <who>" replaces the separate uploader-only line -
-            the upload date is always known, so it always renders; "by <avatar> <name>" is appended only
-            when there is an uploader to show (C1/C4: gated on uploaderAvatarUrl, not uploaderName - a
-            captured sub with no name still gets an avatar, just no name text next to it). A failed avatar
-            fetch (avatarFailed) drops the image rather than showing a broken-image icon. */}
+            the upload date is always known, so it always renders in the viewer's own LOCAL time (Hannah's
+            call). "by <avatar> <name>" is appended only when there is something to actually show there -
+            gating on uploaderAvatarUrl alone (C1/C4's usual rule) left a dangling "by" with nothing after
+            it once the avatar image itself failed to load (found live) and no name was captured either;
+            showAvatar/showByLine below fold the CLIENT-side load failure into the same gate. */}
         <p
           className="little-link"
           style={{ display: "flex", alignItems: "center", gap: "0.35rem", margin: "0.2rem 0 0", marginLeft: 0 }}
         >
-          <span>uploaded {formatUploadDateTime(ctx.createdAt)}</span>
-          {ctx.uploaderAvatarUrl !== null && (
+          <span>uploaded {formatUploadDateTimeLocal(ctx.createdAt)}</span>
+          {showByLine && (
             <>
               <span>by</span>
-              {!avatarFailed && (
+              {showAvatar && (
                 <img
-                  src={ctx.uploaderAvatarUrl}
+                  src={ctx.uploaderAvatarUrl!}
                   alt=""
                   width={20}
                   height={20}
