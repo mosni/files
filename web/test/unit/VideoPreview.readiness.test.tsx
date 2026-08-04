@@ -19,7 +19,7 @@ import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 
 type CapturedProps = {
   src?: string | { src: string; type?: string };
-  aspectRatio?: number | null;
+  aspectRatio?: string;
   onCanPlay?: () => void;
   onLoadedData?: () => void;
   onLoadStart?: () => void;
@@ -34,8 +34,12 @@ vi.mock("@vidstack/react", () => ({
     captured = props;
     return <div data-testid="media-player-stub">{props.children}</div>;
   },
-  MediaOutlet: () => <div data-testid="media-outlet-stub" />,
-  MediaCommunitySkin: () => <div data-testid="media-skin-stub" />,
+  MediaProvider: () => <div data-testid="media-provider-stub" />,
+}));
+
+vi.mock("@vidstack/react/player/layouts/default", () => ({
+  DefaultVideoLayout: () => <div data-testid="media-layout-stub" />,
+  defaultLayoutIcons: {},
 }));
 
 // Controllable stand-in for the browser's ResizeObserver, which jsdom does not provide at all (verified -
@@ -231,26 +235,27 @@ describe("VideoPreview readiness gate (D2, E5.1 Wave D)", () => {
   });
 
   // Round 4 (Hannah: "it could easily play in a native video element" / "renders on every video, even
-  // ones the browser can play"): confirmed with a real browser and a real fixture that Vidstack's own CSS
-  // never gives the player a real box height WITHOUT an `aspectRatio` prop (`:where(media-player
-  // [aspect-ratio]...) { height: 0; padding-bottom: ... }`, node_modules/vidstack/styles/base.css - the
-  // selector requires the attribute to exist at all) - a bare `<video>` played the exact same fixture at
-  // its correct 320x240 instantly, while the wrapped player reported `canPlay`/`loadedData` (a real
-  // <video> briefly attached) yet rendered at ~2px regardless, which D2's own MIN_PLAYER_HEIGHT_PX check
-  // then fell back on - for every video, not a codec-specific subset. This test cannot prove Vidstack's
-  // CSS applies (that needed the real browser, see above) - it proves VideoPreview computes and passes
-  // the right ratio, which is the part a regression could silently drop again.
+  // ones the browser can play"): confirmed with a real browser and a real fixture that on 0.6.15, Vidstack
+  // never gave the player a real box height WITHOUT an `aspectRatio` prop - a bare `<video>` played the
+  // exact same fixture at its correct 320x240 instantly, while the wrapped player reported
+  // `canPlay`/`loadedData` (a real <video> briefly attached) yet rendered at ~2px regardless, which D2's
+  // own MIN_PLAYER_HEIGHT_PX check then fell back on - for every video, not a codec-specific subset. Since
+  // upgrading to 1.15.6 (same round), `aspectRatio` is a CSS `aspect-ratio` string applied directly as
+  // inline style, not a Vidstack-CSS-dependent mechanism - re-verified with the same real-browser harness
+  // that the black box is gone and real video/controls render. This test cannot prove that CSS mechanism
+  // (needed the real browser, see above) - it proves VideoPreview computes and passes the right string,
+  // which is the part a regression could silently drop again.
   it("passes aspectRatio computed from the file's own width/height (round 4)", async () => {
     await mount(makeContext({ width: 1920, height: 1080 }));
-    expect(captured.aspectRatio).toBeCloseTo(1920 / 1080);
+    expect(captured.aspectRatio).toBe("1920/1080");
 
     await mount(makeContext({ width: 320, height: 240 }));
-    expect(captured.aspectRatio).toBeCloseTo(320 / 240);
+    expect(captured.aspectRatio).toBe("320/240");
   });
 
-  it("passes aspectRatio null when the file has no captured dimensions, rather than guessing one", async () => {
+  it("passes aspectRatio undefined when the file has no captured dimensions, rather than guessing one", async () => {
     await mount(makeContext({ width: null, height: null }));
-    expect(captured.aspectRatio).toBeNull();
+    expect(captured.aspectRatio).toBeUndefined();
   });
 
   it("stops resetting the deadline once ready - a later onProgress after onCanPlay does not reopen the window", async () => {

@@ -122,11 +122,46 @@ function renderNavigating(from: string, to: string) {
   });
 }
 
+// @vidstack/react 1.15.6 (E5.1 live-testing round 4 upgrade) needs IntersectionObserver/ResizeObserver/
+// matchMedia internally, none of which jsdom provides - see VideoPreview.test.tsx's own stubs (same
+// classes) for the full explanation. This file mounts real VideoPreview instances (via PreviewPage ->
+// PreviewCard) for its own video-kind test cases, so it needs the same stubs.
+class ImmediatelyIntersectingObserver {
+  constructor(private callback: IntersectionObserverCallback) {}
+  observe(target: Element) {
+    this.callback(
+      [{ isIntersecting: true, target } as IntersectionObserverEntry],
+      this as unknown as IntersectionObserver,
+    );
+  }
+  unobserve() {}
+  disconnect() {}
+  takeRecords() {
+    return [];
+  }
+}
+
+class NoopResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
 let container: HTMLDivElement;
 let root: Root;
 
 describe("PreviewPage", () => {
   beforeEach(() => {
+    vi.stubGlobal("IntersectionObserver", ImmediatelyIntersectingObserver);
+    vi.stubGlobal("ResizeObserver", NoopResizeObserver);
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockReturnValue({
+        matches: false,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }),
+    );
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -646,9 +681,9 @@ describe("PreviewPage", () => {
     vi.stubGlobal("fetch", vi.fn());
 
     renderAt("/f/clip.mp4");
-    await flushUntil(() => container.querySelector("media-player") !== null);
+    await flushUntil(() => container.querySelector("[data-media-player]") !== null);
 
-    expect(container.querySelector("media-player")).not.toBeNull();
+    expect(container.querySelector("[data-media-player]")).not.toBeNull();
   });
 
   // D1/AC-D1 (E5.1 Wave D): reaches the player instead of being short-circuited by the old
@@ -663,9 +698,9 @@ describe("PreviewPage", () => {
     vi.stubGlobal("fetch", vi.fn());
 
     renderAt("/f/clip.mkv");
-    await flushUntil(() => container.querySelector("media-player") !== null);
+    await flushUntil(() => container.querySelector("[data-media-player]") !== null);
 
-    expect(container.querySelector("media-player")).not.toBeNull();
+    expect(container.querySelector("[data-media-player]")).not.toBeNull();
   });
 
   // E5 Wave E (D-141): the plain iframe-to-dl. fallback for a snippet-less text file is gone - above the

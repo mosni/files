@@ -12,22 +12,43 @@
 // the honest, working behaviour until a real remux path is planned and vetted in its own session (see
 // decisions.md).
 //
+// E5.1 live-testing round 4: `@vidstack/react` upgraded 0.6.15 -> 1.15.6 (Hannah's call). The pinned
+// 0.6.15 does not support React 19 (this app's React version, an open upstream issue) - traced to
+// Maverick.js's React bridge reading the underlying custom element's `.shadowRoot` SYNCHRONOUSLY at
+// render time and permanently falling back to a non-functional placeholder if it is not yet populated,
+// confirmed with a real browser: `canPlay`/`loadedData` fired (a real <video> briefly attached) but the
+// player rendered a black box with no controls, every time, in this app and in a from-scratch isolated
+// probe alike. 1.x is a different internal architecture (no shadow DOM at all) and its peerDependencies
+// declare React 19 support explicitly. Breaking changes this file's usage needed:
+//   - `MediaOutlet` -> `MediaProvider`; `MediaCommunitySkin` -> `DefaultVideoLayout` (needs an `icons`
+//     prop - `defaultLayoutIcons`, exported by the package for exactly this).
+//   - CSS moved from the `vidstack` package to `@vidstack/react` itself, and the community skin split into
+//     a theme file plus a layout file - see the imports below.
+//   - `aspectRatio` is now a CSS `aspect-ratio` STRING (e.g. "320/240"), applied directly as
+//     `style.aspectRatio` by the library - not a number, and no longer dependent on Vidstack's own CSS
+//     giving an `[aspect-ratio]`-attributed element a real box height (that mechanism is gone in 1.x).
+//   - Event prop names (`onCanPlay`/`onLoadedData`/`onLoadStart`/`onProgress`/`onError`) and the object
+//     form of `src` (`{ src, type }`) are unchanged - the underlying event names and `VideoSrc` shape in
+//     `vidstack`'s core types are the same.
+//
 // E5.1 Wave D (D-164 root cause, D-157, D-158): three things changed here in one pass, deliberately as one
-// change (§D0 of the hand-off explicitly requires it):
+// change (§D0 of the hand-off explicitly requires it) - still true against 1.15.6, re-verified with the
+// same real-browser harness used to find the round-4 bug above:
 //   D0 - `src` is a MEMOISED value (`useMemo` on `[ctx.directUrl, ctx.mimeType]`), never a fresh object
 //        literal on every render. The original bug (D-164): passing `{ src: ctx.directUrl, type:
 //        ctx.mimeType }` inline created a NEW object every render, and Vidstack's React wrapper compares
 //        its source prop by identity - so an unrelated re-render (the owner's Bearer re-fetch in
 //        pages/Preview.tsx guarantees one) tore the provider down and never rebuilt it, leaving a ~2px
-//        <media-player> with no <video> and no `error` (finding 5). A signed-out visitor never re-renders
-//        that way, which is why 874 tests and every anonymous check passed while this was broken for the
-//        only person using the app. The fix is memoisation, NOT dropping the object form entirely -
-//        session 035 tried that (a bare string `src`) and it independently broke provider selection for
-//        every extensionless URL (D-167 below). Never pass this prop as a fresh literal.
+//        player with no <video> and no `error` (finding 5). A signed-out visitor never re-renders that
+//        way, which is why 874 tests and every anonymous check passed while this was broken for the only
+//        person using the app. The fix is memoisation, NOT dropping the object form entirely - session
+//        035 tried that (a bare string `src`) and it independently broke provider selection for every
+//        extensionless URL (D-167 below). Never pass this prop as a fresh literal.
 //   D1 - the `type` field is set ONLY for the two containers Vidstack's own provider-selection allowlist
 //        accepts (`video/mp4`, `video/webm` - see VIDSTACK_ACCEPTED_TYPES below), `undefined` for the
 //        other three. Vidstack refuses a source on its declared MIME type outright for `video/quicktime`,
-//        `video/x-m4v` and `video/x-matroska` (measured session 035) - exactly what D-144's own MIME
+//        `video/x-m4v` and `video/x-matroska` (measured session 035 against 0.6.15; the same three are
+//        still absent from 1.15.6's own `VideoMimeType` allowlist) - exactly what D-144's own MIME
 //        widening produces for `.mov`/`.m4v`/`.mkv`, so a blanket type hint short-circuits three of the
 //        five allowlisted containers to the download card even when the BROWSER could play the bytes.
 //        Never map the exotic types to `video/mp4` to sneak them past the check - that lies to the player
@@ -35,21 +56,16 @@
 //   D-167 (E5.1 live-testing round 2, the SAME regression reported twice - see below for why): a
 //        `private` file's owner gets an EXTENSIONLESS D-84 signed URL (`dl.mosni.dev/s/<id>?exp=...&sig=`).
 //        Vidstack's `canPlay()` selects a provider from EITHER the URL's file extension OR a `type` field
-//        it reads EXCLUSIVELY off the `src` PROP'S OWN SHAPE (`normalizeSrc()`,
-//        node_modules/vidstack/dist/*/media-core.js) - there is no separate `type` prop on `<MediaPlayer>`
-//        at all (confirmed against `PlayerProps`'s own `.d.ts`: it declares only `src: MediaSrc`, where
-//        `MediaSrc = MediaResource | { src, type? } | { src, type? }[]`). Passing `src` as a bare string
-//        plus a SEPARATE `type={...}` prop (this file's first live-testing-round-2 attempt) compiles fine
-//        and even reaches the DOM (MediaOutlet renders a `<source type="...">` reflecting it) - but
-//        `SourceSelection._findNewSource()` never reads that attribute, only `normalizeSrc(this._media.
-//        $props.src())`, which drops any type info not co-located INSIDE the `src` value. Confirmed
-//        empirically with a throwaway Playwright harness (`web/src/__probe__.tsx`, not committed) driving
-//        the real, unmocked `@vidstack/react` against a real WebM fixture: `src={{src, type}}` (this fix)
-//        reaches `readyState 4`/`canplaythrough` for an extensionless URL; `src={string}` with a sibling
-//        `type` prop, and a bare `src={string}` alone, both leave `canPlay()` unable to select ANY
-//        provider - console: "[vidstack] could not find a loader for any of the given media sources,
-//        consider providing `type`" - EVEN THOUGH a `type` prop was being passed. The fix must be the
-//        OBJECT form of `src` itself, memoised (D0), never a same-level sibling prop.
+//        it reads EXCLUSIVELY off the `src` PROP'S OWN SHAPE - there is no separate `type` prop on
+//        `<MediaPlayer>` (0.6.15's `PlayerProps` declared only `src: MediaSrc`; 1.15.6's `MediaPlayerProps`
+//        the same, `src?: PlayerSrc`). Passing `src` as a bare string plus a SEPARATE `type={...}` prop
+//        (this file's first live-testing-round-2 attempt) compiles fine and even reaches the DOM - but
+//        provider selection never reads that sibling attribute, only the `src` value's own shape. Confirmed
+//        empirically with a throwaway Playwright harness driving the real, unmocked `@vidstack/react`
+//        against a real WebM fixture: `src={{src, type}}` (this fix) reaches `readyState 4`/
+//        `canplaythrough` for an extensionless URL; a sibling `type` prop, or a bare `src={string}` alone,
+//        both leave `canPlay()` unable to select ANY provider. The fix must be the OBJECT form of `src`
+//        itself, memoised (D0), never a same-level sibling prop.
 //   D2 - the player is optimistic no longer. It used to render unconditionally and only fall back on an
 //        affirmative `error` - so a failure that raised no `error` (confirmed: a stalled source sitting at
 //        readyState 0 with no error and no card) rendered as nothing at all, which is what made finding 5
@@ -58,24 +74,29 @@
 //        height. Any candidate cause - codec stall, zero-height layout, skin failure, a provider that
 //        never attaches - now produces the same correct outcome: a working player, or an honest download
 //        card. It never again becomes an empty region.
-//
-// Vidstack styling: MediaCommunitySkin's CSS ships in the `vidstack` core package, not `@vidstack/react` -
-// imported here, next to the one component that needs it, rather than globally in main.tsx.
-import "vidstack/styles/base.css";
-import "vidstack/styles/community-skin/video.css";
+import "@vidstack/react/player/styles/base.css";
+import "@vidstack/react/player/styles/default/theme.css";
+import "@vidstack/react/player/styles/default/layouts/video.css";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { MediaCommunitySkin, MediaOutlet, MediaPlayer } from "@vidstack/react";
+import { MediaPlayer, MediaProvider, type PlayerSrc } from "@vidstack/react";
+import { DefaultVideoLayout, defaultLayoutIcons } from "@vidstack/react/player/layouts/default";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 
 // D5: `touch-action: pan-y` so a vertical touch drag over the player scrolls the page instead of being
 // captured by Vidstack's gesture handling, which otherwise claims the whole media area for its own
 // (horizontal scrub) gestures. Applied to both the wrapper and the player element itself.
-const FIT: React.CSSProperties = { maxWidth: "100%", display: "block", touchAction: "pan-y" };
+// The extra index signature is 1.15.6's `<MediaPlayer style>` requirement (it also accepts Vidstack's own
+// CSS custom properties, which `React.CSSProperties` alone has no way to type) - a plain `<div style>`
+// still accepts this widened type too, so the same constant covers both usages below.
+const FIT: React.CSSProperties & { [key: `--${string}`]: string | number } = {
+  maxWidth: "100%",
+  display: "block",
+  touchAction: "pan-y",
+};
 
-// Mirrors Vidstack's OWN VideoProviderLoader.canPlay() allowlist
-// (node_modules/vidstack/dist/*/providers/audio/loader.js's VIDEO_TYPES) exactly - "video/mp4" and
-// "video/webm" only, never the three D-144 also widened to (D1 above).
+// Mirrors Vidstack's OWN VideoProviderLoader.canPlay() allowlist ("video/mp4" and "video/webm" only,
+// never the three D-144 also widened to - D1 above). Re-verified against 1.15.6's own VideoMimeType.
 const VIDSTACK_ACCEPTED_TYPES = new Set(["video/mp4", "video/webm"]);
 
 // D2: starting values, not measured ones - say so in the session log, and expect a review to challenge
@@ -142,14 +163,25 @@ export function VideoPreview({ ctx }: { ctx: PreviewContext }) {
 
   // D0/D-167: the OBJECT form, memoised - see the header comment for why both halves are load-bearing.
   // `type` is set only for the two containers Vidstack's own allowlist accepts; `undefined` for the rest,
-  // letting canPlay() fall back to (successful, for those) extension matching instead.
+  // letting canPlay() fall back to (successful, for those) extension matching instead. 1.15.6's own
+  // `VideoSrc.type` is typed as a REQUIRED, closed union (unlike 0.6.15's optional `type?`) - the cast
+  // preserves the exact runtime shape verified against both versions' actual provider-selection code
+  // (which does treat `type: undefined` as "no hint", the .d.ts is just stricter than the runtime here).
   const source = useMemo(
-    () => ({
-      src: ctx.directUrl,
-      type: VIDSTACK_ACCEPTED_TYPES.has(ctx.mimeType) ? ctx.mimeType : undefined,
-    }),
+    () =>
+      ({
+        src: ctx.directUrl,
+        type: VIDSTACK_ACCEPTED_TYPES.has(ctx.mimeType) ? ctx.mimeType : undefined,
+      }) as unknown as PlayerSrc,
     [ctx.directUrl, ctx.mimeType],
   );
+
+  // 1.15.6's `aspectRatio` is a CSS `aspect-ratio` string ("320/240"), applied directly as inline style -
+  // see the header comment for why this exists at all (round 4: the player rendered a correctly-EVENTED
+  // but visually collapsed black box without it, on 0.6.15's now-replaced shadow-DOM mechanism). Left
+  // `undefined` only when ffprobe couldn't read the file's dimensions (storage/probe.ts) - rather than
+  // guessing one.
+  const aspectRatio = ctx.width !== null && ctx.height !== null ? `${ctx.width}/${ctx.height}` : undefined;
 
   // A fresh file always re-enters "checking" with its own deadline - never carries over a previous file's
   // confirmed/fallback state (VideoPreview itself does not remount across files; only MediaPlayer does,
@@ -214,17 +246,7 @@ export function VideoPreview({ ctx }: { ctx: PreviewContext }) {
       <MediaPlayer
         key={ctx.directUrl}
         src={source}
-        // Round-4 finding (Hannah: "it could easily play in a native video element" / "renders on every
-        // video, even ones the browser can play"): without an `aspectRatio`, Vidstack's own CSS
-        // (`:where(media-player[aspect-ratio]...) { height: 0; padding-bottom: ... }`, base.css) never
-        // applies, and nothing else gives the player real box height - it reports `canPlay`/`loadedData`
-        // correctly (a real <video> briefly attaches, confirmed with a real fixture and a real browser)
-        // but renders at ~2px regardless, which D2's own MIN_PLAYER_HEIGHT_PX check then (correctly, but
-        // for the wrong underlying reason) treats as a failure and falls back to the download card - for
-        // EVERY video, not a codec-specific subset. `ctx.width`/`ctx.height` are the file's real ffprobe'd
-        // dimensions (storage/probe.ts); `null` only for the rare row ffprobe couldn't read, in which case
-        // this reproduces today's (broken) behaviour rather than guessing a ratio.
-        aspectRatio={ctx.width !== null && ctx.height !== null ? ctx.width / ctx.height : null}
+        aspectRatio={aspectRatio}
         playsInline
         style={FIT}
         // F0.2/F0.3: a container `canPlayType()` reported as merely "maybe"/"probably" (it cannot see
@@ -239,8 +261,8 @@ export function VideoPreview({ ctx }: { ctx: PreviewContext }) {
         onLoadStart={reportProgress}
         onProgress={reportProgress}
       >
-        <MediaOutlet />
-        <MediaCommunitySkin />
+        <MediaProvider />
+        <DefaultVideoLayout icons={defaultLayoutIcons} />
       </MediaPlayer>
     </div>
   );
