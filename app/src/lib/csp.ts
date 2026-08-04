@@ -9,7 +9,9 @@ export const CSP_DIRECTIVES = {
   styleSrc: ["'self'", "https://ui.mosni.dev", "'unsafe-inline'"],
   frameSrc: ["'self'", "https://auth.mosni.dev", "https://dl.mosni.dev"],
   frameAncestors: ["'self'", "https://files.mosni.dev"],
-  imgSrc: ["'self'", "https://mosni.dev", "https://ui.mosni.dev", "https://dl.mosni.dev", "data:", "blob:"],
+  // D-169: the avatar <img> links straight to auth.mosni.dev/avatar/<sub> (no more files.-side proxy) -
+  // without this origin here, every avatar image is silently blocked by this exact policy.
+  imgSrc: ["'self'", "https://mosni.dev", "https://ui.mosni.dev", "https://auth.mosni.dev", "https://dl.mosni.dev", "data:", "blob:"],
   mediaSrc: ["'self'", "https://dl.mosni.dev"],
   connectSrc: ["'self'", "https://auth.mosni.dev", "https://dl.mosni.dev"],
 } as const;

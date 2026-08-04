@@ -129,6 +129,17 @@ describe("security headers", () => {
     expect(imgSrc).toContain("https://mosni.dev");
   });
 
+  // D-169: the uploader avatar <img src> now points straight at auth.mosni.dev/avatar/<sub> (no more
+  // files.-side proxy) - omitting it here silently blocks every avatar image under this CSP. Reported
+  // from the deployed app (console: "img-src ... blocked ... auth.mosni.dev/avatar/hannah").
+  it("CSP allows auth.mosni.dev as an img-src, so the uploader avatar is not blocked (D-169)", async () => {
+    const res = await app.inject({ method: "GET", url: "/health" });
+    const csp = res.headers["content-security-policy"] as string;
+    const imgSrc = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("img-src"));
+
+    expect(imgSrc).toContain("https://auth.mosni.dev");
+  });
+
   it("GET /api/config returns the server-authoritative upload chunk size (P10)", async () => {
     const res = await app.inject({
       method: "GET",
