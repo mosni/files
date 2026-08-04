@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import helmet from "@fastify/helmet";
+import { CSP_DIRECTIVES } from "../../src/lib/csp.ts";
 import { registerEmbedRoutes } from "../../src/routes/embed.ts";
 import { applyMigrations, closeDb, initDb } from "../../src/storage/db.ts";
 import { claimFileRow, commitFileRow, diskRelPath, initFilesStorage } from "../../src/storage/files.ts";
@@ -48,9 +50,24 @@ describe("routes/embed.ts + controllers/embed.ts (E5 Wave H, D-140)", () => {
     initEmbedShell(shellRoot);
 
     app = Fastify({ logger: false });
+    // Registered ONCE, globally, exactly as server.ts does - and from the same shared CSP_DIRECTIVES, so
+    // this can never become a drifting copy of the real policy. That single global registration IS the
+    // trap H2 is guarding against (it is what produced D-77), so a test that omits helmet entirely cannot
+    // see a leak of the embed route's widened frame-ancestors onto an ordinary page.
+    await app.register(helmet, {
+      referrerPolicy: { policy: "no-referrer" },
+      contentSecurityPolicy: { directives: { ...CSP_DIRECTIVES, upgradeInsecureRequests: null } },
+    });
+    // A stand-in for "any ordinary page" - the second half of the never-delete invariant below, which
+    // requires BOTH responses to be asserted in the same test against the same app instance.
+    app.get("/__ordinary", async () => ({ ok: true }));
     await registerEmbedRoutes(app, makeTestConfig({ storageRoot: root }));
     await app.ready();
   }, 30_000);
+
+  function frameAncestorsOf(csp: string): string {
+    return csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("frame-ancestors")) ?? "";
+  }
 
   afterAll(async () => {
     await app.close();
@@ -115,6 +132,38 @@ describe("routes/embed.ts + controllers/embed.ts (E5 Wave H, D-140)", () => {
     expect(frameAncestors).toContain("https://x.com");
     // The default, restrictive frame-ancestors must NOT survive on this response.
     expect(frameAncestors).not.toContain("'self'");
+  });
+
+  // MANDATORY, NEVER-DELETE (verification-concept.md): "the embeddable route's widened frame-ancestors
+  // never leaks onto an ordinary page (D-140) - helmet is registered once, globally (the exact trap D-77
+  // already found once for dl.'s responses), so this must be asserted on BOTH the embed route and an
+  // ordinary route in the same test."
+  //
+  // Added by the E5/E5.1 review session (2026-08-04). Until then the two halves lived in two different
+  // suites against two different app instances, and neither asserted the direction that actually matters:
+  // security-headers.test.ts only checked that an ordinary page CONTAINS files.mosni.dev, which would pass
+  // just as happily if twitter.com/discord.com had leaked in alongside it. Assert the absence, on the same
+  // app, after the embed response has already been produced.
+  it("the widened frame-ancestors never leaks onto an ordinary page (D-140/D-77, never-delete)", async () => {
+    const { collectionName } = await seed({ name: "clip.mp4", protection: "public" });
+
+    const embed = await get(`/embed/f/${collectionName}/clip.mp4`);
+    const embedAncestors = frameAncestorsOf(embed.headers["content-security-policy"] as string);
+    expect(embedAncestors).toContain("https://twitter.com");
+
+    // Same app, same single global helmet registration, requested AFTER the widened response above.
+    const ordinary = await get("/__ordinary");
+    const ordinaryAncestors = frameAncestorsOf(ordinary.headers["content-security-policy"] as string);
+    expect(ordinaryAncestors).toBe("frame-ancestors 'self' https://files.mosni.dev");
+    for (const origin of [
+      "https://twitter.com",
+      "https://x.com",
+      "https://discord.com",
+      "https://canary.discord.com",
+      "https://ptb.discord.com",
+    ]) {
+      expect(ordinaryAncestors).not.toContain(origin);
+    }
   });
 
   // D-160 (E5.1 Wave B, finding 3): same stamp as the ordinary preview document - the embed route reuses

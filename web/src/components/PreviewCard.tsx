@@ -279,10 +279,11 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
     }
   }
 
-  // Broken-image robustness: `ctx.uploaderAvatarUrl` names a proxy URL (`/api/avatar/<file id>`) whose
-  // own upstream fetch (auth.mosni.dev, then whatever it redirects to) can fail for reasons this page has
-  // no way to predict - a bare <img> with no `onError` handling then shows the browser's broken-image
-  // icon, which is worse than showing nothing. Scoped to the specific URL that failed, same pattern as
+  // Broken-image robustness: since D-169 `ctx.uploaderAvatarUrl` points straight at
+  // `auth.mosni.dev/avatar/<sub>` (the files.-side `/api/avatar` proxy this comment used to describe is
+  // deleted), so the load can still fail for reasons this page has no way to predict - a cross-origin
+  // request, whatever auth redirects it to, and this app's own img-src policy. A bare <img> with no
+  // `onError` handling then shows the browser's broken-image icon, which is worse than showing nothing. Scoped to the specific URL that failed, same pattern as
   // VideoPreview's `erroredUrl` - a stale failure from a PREVIOUS file can never leak onto a new one.
   const [avatarFailedUrl, setAvatarFailedUrl] = useState<string | null>(null);
   const avatarFailed = avatarFailedUrl === ctx.uploaderAvatarUrl;

@@ -87,7 +87,19 @@ async function collectionFor(conn, name, ownerSub) {
 
 async function seed(
   conn,
-  { relPath, protection = "public", bytes, width = null, height = null, textPreview = null, ownerSub = null },
+  {
+    relPath,
+    protection = "public",
+    bytes,
+    width = null,
+    height = null,
+    textPreview = null,
+    ownerSub = null,
+    // E5 Wave C / E5.1 Wave C (AC10, D-168): the uploader block. Null by default so every pre-existing
+    // fixture keeps rendering exactly as it did (a pre-E5 file, never backfilled - D-138).
+    uploaderSub = null,
+    uploaderName = null,
+  },
 ) {
   const segments = relPath.split("/");
   const name = segments[segments.length - 1];
@@ -104,9 +116,9 @@ async function seed(
 
   await conn.execute(
     `INSERT INTO files
-      (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, width, height, text_preview)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'committed', ?, ?, ?, ?)`,
-    [fileId, collectionId, name, diskDir, diskName, bytes.length, protection, linkToken, ownerSub, width, height, textPreview],
+      (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, width, height, text_preview, uploader_sub, uploader_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'committed', ?, ?, ?, ?, ?, ?)`,
+    [fileId, collectionId, name, diskDir, diskName, bytes.length, protection, linkToken, ownerSub, width, height, textPreview, uploaderSub, uploaderName],
   );
   return { relPath, linkToken, fileId };
 }
@@ -154,6 +166,26 @@ const bigTxt = await seed(conn, {
   textPreview: "first line of a much larger log file...",
 });
 const zip = await seed(conn, { relPath: `vis-${run}/archive.zip`, bytes: Buffer.from("PK fake zip") });
+// E5 AC10 / E5.1 Waves 0+C: the uploader block ("uploaded <when> by <avatar> <name>"). This is the page
+// state E5's own definition of done named first and the only one the list was still missing - added by
+// the E5/E5.1 review session (2026-08-04). Two fixtures, because D-168 made the two halves independent:
+// a captured `name` renders it, and no name falls back to the raw sub. Both must LOOK right, since
+// showing a sub is now deliberate rather than a bug.
+const uploaded = await seed(conn, {
+  relPath: `vis-${run}/uploaded-by-someone.png`,
+  bytes: PNG_1PX,
+  width: 1200,
+  height: 800,
+  uploaderSub: "google:118273645500192837465",
+  uploaderName: "Hannah",
+});
+const uploadedNoName = await seed(conn, {
+  relPath: `vis-${run}/uploaded-by-nameless.png`,
+  bytes: PNG_1PX,
+  width: 1200,
+  height: 800,
+  uploaderSub: "google:118273645500192837465",
+});
 const priv = await seed(conn, { relPath: `vis-${run}/confidential.txt`, bytes: Buffer.from("secret"), protection: "private" });
 const secret = await seed(conn, { relPath: `vis-${run}/hidden.txt`, bytes: Buffer.from("hidden"), protection: "secret" });
 // E3/D-89: owned by WRITER, so an authenticated request from WRITER's own token shows the manage controls.
@@ -334,6 +366,25 @@ const PAGES = [
       "snippet plus a 'Download to view in full' action.",
   },
   { id: "preview-download-card", label: "Preview - download card", url: `/f/${zip.relPath}`, note: "Non-inline type falls back to the download card" },
+  {
+    id: "preview-uploader",
+    label: "Preview - uploader block, with a captured name (E5 AC10)",
+    url: `/f/${uploaded.relPath}`,
+    note:
+      "The 'uploaded <when> by <avatar> <name>' line. SANDBOX ARTIFACT: the avatar <img> points at " +
+      "AUTH_ISSUER/avatar/<sub>, which is the e2e mock IdP here and is also absent from img-src, so it " +
+      "cannot load - PreviewCard hides it on error, so judge the NAME and the line's layout, not the " +
+      "missing image. The avatar itself is a box-only check against a live auth.mosni.dev.",
+  },
+  {
+    id: "preview-uploader-no-name",
+    label: "Preview - uploader block, no name captured: the sub is shown (D-168)",
+    url: `/f/${uploadedNoName.relPath}`,
+    note:
+      "D-168 made the sub fallback UNCONDITIONAL, so a raw provider sub is now shown to every viewer on " +
+      "purpose (Hannah's explicit call, reversing D-155). This state exists so how that READS stays " +
+      "visible on every review, since it is a deliberate disclosure rather than a leak.",
+  },
   { id: "preview-secret-token", label: "Preview - secret via /t/<token>", url: `/t/${secret.linkToken}`, note: "The only way to reach a secret file (D-59)" },
   { id: "preview-private-anon", label: "Preview - private, signed out", url: `/f/${priv.relPath}`, note: "Must reveal nothing: shared not-found panel (D-72/D-75)" },
   { id: "notfound-secret-path", label: "404 - secret at its readable path", url: `/f/${secret.relPath}`, note: "Must 404, never 403 (D-59, never-delete)" },

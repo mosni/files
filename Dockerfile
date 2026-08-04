@@ -2,8 +2,11 @@
 FROM node:24-alpine AS build
 WORKDIR /repo
 COPY package*.json .npmrc ./
-# scripts/patch-vidstack-types.mjs is npm's own `postinstall` hook (package.json) - it must exist before
-# `npm ci` runs, same reason the package files themselves are copied ahead of the rest of the source.
+# scripts/ is copied ahead of the rest of the source purely to keep it in its own cache layer, alongside
+# the package files. It used to also have to precede `npm ci` because a `postinstall` hook lived here;
+# that hook (patch-vidstack-types.mjs) targeted @vidstack/react 0.6.15's type layout and became a no-op on
+# the D-170 upgrade to 1.15.6, so it was removed by the E5/E5.1 review session and nothing here runs on
+# install any more.
 COPY scripts ./scripts
 RUN npm ci
 COPY . .

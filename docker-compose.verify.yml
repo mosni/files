@@ -29,9 +29,9 @@ x-node-build: &node-build
     RUN apk add --no-cache ffmpeg vips vips-dev build-base pkgconfig python3
     WORKDIR /repo
     COPY package.json package-lock.json .npmrc ./
-    # scripts/patch-vidstack-types.mjs is npm's own `postinstall` hook (package.json) - it must exist
-    # before `npm ci` runs, same reason the package files themselves are copied ahead of the rest of the
-    # source.
+    # scripts/ is copied here (ahead of the rest of the source) only for cache-layer locality; the
+    # `postinstall` hook that used to force this ordering was removed with patch-vidstack-types.mjs -
+    # see the Dockerfile's own note.
     COPY scripts ./scripts
     RUN npm ci
     COPY . .
@@ -240,9 +240,9 @@ services:
         FROM mcr.microsoft.com/playwright:v1.61.1-noble
         WORKDIR /repo
         COPY package.json package-lock.json .npmrc ./
-        # scripts/patch-vidstack-types.mjs is npm's own `postinstall` hook (package.json) - it must exist
-        # before `npm ci` runs, same reason the package files themselves are copied ahead of the rest of
-        # the source.
+        # scripts/ is copied here (ahead of the rest of the source) only for cache-layer locality; the
+        # `postinstall` hook that used to force this ordering was removed with patch-vidstack-types.mjs -
+        # see the Dockerfile's own note.
         COPY scripts ./scripts
         RUN npm ci
         COPY . .

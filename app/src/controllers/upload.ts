@@ -164,8 +164,10 @@ export function buildTusServer(config: Config): TusServer {
       // share an original filename once suffixing separates their display names.
 
       // D-136: the display name from the token's `name` claim, captured now since it never changes after
-      // this point. D-168: when absent, `buildPreviewContext` falls back to the sub itself UNLESS it is an
-      // EVE identity - see that file for the fallback and why it is provider-based, not owner-gated.
+      // this point. D-168: when absent, `buildPreviewContext` falls back to the sub itself -
+      // UNCONDITIONALLY, with no provider or owner exception ("name -> sub as fallback", Hannah, round 4).
+      // An earlier draft of that round shipped a provider-based carve-out for EVE subs; it was corrected
+      // the same day (5039229) and must not be reintroduced here or in previewContext.ts.
       const uploaderName =
         typeof claims.name === "string" && claims.name.trim().length > 0 ? claims.name : null;
 
