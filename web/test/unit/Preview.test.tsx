@@ -35,11 +35,14 @@ function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
   };
 }
 
-function embedContext(ctx: PreviewContext) {
+// D-160/Wave B: the server stamps `embeddedFor` (the request pathname) on the wrapper it serializes.
+// Defaults to `/f/${ctx.name}`, which matches every existing call site's own mount path - pass an explicit
+// value when the test's mount path is NOT simply the context's own name (e.g. a stale-content repro).
+function embedContext(ctx: PreviewContext, embeddedFor: string = `/f/${ctx.name}`) {
   const script = document.createElement("script");
   script.type = "application/json";
   script.id = "preview-context";
-  script.textContent = JSON.stringify(ctx);
+  script.textContent = JSON.stringify({ ...ctx, embeddedFor });
   document.head.appendChild(script);
 }
 
@@ -253,6 +256,27 @@ describe("PreviewPage", () => {
     expect(container.textContent).toContain("photo.png");
   });
 
+  // D-160/Wave B (finding 3): a COLD mount whose embedded #preview-context was never actually rendered for
+  // THIS path - exactly what a PreviewPage remount (e.g. FileBrowser's `key` on a collection change, or an
+  // unrelated route unmounting and remounting this component) produces if stale embedded content survives
+  // in the document. The old code trusted `embeddedPathRef.current === location.pathname`, which is true
+  // by construction on any cold mount (the ref just records wherever the component happened to land, never
+  // what the server actually rendered the embed for) - so it painted whatever was left over regardless of
+  // whether it described this URL at all.
+  it("a cold mount never trusts embedded content that was not actually rendered for this path (finding 3)", async () => {
+    embedContext(makeContext({ name: "first.png", previewUrl: "https://files.mosni.dev/f/first.png" }), "/f/first.png");
+    const second = makeContext({ name: "second.png", previewUrl: "https://files.mosni.dev/f/second.png" });
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(second) });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderAt("/f/second.png");
+    await flush();
+
+    expect(fetchSpy).toHaveBeenCalledWith("/api/preview/f/second.png", undefined);
+    expect(container.textContent).toContain("second.png");
+    expect(container.textContent).not.toContain("first.png");
+  });
+
   it("shows the owner indicator only when isOwner is true", () => {
     embedContext(makeContext({ isOwner: true, protection: "unlisted" }));
     vi.stubGlobal("fetch", vi.fn());
@@ -336,16 +360,21 @@ describe("PreviewPage", () => {
     expect(container.querySelector("media-player")).not.toBeNull();
   });
 
-  it("falls back to a download card for a video the browser reports it cannot play at all", async () => {
+  // D1/AC-D1 (E5.1 Wave D): reaches the player instead of being short-circuited by the old
+  // canDefinitelyNotPlay() pre-check - confirming PreviewCard/VideoPreview wire an exotic MIME type
+  // through correctly. The exhaustive "eventually falls back" proof (D2's deadline, and the height/
+  // progress/error variants around it) lives in VideoPreview.test.tsx and
+  // VideoPreview.readiness.test.tsx, with fake timers - this integration-level test only confirms the
+  // wiring, since a real 8-second wait has no place in this suite.
+  it("reaches the video player for an exotic MIME type rather than being short-circuited (D1)", async () => {
     vi.spyOn(window.HTMLMediaElement.prototype, "canPlayType").mockReturnValue("");
     embedContext(makeContext({ kind: "video", mimeType: "video/x-matroska", name: "clip.mkv", width: 1920, height: 1080 }));
     vi.stubGlobal("fetch", vi.fn());
 
     renderAt("/f/clip.mkv");
-    await flushUntil(() => container.textContent?.includes("This video can't play") ?? false);
+    await flushUntil(() => container.querySelector("media-player") !== null);
 
-    expect(container.querySelector("media-player")).toBeNull();
-    expect(container.textContent).toContain("This video can't play in this browser.");
+    expect(container.querySelector("media-player")).not.toBeNull();
   });
 
   // E5 Wave E (D-141): the plain iframe-to-dl. fallback for a snippet-less text file is gone - above the
@@ -525,14 +554,94 @@ describe("PreviewPage", () => {
     expect(previewInput.value).toBe("https://files.mosni.dev/f/photo.png");
   });
 
+  // G1 (E5.1 Wave G, finding 7): the detail page never rendered a breadcrumb trail. Built from
+  // `ctx.path`/`ctx.previewUrl` (already carried by the context - no re-derivation, no separate fetch),
+  // reusing FileBrowser's own crumb markup/aria-label so the two surfaces match.
+  describe("breadcrumbs (G1)", () => {
+    it("renders Home, each ancestor collection name, and the file's own name as the current location", () => {
+      embedContext(
+        makeContext({
+          name: "img.png",
+          path: "Photos/Vacation/img.png",
+          previewUrl: "https://files.mosni.dev/f/Photos/Vacation/img.png",
+        }),
+        "/f/Photos/Vacation/img.png",
+      );
+      vi.stubGlobal("fetch", vi.fn());
+
+      renderAt("/f/Photos/Vacation/img.png");
+
+      const nav = container.querySelector('nav[aria-label="Breadcrumb"]');
+      expect(nav).not.toBeNull();
+      expect(nav!.textContent).toContain("Home");
+      expect(nav!.textContent).toContain("Photos");
+      expect(nav!.textContent).toContain("Vacation");
+      expect(nav!.textContent).toContain("img.png");
+    });
+
+    // D-100 (non-negotiable, §0.2): a secret file's display path is redacted to its bare name server-side
+    // (displayPathFor) - the breadcrumb must not reintroduce a collection name that was deliberately hidden.
+    it("shows only Home and the file's own name for a redacted path - never a collection name (D-100)", () => {
+      embedContext(
+        makeContext({ name: "hidden.txt", path: "hidden.txt", previewUrl: "https://files.mosni.dev/t/Ab3xY" }),
+        "/t/Ab3xY",
+      );
+      vi.stubGlobal("fetch", vi.fn());
+
+      renderAt("/t/Ab3xY");
+
+      const nav = container.querySelector('nav[aria-label="Breadcrumb"]');
+      expect(nav!.textContent).toContain("Home");
+      expect(nav!.textContent).toContain("hidden.txt");
+      // No stray collection name could appear anyway - the path IS just the bare file name here - but
+      // assert there is exactly one non-Home crumb, proving no ancestor segment was invented.
+      expect(nav!.querySelectorAll("a")).toHaveLength(2); // Home + the file's own current-location crumb
+    });
+
+    // D-100 also binds on the WAY the trail is built: PreviewContext carries no per-ancestor collection id
+    // or URL (unlike FileBrowser's own breadcrumb, fed by /api/browse), so an intermediate collection crumb
+    // would have to be a URL ASSEMBLED from its bare name - exactly what D-100 forbids ("the client
+    // constructs no URLs"). Ancestor names are shown as plain orientation text; only Home and the file's
+    // own current-location crumb (both real, server-provided URLs) are anchors.
+    it("does not turn an ancestor collection name into a link - only Home and the file itself are anchors", () => {
+      embedContext(
+        makeContext({
+          name: "img.png",
+          path: "Photos/Vacation/img.png",
+          previewUrl: "https://files.mosni.dev/f/Photos/Vacation/img.png",
+        }),
+        "/f/Photos/Vacation/img.png",
+      );
+      vi.stubGlobal("fetch", vi.fn());
+
+      renderAt("/f/Photos/Vacation/img.png");
+
+      const nav = container.querySelector('nav[aria-label="Breadcrumb"]')!;
+      const links = Array.from(nav.querySelectorAll("a")).map((a) => a.textContent);
+      expect(links).toEqual(["Home", "img.png"]);
+    });
+
+    it("the current-location crumb is a real anchor to the file's own previewUrl (D-121)", () => {
+      embedContext(makeContext({ name: "photo.png", path: "photo.png" }), "/f/photo.png");
+      vi.stubGlobal("fetch", vi.fn());
+
+      renderAt("/f/photo.png");
+
+      const nav = container.querySelector('nav[aria-label="Breadcrumb"]')!;
+      const currentCrumb = Array.from(nav.querySelectorAll("a")).find((a) => a.textContent === "photo.png");
+      expect(currentCrumb?.getAttribute("href")).toBe("/f/photo.png");
+      expect(currentCrumb?.getAttribute("aria-current")).toBe("location");
+    });
+  });
+
   // E4.1 Wave C (D-107 client half): the same route now resolves to EITHER a file or a collection - these
   // mount <FileBrowser> instead of <PreviewCard> when the server says the target is a collection.
   describe("collection targets (E4.1 Wave C)", () => {
-    function embedCollection(collectionId: string) {
+    function embedCollection(collectionId: string, embeddedFor: string) {
       const script = document.createElement("script");
       script.type = "application/json";
       script.id = "preview-context";
-      script.textContent = JSON.stringify({ kind: "collection", collectionId });
+      script.textContent = JSON.stringify({ kind: "collection", collectionId, embeddedFor });
       document.head.appendChild(script);
     }
 
@@ -542,7 +651,7 @@ describe("PreviewPage", () => {
 
     it("mounts FileBrowser (not PreviewCard) from an embedded CollectionLocation, with zero round trips for the target itself", async () => {
       installMosni();
-      embedCollection("coll-abc");
+      embedCollection("coll-abc", "/f/Photos");
       const fetchSpy = vi.fn().mockImplementation((url: string) =>
         url.startsWith("/api/browse") ? Promise.resolve(browseResponse()) : Promise.reject(new Error("unexpected fetch")),
       );

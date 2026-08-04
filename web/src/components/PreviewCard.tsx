@@ -3,11 +3,13 @@
 // shrinks media and omits the owner banner (an upload's own drop zone has no reason to tell you that
 // you own the file you just uploaded).
 
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { Component, lazy, Suspense, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 import { languageFor, TEXT_FULL_MAX_BYTES } from "../../../app/src/lib/textPreview.ts";
 import { CopyLink } from "./CopyLink.tsx";
 import { ManageControls } from "./ManageControls.tsx";
+import { DownloadFallback } from "./VideoPreview.tsx";
 
 // E5 Wave F: lazy, not a static import. Vidstack (VideoPreview.tsx's own dependency) is genuinely heavy
 // (~350KB) - a static import here would pull it into the SAME bundle main.tsx loads for `/`, the drop
@@ -15,6 +17,22 @@ import { ManageControls } from "./ManageControls.tsx";
 // index.html, D-1's fast path paying for a player nothing on that page ever renders). `React.lazy` makes
 // this a genuine separate chunk, fetched only when a video is actually being previewed.
 const VideoPreview = lazy(() => import("./VideoPreview.tsx").then((m) => ({ default: m.VideoPreview })));
+
+// D6 (E5.1 Wave D, D-166): found while investigating finding 5 - aborting the lazy chunk's asset request
+// leaves only the site header rendered, because `React.lazy()`'s rejection propagates with NO error
+// boundary of its own, unmounting the entire preview. A transient network/CDN failure on one lazy asset
+// must cost the video, not the page - class component because React has no hook form of
+// getDerivedStateFromError. Scoped tightly around just the video branch, one level up from `Suspense`.
+class VideoErrorBoundary extends Component<{ directUrl: string; children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  render() {
+    if (this.state.failed) return <DownloadFallback directUrl={this.props.directUrl} />;
+    return this.props.children;
+  }
+}
 
 const FIT: React.CSSProperties = { maxWidth: "100%", height: "auto", display: "block" };
 const FRAME: React.CSSProperties = { width: "100%", height: "min(70vh, 640px)", border: 0, display: "block" };
@@ -108,11 +126,15 @@ function renderMedia(ctx: PreviewContext) {
     case "video":
       // E5 Wave F: the Vidstack player, with a runtime capability fallback (D-144) - see VideoPreview.tsx.
       // Suspense's fallback covers only the brief gap while the lazy chunk fetches; VideoPreview's own
-      // internal states (checking/unsupported/playable) take over immediately once it's loaded.
+      // internal states (checking/confirmed/fallback, D2) take over immediately once it's loaded. D6: the
+      // error boundary sits OUTSIDE Suspense - it exists to catch the lazy import failing, not anything
+      // VideoPreview itself already handles once loaded (that stays D2's job, not this boundary's).
       return (
-        <Suspense fallback={<span className="spinner" role="status" aria-label="Loading player" />}>
-          <VideoPreview ctx={ctx} />
-        </Suspense>
+        <VideoErrorBoundary directUrl={ctx.directUrl}>
+          <Suspense fallback={<span className="spinner" role="status" aria-label="Loading player" />}>
+            <VideoPreview ctx={ctx} />
+          </Suspense>
+        </VideoErrorBoundary>
       );
     case "pdf":
       return <iframe src={ctx.directUrl} title={ctx.name} style={FRAME} />;

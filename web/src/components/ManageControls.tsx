@@ -7,6 +7,7 @@ import { useState } from "react";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 import type { Protection } from "../../../app/src/lib/protection.ts";
 import { toastMutationFailure } from "../lib/mutationError.ts";
+import { IconConfirmCancel, RenameInput } from "./InlineRename.tsx";
 import { ProtectionControl } from "./ProtectionControl.tsx";
 
 function authHeaders(): Record<string, string> {
@@ -44,14 +45,30 @@ export function ManageControls({
   onUpdate?: (context: PreviewContext) => void;
   compact?: boolean;
 }) {
+  // G2 (E5.1 Wave D, finding 8): rename parity with the collection page's C8 interaction - a pencil
+  // trigger (`editingName`) reveals the shared InlineRename control, instead of an always-visible
+  // input+button form. `name`/`renaming`/`renameError` keep their existing meaning and D-128 mutation-error
+  // surface unchanged.
+  const [editingName, setEditingName] = useState(false);
   const [name, setName] = useState(context.name);
   const [renaming, setRenaming] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  async function submitRename(event: React.FormEvent) {
-    event.preventDefault();
+  function startRename() {
+    setName(context.name);
+    setRenameError(null);
+    setEditingName(true);
+  }
+
+  function cancelRename() {
+    setName(context.name);
+    setRenameError(null);
+    setEditingName(false);
+  }
+
+  async function submitRename() {
     if (name === context.name || renaming) return;
 
     setRenaming(true);
@@ -73,6 +90,7 @@ export function ManageControls({
         return;
       }
       onUpdate?.(await updatedContext(res, { ...context, name }));
+      setEditingName(false);
     } finally {
       setRenaming(false);
     }
@@ -110,20 +128,35 @@ export function ManageControls({
 
   return (
     <div className="panel" style={{ display: "grid", gap: "0.85rem" }}>
-      <form
-        onSubmit={(event) => void submitRename(event)}
-        style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}
-      >
-        <input
-          type="text"
-          value={name}
-          aria-label="File name"
-          onChange={(event) => setName(event.target.value)}
-        />
-        <button type="submit" className="btn" disabled={renaming || name === context.name}>
-          Rename
-        </button>
-      </form>
+      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+        {editingName ? (
+          <>
+            <RenameInput
+              value={name}
+              onChange={setName}
+              onSubmit={() => void submitRename()}
+              onCancel={cancelRename}
+              ariaLabel="File name"
+            />
+            <IconConfirmCancel
+              onConfirm={() => void submitRename()}
+              onCancel={cancelRename}
+              confirmDisabled={renaming || name === context.name}
+              confirmLabel="Save name"
+              cancelLabel="Cancel rename"
+            />
+          </>
+        ) : (
+          <>
+            <span>{context.name}</span>
+            {/* D-111: btn-icon, never a bare <button> - mosni-chrome's _button.scss styles the bare
+                `button` element as a filled purple primary with no opt-out. */}
+            <button type="button" className="btn-icon" aria-label="Rename" onClick={startRename}>
+              <mosni-icon name="pencil" size="16" />
+            </button>
+          </>
+        )}
+      </div>
       {renameError !== null && <p role="alert">{renameError}</p>}
 
       {protectionSelector}

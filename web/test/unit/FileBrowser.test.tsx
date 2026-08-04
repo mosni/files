@@ -158,6 +158,52 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     );
   });
 
+  // Finding 2 (A1): on a COLLECTION-ROUTE mount `scope` is fixed at "visible" for the component's whole
+  // lifetime (see the header comment), so the scope-effect never fires a second time on login the way the
+  // root-mounted case's scope switch does - the browse effect itself must refetch once identity changes,
+  // or the listing stays the anonymous snapshot after a sign-in with nothing else to trigger a refetch.
+  it("logging in after a cold anonymous load refetches the listing with the new identity, with no tab switch (finding 2)", async () => {
+    let changeCb: ((user: unknown) => void) | undefined;
+    let currentToken: string | null = null;
+    (window as unknown as { mosni: unknown }).mosni = {
+      user: () => null,
+      token: () => currentToken,
+      onChange: (cb: (u: unknown) => void) => {
+        changeCb = cb;
+        cb(null);
+      },
+    };
+    const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(makeResponse()));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <FileBrowser initialCollectionId="coll-x" />
+        </MemoryRouter>,
+      );
+    });
+    await flush();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenNthCalledWith(1, expect.stringContaining("scope=visible"), undefined);
+
+    // Simulate a login completing after mount: the SDK fires onChange again with a real user, exactly as
+    // it does after a real sign-in redirect resolves.
+    currentToken = "tok";
+    await act(async () => {
+      changeCb!({ sub: "user:a", roles: ["files:write"] });
+      await flush();
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("scope=visible"),
+      expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer tok" }) }),
+    );
+  });
+
   // D-116/D-121: exactly two tabs for every signed-in viewer including an admin, and the Browse tab
   // issues the SAME scope=visible regardless of role - no client-side isFilesAdmin branch anywhere.
   it.each([
@@ -396,7 +442,10 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(theirsRow.querySelector("mosni-dropdown")?.getAttribute("label")).toBe("Actions for theirs.png");
 
     await selectRowAction(mineRow, "protection");
-    expect(mineRow.parentElement!.querySelector("select")).not.toBeNull();
+    // Scoped to the protection control's own select - A2/D-8 made MoveModal's destination <select>
+    // always-mounted (closed) for every row, so an unscoped query would pass even if this panel never
+    // opened at all.
+    expect(mineRow.parentElement!.querySelector('select[id^="protection-select-"]')).not.toBeNull();
   });
 
   it("a files:delete holder (not the owner) sees Delete on someone else's row in Browse, but not Rename or Protection (D-115)", async () => {
@@ -965,7 +1014,9 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     const row = container.querySelector("[data-row-id]")!;
     await selectRowAction(row, "protection");
 
-    const select = container.querySelector("select") as HTMLSelectElement;
+    // Scoped to the protection control's own select, not just "the" select in the document - A2/D-8
+    // made MoveModal's destination <select> always-mounted (closed) alongside every row too.
+    const select = container.querySelector('select[id^="protection-select-"]') as HTMLSelectElement;
     const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!;
     await act(async () => {
       setter.call(select, "public");
@@ -994,7 +1045,8 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     const row = container.querySelector("[data-row-id]")!;
     await selectRowAction(row, "protection");
 
-    const select = container.querySelector("select") as HTMLSelectElement;
+    // Scoped for the same reason as the test above (A2/D-8: MoveModal's select is always mounted now).
+    const select = container.querySelector('select[id^="protection-select-"]') as HTMLSelectElement;
     expect(select.closest(".field")).not.toBeNull();
   });
 
@@ -1201,13 +1253,13 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining("token=secrettoken123"), undefined);
     });
 
-    it("renders no scope-switcher tabs and no create-collection button on a collection-route mount", async () => {
+    it("renders no scope-switcher tabs, and no create-collection button when the server says canUpload is false", async () => {
       (window as unknown as { mosni: unknown }).mosni = {
         user: () => ({ sub: "user:a", roles: ["files:write"] }),
         token: () => "tok",
         onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write"] }),
       };
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse())));
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ canUpload: false }))));
 
       act(() => {
         root.render(
@@ -1220,6 +1272,81 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
 
       expect(container.querySelector("mosni-tabs")).toBeNull();
       expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("New collection"))).toBe(false);
+    });
+
+    // Finding 9 (A3): line 704 forces scope="visible" for every collection route, so the OLD
+    // `scope === "mine"` gate could never hold there and the button never rendered inside a collection at
+    // all - even for the collection's own owner. The server already computes canUpload for that specific
+    // collection (Wave C4/G2); a collection route must gate on THAT instead of the tab scope.
+    it('"New collection" renders inside a collection the viewer may upload to (finding 9)', async () => {
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles: ["files:write"] }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write"] }),
+      };
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ canUpload: true }))));
+
+      act(() => {
+        root.render(
+          <MemoryRouter>
+            <FileBrowser initialCollectionId="coll-x" />
+          </MemoryRouter>,
+        );
+      });
+      await flush();
+
+      expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("New collection"))).toBe(true);
+    });
+
+    it('a nested collection created from inside a collection is created under that parent (finding 9, AC-A4)', async () => {
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles: ["files:write"] }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write"] }),
+      };
+      // canUpload: true also renders the compact upload box (G2), which independently fetches
+      // /api/config (D-10) - a URL-keyed mock is used rather than positional Once-chaining so this test
+      // does not depend on exactly when that unrelated call happens to interleave.
+      const fetchSpy = vi.fn().mockImplementation((url: string) => {
+        if (url === "/api/collections") return Promise.resolve(jsonResponse({ id: "newcoll", name: "New", parentId: "coll-x" }, true));
+        return Promise.resolve(jsonResponse(makeResponse({ canUpload: true })));
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(
+          <MemoryRouter>
+            <FileBrowser initialCollectionId="coll-x" />
+          </MemoryRouter>,
+        );
+      });
+      await flush();
+
+      const newCollectionButton = Array.from(container.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("New collection"),
+      ) as HTMLButtonElement;
+      act(() => newCollectionButton.click());
+
+      const input = container.querySelector('input[aria-label="New collection name"]') as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      act(() => {
+        setter.call(input, "New");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+
+      const confirmButton = container.querySelector('button[aria-label="Create collection"]') as HTMLButtonElement;
+      await act(async () => {
+        confirmButton.click();
+        await flush();
+      });
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "/api/collections",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ name: "New", parentId: "coll-x" }),
+        }),
+      );
     });
   });
 
@@ -1257,6 +1384,38 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       const strangerRow = Array.from(rows).find((r) => r.getAttribute("data-row-id") === "theirs")!;
       expect(ownRow.querySelector('mosni-dropdown-item[value="move"]')).not.toBeNull();
       expect(strangerRow.querySelector('mosni-dropdown-item[value="move"]')).toBeNull();
+    });
+
+    // Finding 11 / D-8: MoveModal used to render NO children while closed and only add them once `open`
+    // flips true - the same class of bug as mosni-code wiping JSX children and the mosni-tab crash. The
+    // fix renders the modal's children unconditionally and toggles only the `open` attribute, exactly as
+    // the Delete modal beside it already does.
+    it("the Move modal's destination select is a DOM descendant of the mosni-modal element (finding 11, D-8)", async () => {
+      installMosni();
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] })))
+          .mockResolvedValueOnce(jsonResponse([{ id: "dest-1", name: "Vacation" }])),
+      );
+
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+      });
+      await flush();
+
+      const row = container.querySelector("[data-row-id]")!;
+      await selectRowAction(row, "move");
+      await flush();
+
+      const modal = container.querySelector('mosni-modal[heading^="Move"]');
+      expect(modal).not.toBeNull();
+      const select = container.querySelector("select");
+      expect(select).not.toBeNull();
+      // Not merely "select is somewhere in the document" - it must be a real descendant of the modal
+      // element itself, or it has landed in the table cell instead (the bug's actual production symptom).
+      expect(modal!.contains(select)).toBe(true);
     });
 
     it("the picker lists Root plus the caller's collections; confirming PATCHes collectionId and reloads", async () => {

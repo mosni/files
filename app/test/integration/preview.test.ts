@@ -142,6 +142,24 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
     expect(ctx.isOwner).toBe(false);
   });
 
+  // D-160 (E5.1 Wave B, finding 3): the server stamps the path it actually rendered the document for, so
+  // the client can tell "this is what I'm currently looking at" apart from stale content left over from an
+  // earlier mount - never derived from the file's own name/path, which can differ from the request path
+  // that reached it (a token route, for instance).
+  it("the embedded context's embeddedFor equals the request path, for both the readable path and the token", async () => {
+    const { collectionName, linkToken } = await seed({ name: "stamped.jpg", protection: "public" });
+
+    const byPath = await get(`/f/${collectionName}/stamped.jpg`);
+    expect((embeddedContextOf(byPath.body) as PreviewContext & { embeddedFor: string }).embeddedFor).toBe(
+      `/f/${collectionName}/stamped.jpg`,
+    );
+
+    const byToken = await get(`/t/${linkToken}`);
+    expect((embeddedContextOf(byToken.body) as PreviewContext & { embeddedFor: string }).embeddedFor).toBe(
+      `/t/${linkToken}`,
+    );
+  });
+
   it("private: 200, minimal head only, no OG, no embedded context, no filename anywhere", async () => {
     const { collectionName } = await seed({
       name: "secret-plans.txt",
@@ -523,10 +541,10 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
   // this suite was written), so a real file/collection token collision cannot occur - "a file token wins"
   // (§1.1) is defensive ordering in the dispatcher, not something a live collision test could exercise.
 
-  function embeddedLocationOf(body: string): CollectionLocation {
+  function embeddedLocationOf(body: string): CollectionLocation & { embeddedFor: string } {
     const match = /<script type="application\/json" id="preview-context">(.*?)<\/script>/.exec(body);
     expect(match).not.toBeNull();
-    return JSON.parse(match![1]) as CollectionLocation;
+    return JSON.parse(match![1]) as CollectionLocation & { embeddedFor: string };
   }
 
   describe("a collection's previewUrl resolves in both shapes (the test whose absence let this ship)", () => {
@@ -545,7 +563,7 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       // so this checks for the title element rather than a literal "Hannah's" substring.
       expect(res.body).toMatch(new RegExp(`<title>${collection.name} · Hannah&#x27;s File Drop</title>`));
       const location = embeddedLocationOf(res.body);
-      expect(location).toEqual({ kind: "collection", collectionId: collection.id });
+      expect(location).toEqual({ kind: "collection", collectionId: collection.id, embeddedFor: `/f/${collection.name}` });
     });
 
     it("the SAME public collection's /t/<token> also 200s with the same CollectionLocation", async () => {
@@ -558,7 +576,11 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       const res = await get(`/t/${collection.linkToken}`);
 
       expect(res.statusCode).toBe(200);
-      expect(embeddedLocationOf(res.body)).toEqual({ kind: "collection", collectionId: collection.id });
+      expect(embeddedLocationOf(res.body)).toEqual({
+        kind: "collection",
+        collectionId: collection.id,
+        embeddedFor: `/t/${collection.linkToken}`,
+      });
     });
 
     it("a nested collection resolves by its full path", async () => {
@@ -576,7 +598,11 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       });
       const res = await get(`/f/${top.name}/child`);
       expect(res.statusCode).toBe(200);
-      expect(embeddedLocationOf(res.body)).toEqual({ kind: "collection", collectionId: child.id });
+      expect(embeddedLocationOf(res.body)).toEqual({
+        kind: "collection",
+        collectionId: child.id,
+        embeddedFor: `/f/${top.name}/child`,
+      });
     });
 
     it("an unknown collection path/token still 404s (no regression on the file-not-found case)", async () => {
@@ -609,7 +635,11 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
 
       const byToken = await get(`/t/${collection.linkToken}`);
       expect(byToken.statusCode).toBe(200);
-      expect(embeddedLocationOf(byToken.body)).toEqual({ kind: "collection", collectionId: collection.id });
+      expect(embeddedLocationOf(byToken.body)).toEqual({
+        kind: "collection",
+        collectionId: collection.id,
+        embeddedFor: `/t/${collection.linkToken}`,
+      });
     });
 
     it("private: anonymous 404s at the readable path (unlike a file, which reveals nothing but still 200s)", async () => {
@@ -636,7 +666,11 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       });
       const res = await get(`/f/${collection.name}`);
       expect(res.statusCode).toBe(200);
-      expect(embeddedLocationOf(res.body)).toEqual({ kind: "collection", collectionId: collection.id });
+      expect(embeddedLocationOf(res.body)).toEqual({
+        kind: "collection",
+        collectionId: collection.id,
+        embeddedFor: `/f/${collection.name}`,
+      });
     });
 
     it("private: the owner and a superuser CAN reach it at the readable path", async () => {
@@ -650,7 +684,11 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       verifyMock.mockResolvedValue({ sub: "user:owner" } as never);
       const ownerRes = await get(`/f/${collection.name}`, { authorization: "Bearer t" });
       expect(ownerRes.statusCode).toBe(200);
-      expect(embeddedLocationOf(ownerRes.body)).toEqual({ kind: "collection", collectionId: collection.id });
+      expect(embeddedLocationOf(ownerRes.body)).toEqual({
+        kind: "collection",
+        collectionId: collection.id,
+        embeddedFor: `/f/${collection.name}`,
+      });
 
       verifyMock.mockResolvedValue({ sub: "user:root", mosni_owner: true } as never);
       expect((await get(`/f/${collection.name}`, { authorization: "Bearer t" })).statusCode).toBe(200);
@@ -702,7 +740,11 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       verifyMock.mockResolvedValue({ sub: "user:granted" } as never);
       const res = await get(`/f/${top.name}/child`, { authorization: "Bearer t" });
       expect(res.statusCode).toBe(200);
-      expect(embeddedLocationOf(res.body)).toEqual({ kind: "collection", collectionId: child.id });
+      expect(embeddedLocationOf(res.body)).toEqual({
+        kind: "collection",
+        collectionId: child.id,
+        embeddedFor: `/f/${top.name}/child`,
+      });
     });
 
     it("a collection nested under a secret ancestor also 404s at its own readable path (secret never resolves, D-96)", async () => {

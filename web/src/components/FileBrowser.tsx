@@ -37,7 +37,9 @@ import { formatUploadDate, humanSize } from "../../../app/src/lib/previewContext
 import { toastMutationFailure } from "../lib/mutationError.ts";
 import { fetchCollections, type CollectionOption } from "../lib/collections.ts";
 import { downloadArchive, isArchiveSupported, type ArchiveProgress } from "../lib/archive.ts";
+import { isPlainLeftClick, pathnameOf } from "../lib/links.ts";
 import { DropZone } from "./DropZone.tsx";
+import { IconConfirmCancel, RenameInput } from "./InlineRename.tsx";
 import { ProtectionControl } from "./ProtectionControl.tsx";
 import { VisibilityIndicator } from "./VisibilityIndicator.tsx";
 
@@ -98,19 +100,6 @@ function browseUrl(scope: Scope, collectionId: string, offset: number, token?: s
   return url;
 }
 
-// D-100: the client never constructs a URL - this only ever extracts the PATHNAME from a `previewUrl`
-// the server already built (a row's own, or a breadcrumb crumb's), for use with react-router's navigate().
-function pathnameOf(absoluteUrl: string): string {
-  return new URL(absoluteUrl).pathname;
-}
-
-// D-121 (E4.1 Wave E findings, C3): a modified or non-primary click is the browser's to handle -
-// preventDefault() here would silently break open-in-new-tab, which is half the reason breadcrumb crumbs
-// and a collection's name are real <a href>s at all. Used on every such link.
-function isPlainLeftClick(event: React.MouseEvent): boolean {
-  return !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.button === 0;
-}
-
 function currentToken(): string | null {
   return typeof window.mosni !== "undefined" ? window.mosni.token() : null;
 }
@@ -162,12 +151,12 @@ function MoveModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  // Rendered only while open (unlike the Delete modal elsewhere in this file, which stays mounted with
-  // `open` toggled) - a second always-mounted <select> would collide with every existing "the select"
-  // query the protection control's own tests already rely on, and there is nothing here worth keeping
-  // warm in the background the way Delete's dry-run count is.
-  if (!open) return <mosni-modal heading={`Move "${itemName}"`} open={false} />;
-
+  // Finding 11 / D-8 (E5.1 live-testing): always render the children and toggle only `open`, exactly as
+  // the Delete modal immediately below already does. A conditionally-rendered custom-element child is
+  // not safe in this design system - React keeps the same DOM element across the toggle and appends
+  // children AFTER it has already connected, so a real mosni-modal never projects them into its dialog
+  // and they land wherever this component sits in the page instead (see technical-baseline.md's
+  // custom-element guidance).
   return (
     <mosni-modal heading={`Move "${itemName}"`} open={open}>
       <div className="field" style={{ marginBottom: 0 }}>
@@ -197,67 +186,8 @@ function MoveModal({
 
 // C8/C10 (E4.1 Wave E findings): the confirm/cancel pair for both inline rename and the new-collection
 // placeholder row - same shape (two `btn-icon` buttons, check/x), different accessible names and,
-// for the create case, a disabled state while the name is empty.
-function IconConfirmCancel({
-  onConfirm,
-  onCancel,
-  confirmDisabled,
-  confirmLabel,
-  cancelLabel,
-}: {
-  onConfirm: () => void;
-  onCancel: () => void;
-  confirmDisabled?: boolean;
-  confirmLabel: string;
-  cancelLabel: string;
-}) {
-  return (
-    <>
-      <button type="button" className="btn-icon" aria-label={confirmLabel} disabled={confirmDisabled} onClick={onConfirm}>
-        <mosni-icon name="check" size="16" />
-      </button>
-      <button type="button" className="btn-icon" aria-label={cancelLabel} onClick={onCancel}>
-        <mosni-icon name="x" size="16" />
-      </button>
-    </>
-  );
-}
-
-// C8: the shared inline rename input - lives in the NAME cell while a row is being renamed. Value/onChange
-// are lifted to the row component (FileRow/CollectionRow) so the confirm button in the ACTIONS cell can
-// submit the same value. Enter submits, Escape cancels - there is no <form> spanning the two cells.
-function RenameInput({
-  value,
-  onChange,
-  onSubmit,
-  onCancel,
-}: {
-  value: string;
-  onChange: (next: string) => void;
-  onSubmit: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <div className="field" style={{ marginBottom: 0 }}>
-      <input
-        aria-label="New name"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            onSubmit();
-          } else if (e.key === "Escape") {
-            e.preventDefault();
-            onCancel();
-          }
-        }}
-        // eslint-disable-next-line jsx-a11y/no-autofocus -- opening rename should focus the field it just revealed
-        autoFocus
-      />
-    </div>
-  );
-}
+// for the create case, a disabled state while the name is empty. Extracted to InlineRename.tsx (E5.1 Wave
+// G, finding 8) so the file-detail page can reuse the exact same interaction.
 
 function RowActions({
   name,
@@ -750,8 +680,8 @@ export function FileBrowser({
     // header comment), so without this gate the fetch fired before auth existed and its anonymous result
     // was never replaced - "Browse is empty until you switch tabs and back" was exactly that: switching
     // tabs changes `scope` twice, forcing the refetch this gate now makes unnecessary. `authReady` is a
-    // monotonic boolean, unlike `user` (a fresh reference on every SDK callback) - adding `user` instead
-    // would refetch the whole listing repeatedly rather than exactly once when auth resolves.
+    // monotonic boolean, unlike `user` (a fresh reference on every SDK callback) - adding `user` itself
+    // instead would refetch the whole listing repeatedly rather than exactly once when auth resolves.
     if (scope === null || !authReady) return;
     let cancelled = false;
     void fetch(browseUrl(scope, collectionId, 0, initialToken), authHeaders(currentToken()))
@@ -764,7 +694,14 @@ export function FileBrowser({
     };
     // collectionId/initialToken are fixed for this component's lifetime in collection-route mode (see the
     // header comment) but are still real dependencies for the root-mounted case's own lint correctness.
-  }, [scope, collectionId, reloadKey, initialToken, authReady]);
+    // Finding 2 (A1): `user?.sub` - a STABLE IDENTITY STRING, not `user` itself - is also a dependency.
+    // `authReady` flips true on the FIRST onChange, which fires anonymous; on a root-mounted browser a
+    // later sign-in also flips `scope` (mine/visible), so the effect already re-runs there, but a
+    // collection-route mount fixes `scope` at "visible" for its whole lifetime (see the header comment),
+    // so without this a sign-in after a cold anonymous load left the listing on its anonymous snapshot
+    // forever, with nothing left to trigger a refetch. `user?.sub` changes exactly when identity changes;
+    // `user` itself is a fresh reference on every SDK callback and would refetch on every single one.
+  }, [scope, collectionId, reloadKey, initialToken, authReady, user?.sub]);
 
   // D-116: Browse is always shown; My files only once signed in. No isFilesAdmin branch, and no role
   // branch of any kind - an admin sees the exact same two tabs as everyone else and sees more INSIDE
@@ -862,7 +799,14 @@ export function FileBrowser({
     return <span className="spinner" role="status" aria-label="Loading" />;
   }
 
-  const canCreateHere = scope === "mine" && user !== null && can(user, "files:write");
+  // Finding 9 (A3): line ~704 forces `scope` to "visible" for every collection route, so the old
+  // `scope === "mine"` gate could never hold there and the button never rendered inside a collection at
+  // all, even for its own owner. The server already computes canUpload for THAT specific collection
+  // (Wave C4/G2's compact upload box uses the same field) - a collection route gates on it directly
+  // instead of the tab scope, which does not exist in that mode.
+  const canCreateHere = isCollectionRoute
+    ? (data?.canUpload ?? false)
+    : scope === "mine" && user !== null && can(user, "files:write");
 
   return (
     <div style={{ display: "grid", gap: "1rem" }}>

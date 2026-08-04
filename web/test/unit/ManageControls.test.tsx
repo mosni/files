@@ -69,7 +69,92 @@ describe("ManageControls (D-89: rename, protection, delete - owner-only)", () =>
     vi.restoreAllMocks();
   });
 
-  it("renames: submits PATCH /api/files/:id with the new name and the Bearer, then calls onUpdate", async () => {
+  // G2 (E5.1 Wave D, finding 8): rename parity with the collection page's C8 interaction - a pencil
+  // trigger (D-111: btn-icon, never a bare <button>), not an always-visible input+button form.
+  it("rename starts collapsed behind a pencil icon button, and reveals the shared inline-rename control on click", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    act(() => {
+      root.render(<ManageControls context={makeContext()} />);
+    });
+
+    // Collapsed: name as plain text, no input, no form.
+    expect(container.textContent).toContain("photo.png");
+    expect(container.querySelector('input[aria-label="File name"]')).toBeNull();
+    const renameButton = container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement;
+    expect(renameButton).not.toBeNull();
+    expect(renameButton.className).toContain("btn-icon");
+
+    act(() => renameButton.click());
+
+    // Expanded: the shared InlineRename control (RenameInput + IconConfirmCancel), not a plain form.
+    const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    expect(input.value).toBe("photo.png");
+    expect(container.querySelector('button[aria-label="Save name"]')).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Cancel rename"]')).not.toBeNull();
+  });
+
+  it("cancelling the inline rename collapses back to the pencil trigger with no request issued", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    act(() => {
+      root.render(<ManageControls context={makeContext()} />);
+    });
+
+    act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
+    const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
+    act(() => {
+      setNativeInputValue(input, "changed.png");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    act(() => (container.querySelector('button[aria-label="Cancel rename"]') as HTMLButtonElement).click());
+
+    expect(container.querySelector('input[aria-label="File name"]')).toBeNull();
+    expect(container.textContent).toContain("photo.png"); // the ORIGINAL name, edit discarded
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("submitting the inline rename via the confirm icon PATCHes and calls onUpdate", async () => {
+    (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(makeContext({ name: "renamed.png" })),
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const onUpdate = vi.fn();
+
+    act(() => {
+      root.render(<ManageControls context={makeContext()} onUpdate={onUpdate} />);
+    });
+
+    act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
+    const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
+    act(() => {
+      setNativeInputValue(input, "renamed.png");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    await act(async () => {
+      (container.querySelector('button[aria-label="Save name"]') as HTMLButtonElement).click();
+      await flush();
+    });
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "/api/files/file0000000000id",
+      expect.objectContaining({
+        method: "PATCH",
+        headers: expect.objectContaining({ Authorization: "Bearer test-token" }),
+        body: JSON.stringify({ name: "renamed.png" }),
+      }),
+    );
+    expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ name: "renamed.png" }));
+    // Collapses back on success.
+    expect(container.querySelector('input[aria-label="File name"]')).toBeNull();
+  });
+
+  it("pressing Enter in the rename input submits, same as the confirm icon", async () => {
     (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
     const fetchSpy = vi.fn().mockResolvedValue({
       ok: true,
@@ -84,14 +169,14 @@ describe("ManageControls (D-89: rename, protection, delete - owner-only)", () =>
       root.render(<ManageControls context={ctx} onUpdate={onUpdate} />);
     });
 
+    act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
     const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
     act(() => {
       setNativeInputValue(input, "renamed.png");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    const form = container.querySelector("form") as HTMLFormElement;
     await act(async () => {
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
       await flush();
     });
 
@@ -120,18 +205,20 @@ describe("ManageControls (D-89: rename, protection, delete - owner-only)", () =>
       root.render(<ManageControls context={ctx} />);
     });
 
+    act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
     const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
     act(() => {
       setNativeInputValue(input, "taken.png");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    const form = container.querySelector("form") as HTMLFormElement;
     await act(async () => {
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      (container.querySelector('button[aria-label="Save name"]') as HTMLButtonElement).click();
       await flush();
     });
 
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("taken.png");
+    // Stays open on failure - the edit is not silently discarded.
+    expect(container.querySelector('input[aria-label="File name"]')).not.toBeNull();
   });
 
   it("changes protection: PATCH with the new level and the Bearer, then calls onUpdate", async () => {
@@ -241,14 +328,14 @@ describe("ManageControls (D-89: rename, protection, delete - owner-only)", () =>
       root.render(<ManageControls context={makeContext()} />);
     });
 
+    act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
     const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
     act(() => {
       setNativeInputValue(input, "a/b.png");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    const form = container.querySelector("form") as HTMLFormElement;
     await act(async () => {
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      (container.querySelector('button[aria-label="Save name"]') as HTMLButtonElement).click();
       await flush();
     });
 

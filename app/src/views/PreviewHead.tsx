@@ -229,8 +229,14 @@ export function renderPreviewHead(ctx: PreviewContext | null, appOrigin: string)
   return renderToString(<FullHead ctx={ctx} appOrigin={appOrigin} />);
 }
 
-function EmbeddedContext({ ctx }: { ctx: PreviewContext }) {
-  const json = escapeScriptBody(JSON.stringify(ctx));
+// D-160 (E5.1 Wave B, finding 3): `embeddedFor` is a property of the EMBEDDING (the request pathname this
+// document was rendered for), not of the file - so it is stamped onto the wrapper serialized here rather
+// than added to PreviewContext itself, which is also the /api/preview response body and has no embedding
+// to describe. The client (web/src/pages/Preview.tsx) compares its own current pathname against this
+// stamp, never against wherever it happens to have mounted - see that file's comment for why the previous
+// mount-path-ref approach could paint stale content after a remount.
+function EmbeddedContext({ ctx, embeddedFor }: { ctx: PreviewContext; embeddedFor: string }) {
+  const json = escapeScriptBody(JSON.stringify({ ...ctx, embeddedFor }));
   return (
     // Same escaping requirement as the JSON-LD block above - this is what lets the SPA read the file's
     // context with zero round trips, so it must never let a filename break out of its <script> body.
@@ -238,8 +244,8 @@ function EmbeddedContext({ ctx }: { ctx: PreviewContext }) {
   );
 }
 
-export function renderEmbeddedContext(ctx: PreviewContext): string {
-  return renderToString(<EmbeddedContext ctx={ctx} />);
+export function renderEmbeddedContext(ctx: PreviewContext, embeddedFor: string): string {
+  return renderToString(<EmbeddedContext ctx={ctx} embeddedFor={embeddedFor} />);
 }
 
 // D-107/§1.2: the collection counterpart of FullHead/MinimalHead above. No OG/JSON-LD unfurl richness -
@@ -262,15 +268,16 @@ export function renderCollectionHead(name: string, isPublic: boolean): string {
 
 // Reuses the SAME #preview-context script id/type EmbeddedContext above uses (waves hand-off: "reuse the
 // existing mechanism, do not add a second one") - CollectionLocation's `kind: "collection"` is what lets
-// the client tell the two shapes apart from that one element.
-function EmbeddedCollectionLocation({ location }: { location: CollectionLocation }) {
-  const json = escapeScriptBody(JSON.stringify(location));
+// the client tell the two shapes apart from that one element. Same D-160 `embeddedFor` stamp as
+// EmbeddedContext above, for the same reason - a collection's own page can go stale across a remount too.
+function EmbeddedCollectionLocation({ location, embeddedFor }: { location: CollectionLocation; embeddedFor: string }) {
+  const json = escapeScriptBody(JSON.stringify({ ...location, embeddedFor }));
   return (
     // biome-ignore lint: same dangerouslySetInnerHTML requirement and escaping as EmbeddedContext above.
     <script type="application/json" id="preview-context" dangerouslySetInnerHTML={{ __html: json }} />
   );
 }
 
-export function renderEmbeddedCollectionLocation(location: CollectionLocation): string {
-  return renderToString(<EmbeddedCollectionLocation location={location} />);
+export function renderEmbeddedCollectionLocation(location: CollectionLocation, embeddedFor: string): string {
+  return renderToString(<EmbeddedCollectionLocation location={location} embeddedFor={embeddedFor} />);
 }

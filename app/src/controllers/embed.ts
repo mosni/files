@@ -42,7 +42,7 @@ async function resolveEmbeddable(segments: readonly string[]): Promise<ResolvedF
 }
 
 export async function embedByPath(
-  _request: FastifyRequest,
+  request: FastifyRequest,
   reply: FastifyReply,
   config: Config,
   relPath: string,
@@ -67,7 +67,7 @@ export async function embedByPath(
     uploaderAvatarUrl: null,
   };
   const ctx = buildPreviewContext(resolved, displaySegments.join("/"), urls);
-  const head = renderEmbedHead(ctx) + renderEmbeddedContext(ctx);
+  const head = renderEmbedHead(ctx) + renderEmbeddedContext(ctx, request.url);
   // H2: overrides helmet's globally-registered CSP for THIS response only, widening frame-ancestors to the
   // named platform origins - set here, after helmet's onRequest-time default already ran, so this later
   // write wins. Every other route is untouched (verified in security-headers.test.ts).

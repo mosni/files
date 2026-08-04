@@ -81,28 +81,118 @@ describe("VideoPreview (E5 Wave F, D-144 'plays where it plays')", () => {
     expect(container.querySelector(".panel")).toBeNull();
   });
 
-  it("skips mounting the player and shows the download card when canPlayType reports '' (authoritative no)", () => {
-    vi.spyOn(window.HTMLMediaElement.prototype, "canPlayType").mockReturnValue("");
+  // D1/AC-D1 (E5.1 Wave D): the old canDefinitelyNotPlay() pre-check is GONE. Vidstack refuses a source on
+  // its declared MIME type alone (video/quicktime, video/x-m4v and video/x-matroska all rejected outright,
+  // measured session 035) - which is exactly what D-144's own MIME widening produced for .mov/.m4v/.mkv,
+  // so the pre-check was short-circuiting three of the five allowlisted containers to the download card
+  // even when the BROWSER could have played the bytes. The source is now passed with no `type` hint at all
+  // (D0/D1, the same edit), so the browser decides purely from the URL/bytes.
+  //
+  // `.mov` here, not `.mkv`: Vidstack's OWN provider loader also infers a provider from the URL extension
+  // when given no explicit type - measured directly, `.mov`/`.m4v` resolve to the HTML5 video provider
+  // that way (matching what D1 promises) but `.mkv` does not, on ANY of these three MIME types, because
+  // Vidstack's extension table itself has no `.mkv` entry - an unrelated, pre-existing gap in Vidstack, not
+  // a regression this change causes. It does not matter for `.mkv` in practice: no mainstream browser
+  // decodes Matroska today (D-146), so it was always going to reach the download card either way - D2's
+  // deadline (below) still delivers that outcome correctly, just without ever mounting a `<video>` element
+  // for it specifically.
+  it("reaches the player for an exotic MIME type instead of being short-circuited (D1, AC-D1)", () => {
+    vi.spyOn(window.HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably");
 
     act(() => {
       root.render(
         <VideoPreview
           ctx={makeContext({
             kind: "video",
-            mimeType: "video/x-matroska",
-            name: "clip.mkv",
-            directUrl: "https://dl.mosni.dev/clip.mkv",
+            mimeType: "video/quicktime",
+            name: "clip.mov",
+            directUrl: "https://dl.mosni.dev/clip.mov",
           })}
         />,
       );
     });
 
-    expect(container.querySelector("media-player")).toBeNull();
-    // Inline-styled, not `.panel`/`.btn` (D-79 finding: the embeddable route never loads mosni-chrome's
-    // stylesheet, so a class-based fallback rendered invisibly there) - just a real, findable link.
-    const link = Array.from(container.querySelectorAll("a")).find((a) => a.textContent === "Download");
-    expect(link?.getAttribute("href")).toBe("https://dl.mosni.dev/clip.mkv");
-    expect(container.textContent).toContain("This video can't play in this browser.");
+    const player = container.querySelector("media-player");
+    expect(player).not.toBeNull();
+    // D0/D1: no `type` attribute/hint reaches the player - the browser decides purely from the bytes.
+    const video = findVideoElement(player!);
+    expect(video?.getAttribute("src")).toBe("https://dl.mosni.dev/clip.mov");
+  });
+
+  it(".mkv still degrades to the download card - via D2's deadline, since no browser decodes Matroska (D-146)", () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(window.HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably");
+
+      act(() => {
+        root.render(
+          <VideoPreview
+            ctx={makeContext({
+              kind: "video",
+              mimeType: "video/x-matroska",
+              name: "clip.mkv",
+              directUrl: "https://dl.mosni.dev/clip.mkv",
+            })}
+          />,
+        );
+      });
+
+      act(() => {
+        vi.advanceTimersByTime(8000);
+      });
+
+      expect(container.querySelector("media-player")).toBeNull();
+      expect(container.textContent).toContain("This video can't play in this browser.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // D2/AC-D2 (E5.1 Wave D): this is the wave's core change, and it closes finding 5 without knowing its
+  // cause. The player is optimistic no longer - it is shown only while it is affirmatively proving it
+  // works (a can-play/loaded-data signal); nothing raises one in this environment (jsdom has no real media
+  // pipeline - the same limitation documented below for `error`), so this exercises the genuine "nothing
+  // ever confirms" path the deadline exists for.
+  it("shows the download card after the deadline when the player never confirms it can play (AC-D2)", () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(window.HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably");
+
+      act(() => {
+        root.render(<VideoPreview ctx={makeContext()} />);
+      });
+      expect(container.querySelector("media-player")).not.toBeNull(); // mounted - still checking
+
+      act(() => {
+        vi.advanceTimersByTime(8000);
+      });
+
+      expect(container.querySelector("media-player")).toBeNull();
+      const link = Array.from(container.querySelectorAll("a")).find((a) => a.textContent === "Download");
+      expect(link?.getAttribute("href")).toBe("https://dl.mosni.dev/clip.mp4");
+      expect(container.textContent).toContain("This video can't play in this browser.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not fall back before the deadline expires", () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(window.HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably");
+
+      act(() => {
+        root.render(<VideoPreview ctx={makeContext()} />);
+      });
+
+      act(() => {
+        vi.advanceTimersByTime(7999);
+      });
+
+      expect(container.querySelector("media-player")).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // NOT automated, and deliberately not chased further: maverick.js/react wires `onError` through its OWN
@@ -117,19 +207,57 @@ describe("VideoPreview (E5 Wave F, D-144 'plays where it plays')", () => {
   // download card"), exercised there against a real browser. The canPlayType()==="" fast path above IS
   // automated and reaches the identical fallback UI.
 
-  it("re-derives playability fresh for a new file rather than carrying over a stale fallback", () => {
-    const canPlayType = vi.spyOn(window.HTMLMediaElement.prototype, "canPlayType");
+  // D0/AC-D0 (finding 5, D-164): a single re-render after the player mounts used to destroy it, because
+  // the source was passed as an inline object literal - a NEW object every render, which Vidstack's React
+  // wrapper compares by identity, tearing its provider down and never rebuilding it. The owner ALWAYS hits
+  // this (Preview.tsx's Bearer re-fetch guarantees a render); a signed-out visitor never does, which is why
+  // 874 tests and every anonymous check passed while this was broken.
+  it("survives an unrelated re-render with unchanged props (AC-D0, finding 5, D-164)", () => {
+    vi.spyOn(window.HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably");
+    const ctx = makeContext();
 
-    canPlayType.mockReturnValue("");
     act(() => {
-      root.render(<VideoPreview ctx={makeContext({ name: "first.mkv", directUrl: "https://dl.mosni.dev/first.mkv" })} />);
+      root.render(<VideoPreview ctx={ctx} />);
     });
-    expect(container.querySelector("media-player")).toBeNull();
+    const playerBefore = container.querySelector("media-player");
+    expect(playerBefore).not.toBeNull();
+    expect(findVideoElement(playerBefore!)).not.toBeNull();
 
-    canPlayType.mockReturnValue("probably");
+    // Force a second render with unchanged props - e.g. the owner's Bearer re-fetch in Preview.tsx, which
+    // calls setState with a value that renders identically but is a NEW reference every time.
     act(() => {
-      root.render(<VideoPreview ctx={makeContext({ name: "second.mp4", directUrl: "https://dl.mosni.dev/second.mp4" })} />);
+      root.render(<VideoPreview ctx={ctx} />);
     });
-    expect(container.querySelector("media-player")).not.toBeNull();
+
+    const playerAfter = container.querySelector("media-player");
+    expect(playerAfter).not.toBeNull();
+    const videoAfter = findVideoElement(playerAfter!);
+    expect(videoAfter).not.toBeNull();
+    expect(videoAfter?.getAttribute("src")).toBe(ctx.directUrl);
+  });
+
+  // D2: readiness is keyed on `ctx.directUrl`, not carried in a bare boolean the way the old
+  // canDefinitelyNotPlay()-only design was - a file that timed out must not leave a NEW file stuck showing
+  // the download card too.
+  it("re-derives readiness fresh for a new file rather than carrying over a stale fallback", () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(window.HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably");
+
+      act(() => {
+        root.render(<VideoPreview ctx={makeContext({ name: "first.mkv", directUrl: "https://dl.mosni.dev/first.mkv" })} />);
+      });
+      act(() => {
+        vi.advanceTimersByTime(8000);
+      });
+      expect(container.querySelector("media-player")).toBeNull(); // first file timed out - never confirmed
+
+      act(() => {
+        root.render(<VideoPreview ctx={makeContext({ name: "second.mp4", directUrl: "https://dl.mosni.dev/second.mp4" })} />);
+      });
+      expect(container.querySelector("media-player")).not.toBeNull(); // second file gets its OWN fresh check
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

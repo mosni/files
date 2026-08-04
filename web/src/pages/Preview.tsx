@@ -10,13 +10,67 @@
 // kind from the URL shape itself.
 
 import { useEffect, useRef, useState } from "react";
-import { useLocation, useParams } from "react-router";
+import { useLocation, useNavigate, useParams } from "react-router";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 import { readEmbeddedTarget, type EmbeddedTarget } from "../lib/previewContext.ts";
+import { isPlainLeftClick, pathnameOf } from "../lib/links.ts";
 import { PreviewCard } from "../components/PreviewCard.tsx";
 import { FileBrowser } from "../components/FileBrowser.tsx";
 
 type ApiTarget = PreviewContext | { kind: "collection"; collectionId: string };
+
+// G1 (E5.1 Wave G, finding 7): built from `ctx.path`/`ctx.previewUrl` - both already on the context, so
+// no re-derivation and no separate fetch. Reuses FileBrowser's own breadcrumb markup/aria-label so the two
+// surfaces match (same "Home" root crumb, same `/` separators).
+//
+// Ancestor segments (everything but the file's own trailing name) are rendered as plain text, NOT anchors.
+// This is a deliberate, narrower reading of D-121 than FileBrowser's own breadcrumb: PreviewContext carries
+// no per-ancestor collection id or URL the way `/api/browse`'s response does, so a clickable ancestor crumb
+// would have to be a URL ASSEMBLED from its bare name - exactly what D-100 ("the client constructs no
+// URLs") forbids. Only Home (`/`) and the file's own current-location crumb (`ctx.previewUrl`, a real,
+// already-resolved URL) are anchors. Flagged for the review session as a judgment call, not a silent
+// narrowing - see the session log.
+function Breadcrumb({ ctx }: { ctx: PreviewContext }) {
+  const navigate = useNavigate();
+  const segments = ctx.path.split("/");
+  const ancestors = segments.slice(0, -1);
+  const href = pathnameOf(ctx.previewUrl);
+
+  return (
+    <nav aria-label="Breadcrumb" style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap", alignItems: "center" }}>
+      <a
+        href="/"
+        onClick={(event) => {
+          if (!isPlainLeftClick(event)) return;
+          event.preventDefault();
+          navigate("/");
+        }}
+      >
+        Home
+      </a>
+      {ancestors.map((name, i) => (
+        // eslint-disable-next-line react/no-array-index-key -- names alone carry no stable identity here,
+        // and this list is never reordered independently of the pathname it derives from.
+        <span key={i} style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+          <span aria-hidden="true">/</span>
+          <span>{name}</span>
+        </span>
+      ))}
+      <span aria-hidden="true">/</span>
+      <a
+        href={href}
+        aria-current="location"
+        onClick={(event) => {
+          if (!isPlainLeftClick(event)) return;
+          event.preventDefault();
+          navigate(href);
+        }}
+      >
+        {ctx.name}
+      </a>
+    </nav>
+  );
+}
 
 type PageState =
   | { status: "loading" }
@@ -39,12 +93,16 @@ export function PreviewPage() {
   const { token } = useParams<{ token?: string }>();
   // Read the embedded target exactly once, at first render - a ref (not state) so re-renders never
   // re-parse it, and so the effect below can tell "had one at mount" apart from "state is now ready".
+  //
+  // D-160 (E5.1 Wave B, finding 3): validity is checked against the server's OWN STAMP
+  // (`embedded.embeddedFor`, set by PreviewHead.tsx to the request pathname it actually rendered the
+  // document for), never against wherever this component happens to have mounted. The previous version
+  // compared against a ref seeded from `location.pathname` at mount time, which is true by construction on
+  // every cold mount - so a REMOUNT (e.g. FileBrowser's `key` on a collection change) that inherited stale
+  // embedded content from an earlier document painted it as if it were valid for the new URL. Do not bring
+  // back a mount-path ref "as a belt and braces" - the moment it disagrees with the server's own stamp is
+  // exactly the bug this replaced.
   const embeddedRef = useRef<EmbeddedTarget | null | undefined>(undefined);
-  // The pathname the embedded target describes. The server embedded it for the document it rendered, so
-  // it is only valid for the URL the page arrived at; a client-side navigation to another target keeps
-  // this component (and this ref) mounted, so without remembering the mount path we would go on painting
-  // whatever we arrived with. Beyond that path the API is the only source (B2d step 2).
-  const embeddedPathRef = useRef<string>(location.pathname);
   if (embeddedRef.current === undefined) {
     embeddedRef.current = readEmbeddedTarget();
   }
@@ -85,7 +143,7 @@ export function PreviewPage() {
     const authToken = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
     const apiUrl = `/api/preview${location.pathname}`;
     const embedded = embeddedRef.current;
-    const hadEmbedded = embedded !== null && embeddedPathRef.current === location.pathname;
+    const hadEmbedded = embedded !== null && embedded !== undefined && embedded.embeddedFor === location.pathname;
 
     async function run() {
       if (hadEmbedded) {
@@ -152,5 +210,10 @@ export function PreviewPage() {
     return <FileBrowser key={state.collectionId} initialCollectionId={state.collectionId} initialToken={token} />;
   }
 
-  return <PreviewCard context={state.context} />;
+  return (
+    <div style={{ display: "grid", gap: "1rem" }}>
+      <Breadcrumb ctx={state.context} />
+      <PreviewCard context={state.context} />
+    </div>
+  );
 }

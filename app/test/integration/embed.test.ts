@@ -117,6 +117,17 @@ describe("routes/embed.ts + controllers/embed.ts (E5 Wave H, D-140)", () => {
     expect(frameAncestors).not.toContain("'self'");
   });
 
+  // D-160 (E5.1 Wave B, finding 3): same stamp as the ordinary preview document - the embed route reuses
+  // renderEmbeddedContext, so it must reuse the D-160 fix too, not just the mechanism.
+  it("stamps embeddedFor with the embed route's own request path, not the file's own name/path", async () => {
+    const { collectionName } = await seed({ name: "clip.mp4", protection: "public" });
+    const res = await get(`/embed/f/${collectionName}/clip.mp4`);
+
+    const match = /<script type="application\/json" id="preview-context">(.*?)<\/script>/.exec(res.body);
+    expect(match).not.toBeNull();
+    expect(JSON.parse(match![1]).embeddedFor).toBe(`/embed/f/${collectionName}/clip.mp4`);
+  });
+
   it("an unlisted video also renders (readable path resolves)", async () => {
     const { collectionName } = await seed({ name: "clip.mp4", protection: "unlisted" });
     const res = await get(`/embed/f/${collectionName}/clip.mp4`);

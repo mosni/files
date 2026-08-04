@@ -131,7 +131,7 @@ function previewUrlsFor(
   };
 }
 
-async function sendDocument(reply: FastifyReply, config: Config, record: ResolvedFile): Promise<void> {
+async function sendDocument(reply: FastifyReply, config: Config, record: ResolvedFile, embeddedFor: string): Promise<void> {
   const segments = await displayPathFor(record);
   const urls = previewUrlsFor(config, record, segments);
   const ctx = buildPreviewContext(record, segments.join("/"), urls);
@@ -141,19 +141,19 @@ async function sendDocument(reply: FastifyReply, config: Config, record: Resolve
   const head =
     record.effectiveProtection === "private"
       ? renderPreviewHead(null, config.appOrigin)
-      : renderPreviewHead(ctx, config.appOrigin) + renderEmbeddedContext(ctx);
+      : renderPreviewHead(ctx, config.appOrigin) + renderEmbeddedContext(ctx, embeddedFor);
   reply.type("text/html; charset=utf-8").send(injectHead(getSpaShell(), head));
 }
 
 // D-107/§1.2: both /f/<...> and /t/<token> resolve to a collection id, and the SPA opens the browser
 // there - reusing the D-70 embedded-context splice (renderEmbeddedCollectionLocation), never a second
 // delivery mechanism.
-async function sendCollectionDocument(reply: FastifyReply, resolved: ResolvedCollection): Promise<void> {
+async function sendCollectionDocument(reply: FastifyReply, resolved: ResolvedCollection, embeddedFor: string): Promise<void> {
   const location: CollectionLocation = { kind: "collection", collectionId: resolved.id };
   const head = renderCollectionHead(resolved.name, resolved.effectiveProtection === "public");
   reply
     .type("text/html; charset=utf-8")
-    .send(injectHead(getSpaShell(), head + renderEmbeddedCollectionLocation(location)));
+    .send(injectHead(getSpaShell(), head + renderEmbeddedCollectionLocation(location, embeddedFor)));
 }
 
 export async function previewByPath(
@@ -172,13 +172,13 @@ export async function previewByPath(
   // collided (they don't in practice; link tokens and collection paths are distinct spaces).
   const fileRecord = await resolveDocumentByNames(segments);
   if (fileRecord !== null) {
-    await sendDocument(reply, config, fileRecord);
+    await sendDocument(reply, config, fileRecord, request.url);
     return;
   }
 
   const collectionRecord = await resolveDocumentCollectionByNames(request, config, segments);
   if (collectionRecord !== null) {
-    await sendCollectionDocument(reply, collectionRecord);
+    await sendCollectionDocument(reply, collectionRecord, request.url);
     return;
   }
 
@@ -186,14 +186,14 @@ export async function previewByPath(
 }
 
 export async function previewByToken(
-  _request: FastifyRequest,
+  request: FastifyRequest,
   reply: FastifyReply,
   config: Config,
   token: string,
 ): Promise<void> {
   const fileRecord = await resolveByToken(token);
   if (fileRecord !== null) {
-    await sendDocument(reply, config, await resolveEffective(fileRecord));
+    await sendDocument(reply, config, await resolveEffective(fileRecord), request.url);
     return;
   }
 
@@ -201,7 +201,7 @@ export async function previewByToken(
   // knowing the unguessable token IS the access grant (D-59/D-98). A `secret` collection resolves here.
   const collectionRecord = await resolveCollectionByToken(token);
   if (collectionRecord !== null) {
-    await sendCollectionDocument(reply, await resolveCollectionEffective(collectionRecord));
+    await sendCollectionDocument(reply, await resolveCollectionEffective(collectionRecord), request.url);
     return;
   }
 

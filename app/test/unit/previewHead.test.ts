@@ -360,7 +360,7 @@ describe("XSS: a filename containing </script> and an onerror payload", () => {
 
   it("produces no literal </script> in the embedded-context block", () => {
     const ctx = makeCtx({ name: evilName });
-    const embedded = renderEmbeddedContext(ctx);
+    const embedded = renderEmbeddedContext(ctx, "/f/dir/photo.png");
     const ctxMatch = /<script type="application\/json" id="preview-context">(.*?)<\/script>/.exec(embedded);
     expect(ctxMatch).not.toBeNull();
     expect(ctxMatch![1]).not.toContain("</script>");
@@ -372,7 +372,7 @@ describe("XSS: a filename containing </script> and an onerror payload", () => {
   it("the full head string never contains the literal payload's closing tag", () => {
     const ctx = makeCtx({ name: evilName });
     const head = renderPreviewHead(ctx, APP_ORIGIN);
-    const embedded = renderEmbeddedContext(ctx);
+    const embedded = renderEmbeddedContext(ctx, "/f/dir/photo.png");
     expect(head + embedded).not.toContain("</script><img");
   });
 });
@@ -380,17 +380,29 @@ describe("XSS: a filename containing </script> and an onerror payload", () => {
 describe("renderEmbeddedContext()", () => {
   it("emits a script tag with type application/json and id preview-context", () => {
     const ctx = makeCtx();
-    const embedded = renderEmbeddedContext(ctx);
+    const embedded = renderEmbeddedContext(ctx, "/f/dir/photo.png");
     expect(embedded).toContain('<script type="application/json" id="preview-context">');
     expect(embedded.trim().endsWith("</script>")).toBe(true);
   });
 
   it("round-trips to a PreviewContext with isOwner false and matching urls", () => {
     const ctx = makeCtx();
-    const embedded = renderEmbeddedContext(ctx);
+    const embedded = renderEmbeddedContext(ctx, "/f/dir/photo.png");
     const match = /<script type="application\/json" id="preview-context">(.*?)<\/script>/.exec(embedded);
     const parsed = JSON.parse(match![1]);
-    expect(parsed).toEqual(ctx);
+    // D-160: embeddedFor is a property of the EMBEDDING, stamped alongside the file's own fields on the
+    // one wrapper object serialized here - strip it back out before comparing against the plain ctx.
+    const { embeddedFor, ...rest } = parsed;
+    expect(rest).toEqual(ctx);
     expect(parsed.isOwner).toBe(false);
+  });
+
+  // D-160 (E5.1 Wave B, finding 3): the client compares its current pathname against THIS stamp, never
+  // against wherever it happens to have mounted - see pages/Preview.tsx's comment for the bug this fixes.
+  it("stamps embeddedFor with the path it was rendered for", () => {
+    const ctx = makeCtx();
+    const embedded = renderEmbeddedContext(ctx, "/f/dir/photo.png");
+    const match = /<script type="application\/json" id="preview-context">(.*?)<\/script>/.exec(embedded);
+    expect(JSON.parse(match![1]).embeddedFor).toBe("/f/dir/photo.png");
   });
 });
