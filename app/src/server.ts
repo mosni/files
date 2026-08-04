@@ -20,7 +20,6 @@ import { registerDeliveryRoutes } from "./routes/delivery.ts";
 import { registerPreviewRoutes } from "./routes/preview.ts";
 import { registerManageRoutes } from "./routes/manage.ts";
 import { registerBrowseRoutes } from "./routes/browse.ts";
-import { registerAvatarRoutes } from "./routes/avatar.ts";
 import { registerEmbedRoutes } from "./routes/embed.ts";
 import { initEmbedShell } from "./storage/embedShell.ts";
 import { CSP_DIRECTIVES } from "./lib/csp.ts";
@@ -114,9 +113,6 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
   // E4: the file browser's listing API. files.mosni.dev-only; scope=visible is this app's first and only
   // anonymous listing endpoint (D-94).
   await registerBrowseRoutes(app, config);
-  // E5/D-136: the uploader avatar proxy. files.mosni.dev-only, same containment reasoning as above - the
-  // raw sub never reaches the client (see controllers/avatar.ts).
-  await registerAvatarRoutes(app, config);
   // E5 Wave H/D-140: the embeddable player route (twitter:card=player's target). files.mosni.dev-only.
   await registerEmbedRoutes(app, config);
 

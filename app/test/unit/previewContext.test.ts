@@ -43,7 +43,7 @@ const urls = {
   previewUrl: "https://files.mosni.dev/f/dir/photo.png",
   directUrl: "https://dl.mosni.dev/dir/photo.png",
   thumbUrl: null as string | null,
-  uploaderAvatarUrl: "https://files.mosni.dev/api/avatar/file0000000000id",
+  uploaderAvatarUrl: "https://auth.mosni.dev/avatar/user-1",
 };
 
 describe("humanSize() - binary units, 1 decimal place", () => {
@@ -139,7 +139,7 @@ describe("buildPreviewContext()", () => {
     expect(ctx.thumbUrl).toBe("https://dl.mosni.dev/thumb/dir/photo.png");
   });
 
-  it("maps uploaderName straight through, and uploaderAvatarUrl alongside it (D-136)", () => {
+  it("maps uploaderName straight through, and uploaderAvatarUrl alongside it (D-169)", () => {
     const ctx = buildPreviewContext(makeRecord({ uploaderName: "Hannah" }), displayPath, urls);
     expect(ctx.uploaderName).toBe("Hannah");
     expect(ctx.uploaderAvatarUrl).toBe(urls.uploaderAvatarUrl);
@@ -155,7 +155,7 @@ describe("buildPreviewContext()", () => {
     expect(ctx.uploaderAvatarUrl).toBe(urls.uploaderAvatarUrl);
   });
 
-  it("uploaderAvatarUrl is null when there is no uploaderSub at all - nothing to proxy (C1)", () => {
+  it("uploaderAvatarUrl is null when there is no uploaderSub at all - nothing to link to (C1)", () => {
     const ctx = buildPreviewContext(makeRecord({ uploaderName: null, uploaderSub: null }), displayPath, urls);
     expect(ctx.uploaderAvatarUrl).toBeNull();
   });

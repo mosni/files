@@ -35,10 +35,11 @@ export type PreviewContext = {
   textPreview: string | null; // .txt only: first 400 chars, sanitised
   uploaderName: string | null; // display name, or the sub itself as an unconditional fallback (D-168 -
   // see buildPreviewContext). null only when there is no uploaderSub at all.
-  uploaderAvatarUrl: string | null; // files.-relative proxy URL (/api/avatar/<file id>), or null. NEVER
-  // auth.mosni.dev/avatar/<sub> directly (D-92/D-136) - C1 (E5.1 Wave C): null exactly when there is no
-  // uploaderSub at all, NOT when uploaderName is null. A file with a captured sub but no name still has
-  // an avatar - only uploaderName's presence is independent (see buildPreviewContext's D-168 fallback).
+  uploaderAvatarUrl: string | null; // auth.mosni.dev/avatar/<sub> DIRECTLY (D-169, reverses D-92/D-136's
+  // proxy-only rule - now moot since D-168 already shows the raw sub as text whenever there is no name).
+  // C1 (E5.1 Wave C): null exactly when there is no uploaderSub at all, NOT when uploaderName is null. A
+  // file with a captured sub but no name still has an avatar - only uploaderName's presence is independent
+  // (see buildPreviewContext's D-168 fallback).
   isOwner: boolean; // ALWAYS false in the embedded document copy (D-75: the document is
   // anonymous). Only the API, given a Bearer, can return true.
 };

@@ -311,9 +311,9 @@ describe("PreviewPage", () => {
     expect(container.textContent).toContain("You own this file");
   });
 
-  it("renders the uploader's name and avatar when uploaderName is present (D-136)", () => {
+  it("renders the uploader's name and avatar when uploaderName is present (D-169)", () => {
     embedContext(
-      makeContext({ uploaderName: "Hannah", uploaderAvatarUrl: "https://files.mosni.dev/api/avatar/file0000000000id" }),
+      makeContext({ uploaderName: "Hannah", uploaderAvatarUrl: "https://auth.mosni.dev/avatar/user-1" }),
     );
     vi.stubGlobal("fetch", vi.fn());
 
@@ -321,7 +321,7 @@ describe("PreviewPage", () => {
 
     expect(container.textContent).toContain("Hannah");
     const avatar = container.querySelector("img[alt='']");
-    expect(avatar?.getAttribute("src")).toBe("https://files.mosni.dev/api/avatar/file0000000000id");
+    expect(avatar?.getAttribute("src")).toBe("https://auth.mosni.dev/avatar/user-1");
   });
 
   it("renders no uploader block at all when uploaderAvatarUrl is null (no uploaderSub at all) - never 'Unknown' (D-92/D-136)", () => {
@@ -336,14 +336,14 @@ describe("PreviewPage", () => {
 
   it("renders the avatar with no name when uploaderName is null but uploaderAvatarUrl is present (C1/C4)", () => {
     embedContext(
-      makeContext({ uploaderName: null, uploaderAvatarUrl: "https://files.mosni.dev/api/avatar/file0000000000id" }),
+      makeContext({ uploaderName: null, uploaderAvatarUrl: "https://auth.mosni.dev/avatar/user-1" }),
     );
     vi.stubGlobal("fetch", vi.fn());
 
     renderAt("/f/photo.png");
 
     const avatar = container.querySelector("img[alt='']");
-    expect(avatar?.getAttribute("src")).toBe("https://files.mosni.dev/api/avatar/file0000000000id");
+    expect(avatar?.getAttribute("src")).toBe("https://auth.mosni.dev/avatar/user-1");
     expect(avatar?.parentElement?.querySelector("span.little-link")).toBeNull();
   });
 
@@ -378,7 +378,7 @@ describe("PreviewPage", () => {
       makeContext({
         createdAt,
         uploaderName: "hannah",
-        uploaderAvatarUrl: "https://files.mosni.dev/api/avatar/file0000000000id",
+        uploaderAvatarUrl: "https://auth.mosni.dev/avatar/user-1",
       }),
     );
     vi.stubGlobal("fetch", vi.fn());
@@ -411,7 +411,7 @@ describe("PreviewPage", () => {
     embedContext(
       makeContext({
         uploaderName: null,
-        uploaderAvatarUrl: "https://files.mosni.dev/api/avatar/file0000000000id",
+        uploaderAvatarUrl: "https://auth.mosni.dev/avatar/user-1",
       }),
     );
     vi.stubGlobal("fetch", vi.fn());
@@ -434,7 +434,7 @@ describe("PreviewPage", () => {
     embedContext(
       makeContext({
         uploaderName: "hannah",
-        uploaderAvatarUrl: "https://files.mosni.dev/api/avatar/file0000000000id",
+        uploaderAvatarUrl: "https://auth.mosni.dev/avatar/user-1",
       }),
     );
     vi.stubGlobal("fetch", vi.fn());

@@ -124,10 +124,11 @@ function previewUrlsFor(
   return {
     ...buildFileUrls(config, record.effectiveProtection, segments, record.linkToken),
     thumbUrl: buildThumbUrl(config, record.effectiveProtection, segments, record.linkToken, record.thumbName !== null),
-    // D-92/D-136: files.-relative always - never auth.mosni.dev/avatar/<sub> directly, which would put the
-    // raw sub in an <img src> on a public page. buildPreviewContext nulls this again when uploaderName is
-    // null, so this unconditional construction is safe even for a file with no captured name.
-    uploaderAvatarUrl: `${config.appOrigin}/api/avatar/${record.id}`,
+    // D-169 (reverses D-92/D-136's files.-relative-proxy rule): auth.mosni.dev/avatar/<sub> directly -
+    // Hannah's call, the proxy added nothing once D-168 already shows the raw sub as text. null when there
+    // is no uploaderSub to build a URL from; buildPreviewContext gates on the same field again for C1.
+    uploaderAvatarUrl:
+      record.uploaderSub === null ? null : `${config.authIssuer}/avatar/${encodeURIComponent(record.uploaderSub)}`,
   };
 }
 
@@ -229,10 +230,11 @@ async function hasElevatedAccess(
   );
 }
 
-// D-84/D-137/D-136: only an authenticated, authorized request for a `private` file gets a signed directUrl
-// (and, when a thumbnail/avatar exist, signed thumbUrl/uploaderAvatarUrl too) - never the anonymous
-// embedded document (D-75 stands: it reveals nothing). Gated on the EFFECTIVE level (D-96): a file gated
-// only by its collection needs the same signed-URL treatment as one stored private itself.
+// D-84/D-137: only an authenticated, authorized request for a `private` file gets a signed directUrl (and,
+// when a thumbnail exists, a signed thumbUrl too) - never the anonymous embedded document (D-75 stands: it
+// reveals nothing). Gated on the EFFECTIVE level (D-96): a file gated only by its collection needs the
+// same signed-URL treatment as one stored private itself. uploaderAvatarUrl needs no signing (D-169): it
+// already points straight at auth.mosni.dev's own public avatar route, not a files.mosni.dev proxy of it.
 function withSignedDirectUrl(ctx: PreviewContext, config: Config, record: ResolvedFile): PreviewContext {
   if (record.effectiveProtection !== "private") return ctx;
   const expiresAt = Math.floor(Date.now() / 1000) + config.deliveryUrlTtlSeconds;
@@ -242,10 +244,6 @@ function withSignedDirectUrl(ctx: PreviewContext, config: Config, record: Resolv
     directUrl: `${config.dlOrigin}/s/${record.id}?exp=${expiresAt}&sig=${sig}`,
     thumbUrl:
       record.thumbName === null ? null : `${config.dlOrigin}/thumb/s/${record.id}?exp=${expiresAt}&sig=${sig}`,
-    // A browser <img> cannot attach a Bearer to the avatar proxy either - same fix, same signature (it
-    // signs only the file id, generic to whatever resource is asking).
-    uploaderAvatarUrl:
-      ctx.uploaderAvatarUrl === null ? null : `${config.appOrigin}/api/avatar/${record.id}?exp=${expiresAt}&sig=${sig}`,
   };
 }
 
