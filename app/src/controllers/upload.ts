@@ -16,7 +16,7 @@ import { Server as TusServer } from "@tus/server";
 import { FileStore } from "@tus/file-store";
 import type { Config } from "../config.ts";
 import { verify } from "../auth/verify.ts";
-import { can, isSuperuser, type VerifiedClaims } from "../lib/roles.ts";
+import { can, type VerifiedClaims } from "../lib/roles.ts";
 import { isReservedRootName, resolveRelPath, safeSegment } from "../lib/paths.ts";
 import { buildFileUrls } from "../lib/fileUrls.ts";
 import { generateId } from "../lib/ids.ts";
@@ -164,14 +164,10 @@ export function buildTusServer(config: Config): TusServer {
       // share an original filename once suffixing separates their display names.
 
       // D-136: the display name from the token's `name` claim, captured now since it never changes after
-      // this point. NEVER falls back to the sub (D-92) - a null renders no uploader block at all.
+      // this point. D-168: when absent, `buildPreviewContext` falls back to the sub itself UNLESS it is an
+      // EVE identity - see that file for the fallback and why it is provider-based, not owner-gated.
       const uploaderName =
         typeof claims.name === "string" && claims.name.trim().length > 0 ? claims.name : null;
-
-      // C3 (E5.1 Wave C, D-154/D-155): captured from the SAME claim isSuperuser()/can() already trust
-      // (claims.mosni_owner === true) - lets the client's uploader-identity fallback show the sub
-      // structurally for the owner only, never inferred from "the name is missing" (D-92).
-      const uploaderIsOwner = isSuperuser(claims);
 
       const claimed = await claimFileRow({
         id,
@@ -183,7 +179,6 @@ export function buildTusServer(config: Config): TusServer {
         uploaderSub: claims.sub,
         protection: destination.defaultProtection,
         uploaderName,
-        uploaderIsOwner,
       });
 
       let finalPath: string | null = null;

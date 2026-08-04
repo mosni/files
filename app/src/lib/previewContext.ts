@@ -33,11 +33,12 @@ export type PreviewContext = {
   height: number | null;
   durationSeconds: number | null; // video only
   textPreview: string | null; // .txt only: first 400 chars, sanitised
-  uploaderName: string | null; // display name, or null. NEVER the sub (D-92/D-136).
+  uploaderName: string | null; // display name, or the sub itself as a fallback (D-168 - see
+  // buildPreviewContext), or null for an EVE identity specifically with no captured name.
   uploaderAvatarUrl: string | null; // files.-relative proxy URL (/api/avatar/<file id>), or null. NEVER
   // auth.mosni.dev/avatar/<sub> directly (D-92/D-136) - C1 (E5.1 Wave C): null exactly when there is no
   // uploaderSub at all, NOT when uploaderName is null. A file with a captured sub but no name still has
-  // an avatar - only uploaderName's presence is independent (see buildPreviewContext's C4 fallback).
+  // an avatar - only uploaderName's presence is independent (see buildPreviewContext's D-168 fallback).
   isOwner: boolean; // ALWAYS false in the embedded document copy (D-75: the document is
   // anonymous). Only the API, given a Bearer, can return true.
 };
@@ -76,6 +77,18 @@ export function previewKindFor(filename: string): PreviewKind {
 // stored column would report a collection-gated file as `public` - to the owner's own preview page
 // (PreviewCard.tsx renders this value verbatim, and ManageControls seeds its protection selector from it)
 // and in the anonymous /api/preview/t/<token> body. Same landmine as `displayPathFor`, one field over.
+
+// D-168 (E5.1 live-testing round 4, reverses D-155's "owner only" framing): Hannah's live call - a
+// Google account's sub is NOT sensitive information ("is the google account identifier not public
+// information?"), an EVE character id IS ("I know the eve one is absolutely not"). The fallback is
+// therefore PROVIDER-based, not owner-gated: show the sub for everyone except an EVE identity. Cross-repo
+// knowledge of `mosni/auth`'s sub-prefix scheme (`google:<id>`, `eve:<characterId>`, `link:<linkId>`,
+// `routes/google.ts`/`routes/eve.ts`) - re-review this alongside D-11's existing obligation whenever
+// mosni/auth changes how it mints subs.
+function isSensitiveSub(sub: string): boolean {
+  return sub.startsWith("eve:");
+}
+
 export function buildPreviewContext(
   record: ResolvedFile,
   displayPath: string,
@@ -99,15 +112,11 @@ export function buildPreviewContext(
     width: record.width,
     height: record.height,
     durationSeconds: record.durationSeconds,
-    // C4 (E5.1 Wave C, D-154/D-155): the structural fallback -
-    //   name captured               -> show it
-    //   no name AND uploader IS the owner -> show the sub (the owner's sub is not a real provider/account
-    //                                        id the way a Google/EVE sub is - D-92's leak concern doesn't
-    //                                        apply to it specifically)
-    //   no name AND NOT the owner   -> null. NEVER the sub - gated on the claim captured at upload, never
-    //                                  inferred from "the name happens to be missing" (that would leak a
-    //                                  real provider+account id the first time name resolution failed).
-    uploaderName: record.uploaderName ?? (record.uploaderIsOwner ? record.uploaderSub : null),
+    // D-168: name captured -> show it. No name -> show the sub UNLESS it is an EVE identity, in which
+    // case null (never shows for EVE, regardless of name). See isSensitiveSub above.
+    uploaderName:
+      record.uploaderName ??
+      (record.uploaderSub !== null && !isSensitiveSub(record.uploaderSub) ? record.uploaderSub : null),
     // C1: gated on uploaderSub, NOT on uploaderName - a file with a captured sub but no name still gets an
     // avatar (PreviewCard.tsx omits only the name line, not the whole block).
     uploaderAvatarUrl: record.uploaderSub === null ? null : urls.uploaderAvatarUrl,

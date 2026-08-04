@@ -34,7 +34,6 @@ function makeRecord(overrides: Partial<ResolvedFile> = {}): ResolvedFile {
     textPreview: null,
     uploaderName: null,
     thumbName: null,
-    uploaderIsOwner: false,
     ...overrides,
   };
 }
@@ -86,8 +85,9 @@ describe("previewKindFor()", () => {
 
 describe("buildPreviewContext()", () => {
   it("maps a FileRecord + display path + urls into a PreviewContext with isOwner always false", () => {
-    // uploaderSub is set (the default), so per C1/C4 the avatar shows even with no captured name -
-    // uploaderName stays null (not the owner, so no sub fallback either).
+    // uploaderSub is set (the default, non-EVE) and no name was captured, so per D-168 uploaderName falls
+    // back to the sub itself - see the "uploaderName fallback (D-168)" describe block below for the full
+    // matrix (a name present, an EVE sub specifically, no sub at all).
     const record = makeRecord();
     const ctx = buildPreviewContext(record, displayPath, urls);
     expect(ctx).toEqual<PreviewContext>({
@@ -109,7 +109,7 @@ describe("buildPreviewContext()", () => {
       height: 600,
       durationSeconds: null,
       textPreview: null,
-      uploaderName: null,
+      uploaderName: "user-1",
       uploaderAvatarUrl: urls.uploaderAvatarUrl,
       isOwner: false,
     });
@@ -147,9 +147,12 @@ describe("buildPreviewContext()", () => {
   });
 
   // C1/D-154 (E5.1 Wave C): the avatar is gated on uploaderSub, NOT on uploaderName - a file with a
-  // captured sub but no name still shows an avatar (with no name line, per PreviewCard.tsx).
+  // captured sub but no name still shows an avatar. Uses an EVE sub specifically so uploaderName ALSO
+  // stays null here (D-168's one case where the name fallback does not fire) - a non-EVE sub would show
+  // the sub itself as the name (see the "uploaderName fallback (D-168)" block), which is not what this
+  // test is about.
   it("uploaderAvatarUrl is present even when uploaderName is null, as long as uploaderSub is set (C1)", () => {
-    const ctx = buildPreviewContext(makeRecord({ uploaderName: null, uploaderSub: "user-1" }), displayPath, urls);
+    const ctx = buildPreviewContext(makeRecord({ uploaderName: null, uploaderSub: "eve:1" }), displayPath, urls);
     expect(ctx.uploaderName).toBeNull();
     expect(ctx.uploaderAvatarUrl).toBe(urls.uploaderAvatarUrl);
   });
@@ -159,36 +162,54 @@ describe("buildPreviewContext()", () => {
     expect(ctx.uploaderAvatarUrl).toBeNull();
   });
 
-  // C4 (D-154/D-155): the structural fallback table. A non-owner account's sub must NEVER appear as the
-  // name (D-92) - only the owner's, gated on the claim captured at upload, never on "the name is missing".
-  describe("uploaderName fallback (C4)", () => {
-    it("shows the captured name when present, regardless of the owner flag", () => {
+  // D-168 (E5.1 live-testing round 4, reverses D-155): the fallback table is PROVIDER-based, not
+  // owner-gated - Hannah's live call, a Google sub is not sensitive, an EVE one is.
+  describe("uploaderName fallback (D-168)", () => {
+    it("shows the captured name when present, regardless of the sub", () => {
       const ctx = buildPreviewContext(
-        makeRecord({ uploaderName: "Hannah", uploaderIsOwner: false }),
+        makeRecord({ uploaderName: "Hannah", uploaderSub: "eve:12345" }),
         displayPath,
         urls,
       );
       expect(ctx.uploaderName).toBe("Hannah");
     });
 
-    it("shows the sub as the name for the OWNER when no name was captured", () => {
+    it("shows the sub as the name for a google account with no captured name", () => {
       const ctx = buildPreviewContext(
-        makeRecord({ uploaderName: null, uploaderSub: "hannah", uploaderIsOwner: true }),
+        makeRecord({ uploaderName: null, uploaderSub: "google:12345" }),
         displayPath,
         urls,
       );
-      expect(ctx.uploaderName).toBe("hannah");
+      expect(ctx.uploaderName).toBe("google:12345");
     });
 
-    it("shows NO name (avatar only) for a non-owner with no captured name - never the sub", () => {
+    it("shows the sub as the name for a link account with no captured name", () => {
       const ctx = buildPreviewContext(
-        makeRecord({ uploaderName: null, uploaderSub: "google:12345", uploaderIsOwner: false }),
+        makeRecord({ uploaderName: null, uploaderSub: "link:abc123" }),
+        displayPath,
+        urls,
+      );
+      expect(ctx.uploaderName).toBe("link:abc123");
+    });
+
+    it("shows NO name (avatar only) for an EVE identity with no captured name - never the sub", () => {
+      const ctx = buildPreviewContext(
+        makeRecord({ uploaderName: null, uploaderSub: "eve:98765" }),
         displayPath,
         urls,
       );
       expect(ctx.uploaderName).toBeNull();
       // The sub never appears anywhere in the produced context, serialized or not.
-      expect(JSON.stringify(ctx)).not.toContain("google:12345");
+      expect(JSON.stringify(ctx)).not.toContain("eve:98765");
+    });
+
+    it("shows NO name when there is no sub at all (pre-uploader-tracking row)", () => {
+      const ctx = buildPreviewContext(
+        makeRecord({ uploaderName: null, uploaderSub: null }),
+        displayPath,
+        urls,
+      );
+      expect(ctx.uploaderName).toBeNull();
     });
   });
 

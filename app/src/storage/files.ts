@@ -31,12 +31,9 @@ export type FileRecord = {
   height: number | null;
   durationSeconds: number | null; // video only
   textPreview: string | null; // .txt only
-  uploaderName: string | null; // display name from claims.name at upload (D-136). NEVER the sub (D-92).
+  uploaderName: string | null; // display name from claims.name at upload (D-136). See previewContext.ts's
+  // buildPreviewContext for the D-168 sub fallback when this is null - provider-based, not stored here.
   thumbName: string | null; // bare filename within diskDir, or null (non-image / generation failed / pre-E5, D-137)
-  // D-154/D-155: was the uploader the owner account (claims.mosni_owner === true) at upload time? Lets the
-  // uploader-identity fallback show the sub structurally for the owner only, never inferred from "the name
-  // is missing" - a Google/EVE sub is a real provider+account id (D-92); the owner's is not.
-  uploaderIsOwner: boolean;
 };
 
 let storageRoot: string | undefined;
@@ -92,11 +89,10 @@ interface FileRow extends RowDataPacket {
   text_preview: string | null;
   uploader_name: string | null;
   thumb_name: string | null;
-  uploader_is_owner: number | boolean; // mysql2 returns TINYINT(1) as a number in some drivers/configs
 }
 
 const SELECT_COLUMNS =
-  "id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, uploader_sub, created_at, width, height, duration_seconds, text_preview, uploader_name, thumb_name, uploader_is_owner";
+  "id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, uploader_sub, created_at, width, height, duration_seconds, text_preview, uploader_name, thumb_name";
 
 function rowToRecord(row: FileRow, bytes: number): FileRecord {
   return {
@@ -117,7 +113,6 @@ function rowToRecord(row: FileRow, bytes: number): FileRecord {
     textPreview: row.text_preview,
     uploaderName: row.uploader_name,
     thumbName: row.thumb_name,
-    uploaderIsOwner: Boolean(row.uploader_is_owner),
   };
 }
 
@@ -324,13 +319,10 @@ export async function claimFileRow(params: {
   uploaderSub: string;
   protection: Protection;
   uploaderName: string | null; // D-136: claims.name at upload time, captured now since it never changes
-  // after the strip/probe/thumbnail pass. NEVER the sub (D-92).
-  // D-154/D-155: optional, defaults false - the safe value (D-138: existing rows are never backfilled).
-  uploaderIsOwner?: boolean;
+  // after the strip/probe/thumbnail pass. See previewContext.ts for the D-168 sub fallback when null.
 }): Promise<FileRecord> {
   const pool = getPool();
   const id = params.id ?? generateId();
-  const uploaderIsOwner = params.uploaderIsOwner ?? false;
   // The requested name is only re-suffixed after a collision actually happens, so a name with no
   // conflict is stored exactly as asked for.
   let name = params.name;
@@ -343,8 +335,8 @@ export async function claimFileRow(params: {
     try {
       await pool.query(
         `INSERT INTO files
-          (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, uploader_sub, created_at, uploader_name, uploader_is_owner)
-          VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+          (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, uploader_sub, created_at, uploader_name)
+          VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'pending', ?, ?, ?, ?)`,
         [
           id,
           params.collectionId,
@@ -357,7 +349,6 @@ export async function claimFileRow(params: {
           params.uploaderSub,
           createdAt,
           params.uploaderName,
-          uploaderIsOwner,
         ],
       );
       return {
@@ -377,7 +368,6 @@ export async function claimFileRow(params: {
         durationSeconds: null,
         textPreview: null,
         uploaderName: params.uploaderName,
-        uploaderIsOwner,
         thumbName: null,
       };
     } catch (err) {
