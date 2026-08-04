@@ -4,6 +4,25 @@ import { DropZone } from "./components/DropZone.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { PreviewPage } from "./pages/Preview.tsx";
 
+// Moved out of index.html (round 4, live-testing: Hannah found dev-rationale comments shipping verbatim
+// in the served page source - a .html entry file's comments survive `vite build` untouched, unlike a
+// .tsx/.ts source comment, which the production minifier strips). The reasoning stays here, in source,
+// where it's still readable to whoever edits index.html next, without leaking into the HTTP response.
+//
+// index.html's <head> loads auth.mosni.dev/sdk.js BEFORE ui.mosni.dev/mosnicat.js, deliberately
+// (belt-and-braces): out of order, the chrome's toast and the auth SDK can clobber each other's
+// window.mosni depending on load order. The cross-repo half of that fix already landed separately.
+//
+// index.html's <body> renders mosni-chrome's own <mosni-header> directly (NOT <mosni-layout>: that
+// component's grid hard-codes a sidebar column - `grid-template-columns: $sidebar-width 1fr` - whether
+// or not a menu is slotted, so with no navigation to put there it renders a large empty rail and pushes
+// the page past the viewport; this app has no nav until E4's file browser, switch to <mosni-layout>
+// then). It lives in the static shell, outside this React root, on purpose - the element reparents its
+// own children on connect (takeSlot/takeDefault), and letting it move nodes React is reconciling is
+// exactly the custom-element glue friction D-8 warned about. mosnicat.js is a synchronous <script> in
+// <head>, so it upgrades before this module runs and React only ever owns the inside of #root. The
+// preview <head> is spliced into this same shell (D-72), so preview documents get the chrome for free.
+
 // E5 Wave G (D-133): registered defensively - a browser with no service-worker support, or one where
 // registration fails, simply never gets a controller (web/src/lib/archive.ts's isArchiveSupported()/
 // downloadArchive() check for exactly that), so the archive feature degrades to "unavailable" rather than
