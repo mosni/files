@@ -35,7 +35,9 @@ export type PreviewContext = {
   textPreview: string | null; // .txt only: first 400 chars, sanitised
   uploaderName: string | null; // display name, or null. NEVER the sub (D-92/D-136).
   uploaderAvatarUrl: string | null; // files.-relative proxy URL (/api/avatar/<file id>), or null. NEVER
-  // auth.mosni.dev/avatar/<sub> directly (D-92/D-136) - null exactly when uploaderName is null.
+  // auth.mosni.dev/avatar/<sub> directly (D-92/D-136) - C1 (E5.1 Wave C): null exactly when there is no
+  // uploaderSub at all, NOT when uploaderName is null. A file with a captured sub but no name still has
+  // an avatar - only uploaderName's presence is independent (see buildPreviewContext's C4 fallback).
   isOwner: boolean; // ALWAYS false in the embedded document copy (D-75: the document is
   // anonymous). Only the API, given a Bearer, can return true.
 };
@@ -97,9 +99,18 @@ export function buildPreviewContext(
     width: record.width,
     height: record.height,
     durationSeconds: record.durationSeconds,
-    uploaderName: record.uploaderName,
-    // D-92/D-136: null exactly when uploaderName is null - never render an avatar for an "Unknown" upload.
-    uploaderAvatarUrl: record.uploaderName === null ? null : urls.uploaderAvatarUrl,
+    // C4 (E5.1 Wave C, D-154/D-155): the structural fallback -
+    //   name captured               -> show it
+    //   no name AND uploader IS the owner -> show the sub (the owner's sub is not a real provider/account
+    //                                        id the way a Google/EVE sub is - D-92's leak concern doesn't
+    //                                        apply to it specifically)
+    //   no name AND NOT the owner   -> null. NEVER the sub - gated on the claim captured at upload, never
+    //                                  inferred from "the name happens to be missing" (that would leak a
+    //                                  real provider+account id the first time name resolution failed).
+    uploaderName: record.uploaderName ?? (record.uploaderIsOwner ? record.uploaderSub : null),
+    // C1: gated on uploaderSub, NOT on uploaderName - a file with a captured sub but no name still gets an
+    // avatar (PreviewCard.tsx omits only the name line, not the whole block).
+    uploaderAvatarUrl: record.uploaderSub === null ? null : urls.uploaderAvatarUrl,
     textPreview: record.textPreview,
     // Always false here - this builder feeds the anonymous document copy (D-75). Only the API handler,
     // given a Bearer it can check against ownerSub/superuser/ACL, may set this true.

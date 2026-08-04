@@ -134,8 +134,19 @@ describe("routes/avatar.ts (D-136)", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("404s when uploaderName is null - never proxies for a file with no captured name", async () => {
+  // C1 (E5.1 Wave C, D-154): the avatar is gated on uploaderSub, NOT on uploaderName - a file with a
+  // captured sub but no name still has an avatar (PreviewCard.tsx omits only the name line).
+  it("200s when uploaderName is null but uploaderSub is present (C1)", async () => {
     const { fileId } = await seed({ protection: "public", uploaderName: null });
+    fetchMock.mockResolvedValue(new Response(Buffer.from("x"), { status: 200 }));
+    const res = await get(`/api/avatar/${fileId}`);
+    expect(res.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it("404s when there is no uploaderSub at all - nothing to proxy (C1, pre-uploaderSub-tracking row)", async () => {
+    const { fileId } = await seed({ protection: "public" });
+    await getPool().query("UPDATE files SET uploader_sub = NULL WHERE id = ?", [fileId]);
     const res = await get(`/api/avatar/${fileId}`);
     expect(res.statusCode).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();

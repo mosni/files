@@ -16,7 +16,7 @@ import { Server as TusServer } from "@tus/server";
 import { FileStore } from "@tus/file-store";
 import type { Config } from "../config.ts";
 import { verify } from "../auth/verify.ts";
-import { can, type VerifiedClaims } from "../lib/roles.ts";
+import { can, isSuperuser, type VerifiedClaims } from "../lib/roles.ts";
 import { isReservedRootName, resolveRelPath, safeSegment } from "../lib/paths.ts";
 import { buildFileUrls } from "../lib/fileUrls.ts";
 import { generateId } from "../lib/ids.ts";
@@ -168,6 +168,11 @@ export function buildTusServer(config: Config): TusServer {
       const uploaderName =
         typeof claims.name === "string" && claims.name.trim().length > 0 ? claims.name : null;
 
+      // C3 (E5.1 Wave C, D-154/D-155): captured from the SAME claim isSuperuser()/can() already trust
+      // (claims.mosni_owner === true) - lets the client's uploader-identity fallback show the sub
+      // structurally for the owner only, never inferred from "the name is missing" (D-92).
+      const uploaderIsOwner = isSuperuser(claims);
+
       const claimed = await claimFileRow({
         id,
         collectionId: destination.id,
@@ -178,6 +183,7 @@ export function buildTusServer(config: Config): TusServer {
         uploaderSub: claims.sub,
         protection: destination.defaultProtection,
         uploaderName,
+        uploaderIsOwner,
       });
 
       let finalPath: string | null = null;

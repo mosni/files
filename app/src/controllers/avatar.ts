@@ -77,10 +77,10 @@ export async function avatarHandler(
     return;
   }
 
-  // D-92/D-136: no name claim was captured at upload - never fall back to the sub, and there is nothing to
-  // proxy (auth's avatar route is keyed on sub, not name, but a file with no uploaderName renders no
-  // uploader block at all on the client, so this URL should never even be requested for one).
-  if (resolved.uploaderName === null || resolved.uploaderSub === null) {
+  // C1 (E5.1 Wave C, D-154): gated on uploaderSub, NOT uploaderName. A file with a captured sub but no
+  // name still has an avatar (PreviewCard.tsx renders the block, just with no name line) - only a file
+  // with no uploaderSub at all has nothing to proxy.
+  if (resolved.uploaderSub === null) {
     reply.code(404).send();
     return;
   }

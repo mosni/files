@@ -77,6 +77,7 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
     protection?: Protection;
     ownerSub?: string | null;
     content?: string;
+    uploaderIsOwner?: boolean;
   }): Promise<{ id: string; diskDir: string; diskName: string; linkToken: string }> {
     const collectionId = opts.collectionId ?? (await seedCollection());
     const name = opts.name ?? `file-${randomUUID()}.txt`;
@@ -92,6 +93,7 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
       uploaderSub: "user:owner",
       protection: opts.protection ?? "unlisted",
       uploaderName: null,
+      uploaderIsOwner: opts.uploaderIsOwner,
     });
     createdFileIds.push(claimed.id);
 
@@ -217,6 +219,22 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
     expect(record?.width).toBe(640);
     expect(record?.height).toBe(480);
     expect(record?.durationSeconds).toBe(12.5);
+  });
+
+  // D-154/D-155 (E5.1 Wave C): captures whether the uploader was the OWNER account, so the client's
+  // uploader-identity fallback can gate on this flag rather than on "the name happens to be missing"
+  // (D-138: defaults false, the safe value, and existing rows are never backfilled to true).
+  it("claimFileRow defaults uploaderIsOwner to false, and persists true when passed (D-154/D-155)", async () => {
+    const collectionId = await seedCollection();
+
+    // resolveById requires a COMMITTED row (materialize() returns null for a still-pending one), so this
+    // goes through the full claim -> write bytes -> commit lifecycle via seedCommittedFile rather than
+    // asserting against a bare claimFileRow() result.
+    const defaultFile = await seedCommittedFile({ collectionId });
+    expect((await resolveById(defaultFile.id))?.uploaderIsOwner).toBe(false);
+
+    const ownerFile = await seedCommittedFile({ collectionId, uploaderIsOwner: true });
+    expect((await resolveById(ownerFile.id))?.uploaderIsOwner).toBe(true);
   });
 
   it("abandonFileRow removes a pending row entirely (D-85 failure path)", async () => {

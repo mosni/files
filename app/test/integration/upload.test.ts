@@ -22,7 +22,7 @@ import { verify } from "../../src/auth/verify.ts";
 import { registerUploadRoutes } from "../../src/routes/upload.ts";
 import type { Config } from "../../src/config.ts";
 import { applyMigrations, closeDb, getPool, initDb } from "../../src/storage/db.ts";
-import { diskRelPath, initFilesStorage, resolveByNames } from "../../src/storage/files.ts";
+import { diskRelPath, initFilesStorage, resolveByNames, resolveById } from "../../src/storage/files.ts";
 import { createCollection, listCollectionsFor } from "../../src/storage/collections.ts";
 
 const verifyMock = vi.mocked(verify);
@@ -445,6 +445,43 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     const record = await resolveByNames(["photo.jpg"]);
     const after = await sharp(path.join(root, diskRelPath(record!))).metadata();
     expect(after.exif).toBeUndefined();
+  });
+
+  // C2/C3 (E5.1 Wave C, D-154/D-155): the uploader's captured name and owner flag, both from the JWT.
+  it("captures uploaderName from the name claim, and uploaderIsOwner false for a non-owner (C2/C3)", async () => {
+    const uploaderSub = `user:${randomUUID()}`;
+    createdOwnerSubs.push(uploaderSub);
+    mockAuthorizedAs(uploaderSub, { name: "Hannah Test" });
+
+    const content = Buffer.from("named uploader content");
+    const createRes = await createUpload(uploaderSub, content.length, { filename: "named.txt" });
+    const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
+    const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, content);
+    expect(patchRes.status).toBe(200);
+
+    const record = await resolveByNames(["named.txt"]);
+    expect(record?.uploaderName).toBe("Hannah Test");
+    expect(record?.uploaderIsOwner).toBe(false);
+  });
+
+  it("sets uploaderIsOwner true when the token carries mosni_owner: true (C3)", async () => {
+    const uploaderSub = `user:${randomUUID()}`;
+    createdOwnerSubs.push(uploaderSub);
+    mockAuthorizedAs(uploaderSub, { mosni_owner: true });
+
+    const content = Buffer.from("owner upload content");
+    const createRes = await createUpload(uploaderSub, content.length, { filename: "owner-upload.txt" });
+    const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
+    const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, content);
+    expect(patchRes.status).toBe(200);
+
+    const record = await resolveByNames(["owner-upload.txt"]);
+    expect(record?.uploaderIsOwner).toBe(true);
+    expect(record?.uploaderName).toBeNull(); // no name claim in this test - the point is the owner flag alone
+
+    // Round-trips through resolveById too, not just the freshly-inserted return value.
+    const resolved = await resolveById(record!.id);
+    expect(resolved?.uploaderIsOwner).toBe(true);
   });
 
   it("an uploaded PNG lands with captured width/height (D-74)", async () => {

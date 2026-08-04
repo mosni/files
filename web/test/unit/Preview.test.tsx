@@ -324,7 +324,7 @@ describe("PreviewPage", () => {
     expect(avatar?.getAttribute("src")).toBe("https://files.mosni.dev/api/avatar/file0000000000id");
   });
 
-  it("renders no uploader block at all when uploaderName is null - never 'Unknown' (D-92/D-136)", () => {
+  it("renders no uploader block at all when uploaderAvatarUrl is null (no uploaderSub at all) - never 'Unknown' (D-92/D-136)", () => {
     embedContext(makeContext({ uploaderName: null, uploaderAvatarUrl: null }));
     vi.stubGlobal("fetch", vi.fn());
 
@@ -334,15 +334,29 @@ describe("PreviewPage", () => {
     expect(container.querySelector("img[alt='']")).toBeNull();
   });
 
-  it("renders the uploader's name with no avatar image when uploaderAvatarUrl is null but a name exists", () => {
-    // Not a real production state today (both are set together) but the component contract should not
-    // assume they always travel as a pair.
+  it("renders the avatar with no name when uploaderName is null but uploaderAvatarUrl is present (C1/C4)", () => {
+    embedContext(
+      makeContext({ uploaderName: null, uploaderAvatarUrl: "https://files.mosni.dev/api/avatar/file0000000000id" }),
+    );
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/photo.png");
+
+    const avatar = container.querySelector("img[alt='']");
+    expect(avatar?.getAttribute("src")).toBe("https://files.mosni.dev/api/avatar/file0000000000id");
+    expect(avatar?.parentElement?.querySelector("span.little-link")).toBeNull();
+  });
+
+  it("renders no uploader block when uploaderAvatarUrl is null even if a name exists (C1: the block gates on the avatar, not the name)", () => {
+    // Not a reachable server state today (buildPreviewContext sets uploaderAvatarUrl to null exactly when
+    // uploaderSub is null, and uploaderName can only be non-null when uploaderSub is non-null) - covered
+    // anyway so the component's own gating contract doesn't silently drift.
     embedContext(makeContext({ uploaderName: "Hannah", uploaderAvatarUrl: null }));
     vi.stubGlobal("fetch", vi.fn());
 
     renderAt("/f/photo.png");
 
-    expect(container.textContent).toContain("Hannah");
+    expect(container.textContent).not.toContain("Hannah");
     expect(container.querySelector("img[alt='']")).toBeNull();
   });
 
