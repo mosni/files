@@ -143,6 +143,17 @@ export function formatUploadDate(iso: string): string {
   return `${day} ${month} ${year}`;
 }
 
+// E5.1 live-testing round 2: the preview page's "uploaded <when> by <who>" line wants a sortable,
+// unambiguous timestamp (not the browse table's human "D Mon YYYY") - UTC, same as formatUploadDate, for
+// the same reason (the server does not know the viewer's timezone, and a wrong-but-plausible-looking local
+// time is worse than a correctly-labelled absolute one).
+export function formatUploadDateTime(iso: string): string {
+  const d = new Date(iso);
+  const date = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+  const time = `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+  return `${date} ${time} UTC`;
+}
+
 const TEXT_SNIPPET_LIMIT = 200;
 
 // The meta description / og:description / twitter:description content. A .txt file's own first line is a

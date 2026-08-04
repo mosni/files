@@ -6,8 +6,12 @@
 import { Component, lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
+import { formatUploadDateTime } from "../../../app/src/lib/previewContext.ts";
+import type { Protection } from "../../../app/src/lib/protection.ts";
 import { languageFor, TEXT_FULL_MAX_BYTES } from "../../../app/src/lib/textPreview.ts";
 import { CopyLink } from "./CopyLink.tsx";
+import { IconConfirmCancel, RenameInput } from "./InlineRename.tsx";
+import { patchFile, updatedContext } from "../lib/filePatch.ts";
 import { ManageControls } from "./ManageControls.tsx";
 import { DownloadFallback } from "./VideoPreview.tsx";
 
@@ -147,43 +151,175 @@ function renderMedia(ctx: PreviewContext) {
   }
 }
 
+// E5.1 live-testing round 2: an icon + short label for each protection level, replacing the old
+// "You own this file (<level>)." text panel - shown next to the ownership badge, both above the media, so
+// the level is visible without opening ManageControls' selector. Names are lucide icons resolved by
+// `<mosni-icon>` (mosni-chrome's icons-all registry, "pick any lucide icon by name" - no registry change
+// needed). Kept local to this file rather than exported: ProtectionControl.tsx's own consumers (the
+// compact upload box, FileBrowser's per-row picker) show/change the level via its `<select>`, which needs
+// no icon of its own.
+const PROTECTION_ICON: Record<Protection, string> = {
+  public: "globe",
+  unlisted: "eye-off",
+  secret: "key",
+  private: "lock",
+};
+
 // D-122 (E4.1 live-testing findings, Wave E): the `compact` variant this component once had for the
 // upload-completion card is gone - that consumer is UploadStack.tsx now, and this was its only caller.
 // This stays the preview PAGE's own renderer (AC6 stands).
 export function PreviewCard({ context }: { context: PreviewContext }) {
-  // Local, editable copy: ManageControls updates it optimistically on a successful rename/protection
-  // change so the page reflects the new state with no extra round trip. Reset whenever the PARENT hands
-  // in a genuinely new context (a real navigation, or Preview.tsx's owner-status refetch) rather than one
-  // this component produced itself.
+  // Local, editable copy: rename/ManageControls update it optimistically on a successful mutation so the
+  // page reflects the new state with no extra round trip. Reset whenever the PARENT hands in a genuinely
+  // new context (a real navigation, or Preview.tsx's owner-status refetch) rather than one this component
+  // produced itself.
   const [ctx, setCtx] = useState(context);
   useEffect(() => setCtx(context), [context]);
+
+  // E5.1 live-testing round 2 (finding: "the rename pencil should be in the title header, not the bottom
+  // panel, we do not need to show the file name twice"). Moved here, verbatim, from ManageControls.tsx -
+  // the header is now the ONLY place the name renders or is edited; ManageControls keeps protection and
+  // delete only.
+  const [editingName, setEditingName] = useState(false);
+  const [name, setName] = useState(ctx.name);
+  const [renaming, setRenaming] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+
+  function startRename() {
+    setName(ctx.name);
+    setRenameError(null);
+    setEditingName(true);
+  }
+
+  function cancelRename() {
+    setName(ctx.name);
+    setRenameError(null);
+    setEditingName(false);
+  }
+
+  async function submitRename() {
+    if (name === ctx.name || renaming) return;
+
+    setRenaming(true);
+    setRenameError(null);
+    try {
+      const res = await patchFile(ctx.id, { name });
+      if (res.status === 409) {
+        setRenameError(`"${name}" is already used here - choose another name.`);
+        return;
+      }
+      // The server validates a display name exactly as it validates an uploaded filename (it becomes a
+      // URL segment), so say which shapes are rejected rather than the generic failure.
+      if (res.status === 400) {
+        setRenameError("That name can't be used - no slashes, and no leading or trailing spaces.");
+        return;
+      }
+      if (!res.ok) {
+        setRenameError("Rename failed.");
+        return;
+      }
+      setCtx(await updatedContext(res, { ...ctx, name }));
+      setEditingName(false);
+    } finally {
+      setRenaming(false);
+    }
+  }
+
+  // Broken-image robustness: `ctx.uploaderAvatarUrl` names a proxy URL (`/api/avatar/<file id>`) whose
+  // own upstream fetch (auth.mosni.dev, then whatever it redirects to) can fail for reasons this page has
+  // no way to predict - a bare <img> with no `onError` handling then shows the browser's broken-image
+  // icon, which is worse than showing nothing. Scoped to the specific URL that failed, same pattern as
+  // VideoPreview's `erroredUrl` - a stale failure from a PREVIOUS file can never leak onto a new one.
+  const [avatarFailedUrl, setAvatarFailedUrl] = useState<string | null>(null);
+  const avatarFailed = avatarFailedUrl === ctx.uploaderAvatarUrl;
 
   return (
     // minmax(0, 1fr): see Preview.tsx - a grid item's automatic minimum size is its content, and a long
     // URL / wide image in a non-shrinking column would push the page wider than the viewport.
     <div style={{ display: "grid", gap: "1.25rem", gridTemplateColumns: "minmax(0, 1fr)" }}>
       <div>
-        <h1 style={{ margin: 0 }}>{ctx.name}</h1>
-        <p className="little-link" style={{ margin: "0.25rem 0 0" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+          {editingName ? (
+            <>
+              <RenameInput
+                value={name}
+                onChange={setName}
+                onSubmit={() => void submitRename()}
+                onCancel={cancelRename}
+                ariaLabel="File name"
+              />
+              <IconConfirmCancel
+                onConfirm={() => void submitRename()}
+                onCancel={cancelRename}
+                confirmDisabled={renaming || name === ctx.name}
+                confirmLabel="Save name"
+                cancelLabel="Cancel rename"
+              />
+            </>
+          ) : (
+            <>
+              <h1 style={{ margin: 0 }}>{ctx.name}</h1>
+              {ctx.isOwner && (
+                // D-111: btn-icon, never a bare <button> - mosni-chrome's _button.scss styles the bare
+                // `button` element as a filled purple primary with no opt-out.
+                <button type="button" className="btn-icon" aria-label="Rename" onClick={startRename}>
+                  <mosni-icon name="pencil" size="16" />
+                </button>
+              )}
+            </>
+          )}
+        </div>
+        {renameError !== null && <p role="alert">{renameError}</p>}
+
+        {/* E5.1 live-testing round 2: replaces the old "You own this file (<level>)." text panel with two
+            small icon+label badges, directly under the header rather than a separate boxed panel. */}
+        {ctx.isOwner && (
+          <p
+            className="little-link"
+            style={{ display: "flex", gap: "0.85rem", margin: "0.35rem 0 0", marginLeft: 0 }}
+          >
+            <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}>
+              <mosni-icon name="user-check" size="14" /> You own this file
+            </span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}>
+              <mosni-icon name={PROTECTION_ICON[ctx.protection]} size="14" /> {ctx.protection}
+            </span>
+          </p>
+        )}
+
+        <p className="little-link" style={{ margin: "0.35rem 0 0" }}>
           {ctx.sizeLabel}
           {ctx.width !== null && ctx.height !== null ? ` · ${ctx.width}×${ctx.height}` : ""}
         </p>
-        {/* C1 (E5.1 Wave C, D-154/D-155): gated on uploaderAvatarUrl, NOT uploaderName - a file with a
-            captured sub but no name still has an avatar (only the name line is omitted). Omitted entirely
-            only when there is no uploaderSub at all - never "Unknown" for every pre-E5 file, and never a
-            fallback to the raw sub. */}
-        {ctx.uploaderAvatarUrl !== null && (
-          <p style={{ display: "flex", alignItems: "center", gap: "0.4rem", margin: "0.4rem 0 0" }}>
-            <img src={ctx.uploaderAvatarUrl} alt="" width={20} height={20} style={{ borderRadius: "50%" }} />
-            {ctx.uploaderName !== null && <span className="little-link">{ctx.uploaderName}</span>}
-          </p>
-        )}
+
+        {/* E5.1 live-testing round 2: "uploaded <when> by <who>" replaces the separate uploader-only line -
+            the upload date is always known, so it always renders; "by <avatar> <name>" is appended only
+            when there is an uploader to show (C1/C4: gated on uploaderAvatarUrl, not uploaderName - a
+            captured sub with no name still gets an avatar, just no name text next to it). A failed avatar
+            fetch (avatarFailed) drops the image rather than showing a broken-image icon. */}
+        <p
+          className="little-link"
+          style={{ display: "flex", alignItems: "center", gap: "0.35rem", margin: "0.2rem 0 0", marginLeft: 0 }}
+        >
+          <span>uploaded {formatUploadDateTime(ctx.createdAt)}</span>
+          {ctx.uploaderAvatarUrl !== null && (
+            <>
+              <span>by</span>
+              {!avatarFailed && (
+                <img
+                  src={ctx.uploaderAvatarUrl}
+                  alt=""
+                  width={20}
+                  height={20}
+                  style={{ borderRadius: "50%" }}
+                  onError={() => setAvatarFailedUrl(ctx.uploaderAvatarUrl)}
+                />
+              )}
+              {ctx.uploaderName !== null && <span>{ctx.uploaderName}</span>}
+            </>
+          )}
+        </p>
       </div>
-      {ctx.isOwner && (
-        <div className="panel">
-          <p>You own this file ({ctx.protection}).</p>
-        </div>
-      )}
       {renderMedia(ctx)}
       <CopyLink previewUrl={ctx.previewUrl} directUrl={ctx.directUrl} />
       {ctx.isOwner && <ManageControls context={ctx} onUpdate={setCtx} />}

@@ -23,13 +23,19 @@
 //        anonymous check passed while this was broken for the only person using the app. If a future
 //        change ever needs the object form back, it MUST be memoised (`useMemo` on `[ctx.directUrl]`) -
 //        an inline object literal in this prop is a latent teardown and must never be reintroduced.
-//   D1 - no `type` hint is passed at all. Vidstack refuses a source on its declared MIME type outright for
-//        `video/quicktime`, `video/x-m4v` and `video/x-matroska` (measured session 035) - exactly what
-//        D-144's own MIME widening produces for `.mov`/`.m4v`/`.mkv`, so the type hint was short-circuiting
-//        three of the five allowlisted containers to the download card even when the BROWSER could play
-//        the bytes. Dropping it lets the browser decide from the bytes, exactly as the bare <video> that
-//        demonstrably works already does. Never map the exotic types to `video/mp4` to sneak them past the
-//        check - that lies to the player about the container and is a different bug wearing a hat.
+//   D1 - the `type` hint is passed ONLY for the two containers Vidstack's own provider-selection
+//        allowlist accepts (`video/mp4`, `video/webm` - see VIDSTACK_ACCEPTED_TYPES below), never for the
+//        other three. Vidstack refuses a source on its declared MIME type outright for `video/quicktime`,
+//        `video/x-m4v` and `video/x-matroska` (measured session 035) - exactly what D-144's own MIME
+//        widening produces for `.mov`/`.m4v`/`.mkv`, so a blanket type hint was short-circuiting three of
+//        the five allowlisted containers to the download card even when the BROWSER could play the bytes.
+//        Session 035 fixed that by dropping the hint entirely - but Vidstack's canPlay() ALSO accepts a
+//        source purely by matching the URL's file extension, and a `private` file's owner gets an
+//        EXTENSIONLESS signed URL (D-84's `/s/<id>?exp=...&sig=...`), so with no type AND no extension to
+//        match, Vidstack selected no provider at all for `video/mp4`/`video/webm` too - every video the
+//        owner previewed, not just the three exotic containers (D-167, found live on the deployed build).
+//        Never map the exotic types to `video/mp4` to sneak them past the check - that lies to the player
+//        about the container and is a different bug wearing a hat.
 //   D2 - the player is optimistic no longer. It used to render unconditionally and only fall back on an
 //        affirmative `error` - so a failure that raised no `error` (confirmed: a stalled source sitting at
 //        readyState 0 with no error and no card) rendered as nothing at all, which is what made finding 5
@@ -52,6 +58,18 @@ import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 // captured by Vidstack's gesture handling, which otherwise claims the whole media area for its own
 // (horizontal scrub) gestures. Applied to both the wrapper and the player element itself.
 const FIT: React.CSSProperties = { maxWidth: "100%", display: "block", touchAction: "pan-y" };
+
+// D-167 (E5.1 live-testing round 2): mirrors Vidstack's OWN VideoProviderLoader.canPlay() allowlist
+// (node_modules/vidstack/dist/*/providers/audio/loader.js's VIDEO_TYPES) exactly - "video/mp4" and
+// "video/webm" only. Vidstack picks a provider from EITHER the URL's file extension OR this declared
+// type; a `private` file's owner gets an EXTENSIONLESS signed URL (dl.mosni.dev/s/<id>?exp=...&sig=...,
+// controllers/preview.ts's withSignedDirectUrl) with no extension to sniff, so omitting the type entirely
+// (D1's fix) left Vidstack unable to select ANY provider for it - no <video> ever attached, and D2's
+// deadline always expired to the download card, for every video on that URL shape. D1's original finding
+// still holds for the other three allowlisted containers ("video/quicktime"/"video/x-m4v"/
+// "video/x-matroska") - Vidstack refuses those outright when given as a type, so the hint must stay
+// omitted for exactly those three, never widened to "helpfully" cover them too.
+const VIDSTACK_ACCEPTED_TYPES = new Set(["video/mp4", "video/webm"]);
 
 // D2: starting values, not measured ones - say so in the session log, and expect a review to challenge
 // them. The deadline is RESET (not just extended) on real load activity (onLoadStart/onProgress), so a
@@ -178,6 +196,7 @@ export function VideoPreview({ ctx }: { ctx: PreviewContext }) {
       <MediaPlayer
         key={ctx.directUrl}
         src={ctx.directUrl}
+        type={VIDSTACK_ACCEPTED_TYPES.has(ctx.mimeType) ? ctx.mimeType : undefined}
         playsInline
         style={FIT}
         // F0.2/F0.3: a container `canPlayType()` reported as merely "maybe"/"probably" (it cannot see

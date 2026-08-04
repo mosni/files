@@ -360,6 +360,134 @@ describe("PreviewPage", () => {
     expect(container.querySelector("img[alt='']")).toBeNull();
   });
 
+  // E5.1 live-testing round 2 ("the section should probably say something like 'uploaded 2026-08-04
+  // 12:20 by [image] hannah'"): one line, always showing the upload timestamp, "by <avatar> <name>"
+  // appended only when there is an uploader to show.
+  it("renders 'uploaded <when> by <who>' as one line, with the upload date always present (E5.1 live-testing round 2)", () => {
+    embedContext(
+      makeContext({
+        createdAt: "2026-08-04T12:20:00.000Z",
+        uploaderName: "hannah",
+        uploaderAvatarUrl: "https://files.mosni.dev/api/avatar/file0000000000id",
+      }),
+    );
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/photo.png");
+
+    // Adjacent <span>s carry no literal whitespace between them (real visual spacing comes from the
+    // flex row's `gap`, not text content) - assert the pieces exist in order, not a literal joined string.
+    expect(container.textContent).toContain("uploaded 2026-08-04 12:20 UTC");
+    expect(container.textContent).toContain("by");
+    expect(container.textContent).toContain("hannah");
+  });
+
+  it("still shows the upload date when there is no uploader to show at all", () => {
+    embedContext(makeContext({ createdAt: "2026-08-04T12:20:00.000Z", uploaderAvatarUrl: null }));
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/photo.png");
+
+    expect(container.textContent).toContain("uploaded 2026-08-04 12:20 UTC");
+    expect(container.textContent).not.toContain(" by ");
+  });
+
+  // E5.1 live-testing round 2 (avatar 404 found live): a broken avatar image must never show the
+  // browser's own broken-image icon - the <img> hides itself on error rather than rendering nothing at
+  // its src, and the name (if any) still renders.
+  it("hides the avatar image on a load failure, but keeps the uploader's name", async () => {
+    embedContext(
+      makeContext({
+        uploaderName: "hannah",
+        uploaderAvatarUrl: "https://files.mosni.dev/api/avatar/file0000000000id",
+      }),
+    );
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/photo.png");
+
+    const img = container.querySelector("img[alt='']") as HTMLImageElement;
+    expect(img).not.toBeNull();
+    act(() => {
+      img.dispatchEvent(new Event("error"));
+    });
+
+    expect(container.querySelector("img[alt='']")).toBeNull();
+    expect(container.textContent).toContain("hannah");
+  });
+
+  // E5.1 live-testing round 2 ("I don't like the You own this file (unlisted) panel at all, should also
+  // be two icons"): an icon-labelled ownership badge and an icon-labelled protection badge, both directly
+  // under the header rather than a separate boxed text panel.
+  it("shows an icon-labelled ownership badge and protection badge for the owner, one per level", () => {
+    embedContext(makeContext({ isOwner: true, protection: "secret" }));
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/photo.png");
+
+    expect(container.querySelector('mosni-icon[name="user-check"]')).not.toBeNull();
+    expect(container.querySelector('mosni-icon[name="key"]')).not.toBeNull(); // secret -> key
+    expect(container.textContent).toContain("secret");
+  });
+
+  // E5.1 live-testing round 2 ("the rename pencil should be in the title header, not the bottom panel, we
+  // do not need to show the file name twice"): moved from ManageControls.tsx into PreviewCard.tsx's own
+  // header, alongside the <h1> it edits - see ManageControls.test.tsx for the tests this replaced.
+  describe("rename (header)", () => {
+    function ownedContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
+      return makeContext({ isOwner: true, ...overrides });
+    }
+
+    it("starts collapsed behind a pencil icon button in the header, next to the <h1>, not repeated below", () => {
+      embedContext(ownedContext());
+      vi.stubGlobal("fetch", vi.fn());
+
+      renderAt("/f/photo.png");
+
+      expect(container.querySelector("h1")?.textContent).toBe("photo.png");
+      const renameButton = container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement;
+      expect(renameButton).not.toBeNull();
+      expect(renameButton.className).toContain("btn-icon");
+      expect(container.querySelectorAll('button[aria-label="Rename"]').length).toBe(1);
+      // Not repeated inside ManageControls' own panel below (the breadcrumb's trailing segment also
+      // says "photo.png", same as any breadcrumb trail ending at the current page - that's not the
+      // duplication the fix targets).
+      expect(container.querySelector(".panel")?.textContent).not.toContain("photo.png");
+    });
+
+    it("submitting the header rename PATCHes /api/files/:id and updates the rendered name", async () => {
+      installMosni("test-token");
+      embedContext(ownedContext());
+      const fetchSpy = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(ownedContext({ name: "renamed.png" })),
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      renderAt("/f/photo.png");
+      act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
+
+      const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      act(() => {
+        setter.call(input, "renamed.png");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+
+      await act(async () => {
+        (container.querySelector('button[aria-label="Save name"]') as HTMLButtonElement).click();
+        await flush();
+      });
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "/api/files/file0000000000id",
+        expect.objectContaining({ method: "PATCH", body: JSON.stringify({ name: "renamed.png" }) }),
+      );
+      expect(container.querySelector("h1")?.textContent).toBe("renamed.png");
+    });
+  });
+
   // E5 Wave F: kind video now renders VideoPreview (Vidstack + a runtime capability fallback), not a bare
   // <video controls> - see web/test/unit/VideoPreview.test.tsx for that component's own coverage. This
   // just confirms PreviewCard wires the video kind to it at all.

@@ -424,9 +424,9 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
   it("reports the EFFECTIVE protection for a collection-gated file, never the stored column (D-96)", async () => {
     // The file is stored `public`; its collection is `secret`, so its effective level is `secret` and
     // D-97 leaves the stored column alone. Answering "public" here is the D-96 landmine reaching the wire:
-    // the owner's own preview page renders this value verbatim ("You own this file (public)." -
-    // PreviewCard.tsx) and offers it as the protection selector's current state, both of which would then
-    // be claiming a gated file is publicly listed.
+    // the owner's own preview page renders this value verbatim (the protection badge next to "You own
+    // this file", PreviewCard.tsx) and offers it as the protection selector's current state, both of
+    // which would then be claiming a gated file is publicly listed.
     const { linkToken } = await seed({
       name: "effective-level.txt",
       protection: "public",

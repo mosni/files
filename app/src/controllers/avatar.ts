@@ -88,15 +88,25 @@ export async function avatarHandler(
   let upstream: Response;
   try {
     // auth's avatar route is public, cacheable, and never 404s on its own (verified against auth's docs,
-    // session 031) - so a failure here means a network problem (e.g. the container-\>auth hairpin,
+    // session 031) - so a failure here means a network problem (e.g. the container->auth hairpin,
     // technical-baseline.md §4), not a missing avatar.
+    //
+    // E5.1 live-testing round 2 (avatar 404 found live): auth's route itself never 404s, but for the
+    // OWNER account and every non-upgraded link account it 302-redirects to a HARDCODED mosni.dev URL
+    // (mosni/auth routes/avatar.ts), and for a linked account to whatever `picture` stores - fetch()
+    // follows that redirect automatically, so a failure can now come from a SECOND hop this comment
+    // didn't originally cover. If mosni.dev is hosted on the same box as auth.mosni.dev, that second hop
+    // hits the identical hairpin/NAT gap docker-compose.yml's `extra_hosts` already fixes for
+    // auth.mosni.dev specifically - not yet confirmed against the real box, so logged distinctly here
+    // rather than guessed at in the compose file.
     upstream = await fetch(`${config.authIssuer}/avatar/${encodeURIComponent(resolved.uploaderSub)}`);
   } catch (err) {
-    console.error("avatar: upstream fetch failed", err);
+    console.error("avatar: upstream fetch failed (auth.mosni.dev unreachable, or a redirect target was)", err);
     reply.code(404).send();
     return;
   }
   if (!upstream.ok) {
+    console.error(`avatar: upstream responded ${upstream.status} for ${upstream.url}`);
     reply.code(404).send();
     return;
   }

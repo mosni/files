@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildPreviewContext,
   describeFile,
+  formatUploadDateTime,
   humanSize,
   previewKindFor,
   type PreviewContext,
@@ -117,8 +118,8 @@ describe("buildPreviewContext()", () => {
   // D-96, the landmine (technical-baseline.md §3): a row stored looser than an ancestor collection is
   // legitimate - D-97 deliberately rewrites nothing when a collection is raised - so the context this
   // builder produces must report the EFFECTIVE level. Reporting the stored column instead tells the
-  // owner's own preview page ("You own this file (public)." - PreviewCard.tsx) and the anonymous
-  // /api/preview/t/<token> body that a collection-gated file is public, which is false.
+  // owner's own preview page (the protection badge next to "You own this file", PreviewCard.tsx) and the
+  // anonymous /api/preview/t/<token> body that a collection-gated file is public, which is false.
   it("reports the EFFECTIVE protection, never the stored column (D-96)", () => {
     const ctx = buildPreviewContext(
       makeRecord({ protection: "public", effectiveProtection: "private" }),
@@ -261,5 +262,16 @@ describe("describeFile()", () => {
       urls,
     );
     expect(describeFile(ctx)).toBe("File · 2.3 MB · uploaded 21 Jul 2026");
+  });
+});
+
+// E5.1 live-testing round 2: PreviewCard's "uploaded <when> by <who>" line - UTC, zero-padded, sortable.
+describe("formatUploadDateTime()", () => {
+  it("renders a zero-padded UTC 'YYYY-MM-DD HH:MM UTC' timestamp", () => {
+    expect(formatUploadDateTime("2026-08-04T12:20:00.000Z")).toBe("2026-08-04 12:20 UTC");
+  });
+
+  it("zero-pads single-digit month/day/hour/minute", () => {
+    expect(formatUploadDateTime("2026-01-02T03:04:00.000Z")).toBe("2026-01-02 03:04 UTC");
   });
 });

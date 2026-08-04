@@ -54,7 +54,7 @@ function setNativeInputValue(input: HTMLInputElement | HTMLSelectElement, value:
 let container: HTMLDivElement;
 let root: Root;
 
-describe("ManageControls (D-89: rename, protection, delete - owner-only)", () => {
+describe("ManageControls (D-89: protection, delete - owner-only)", () => {
   beforeEach(() => {
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -69,157 +69,8 @@ describe("ManageControls (D-89: rename, protection, delete - owner-only)", () =>
     vi.restoreAllMocks();
   });
 
-  // G2 (E5.1 Wave D, finding 8): rename parity with the collection page's C8 interaction - a pencil
-  // trigger (D-111: btn-icon, never a bare <button>), not an always-visible input+button form.
-  it("rename starts collapsed behind a pencil icon button, and reveals the shared inline-rename control on click", async () => {
-    vi.stubGlobal("fetch", vi.fn());
-    act(() => {
-      root.render(<ManageControls context={makeContext()} />);
-    });
-
-    // Collapsed: name as plain text, no input, no form.
-    expect(container.textContent).toContain("photo.png");
-    expect(container.querySelector('input[aria-label="File name"]')).toBeNull();
-    const renameButton = container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement;
-    expect(renameButton).not.toBeNull();
-    expect(renameButton.className).toContain("btn-icon");
-
-    act(() => renameButton.click());
-
-    // Expanded: the shared InlineRename control (RenameInput + IconConfirmCancel), not a plain form.
-    const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
-    expect(input).not.toBeNull();
-    expect(input.value).toBe("photo.png");
-    expect(container.querySelector('button[aria-label="Save name"]')).not.toBeNull();
-    expect(container.querySelector('button[aria-label="Cancel rename"]')).not.toBeNull();
-  });
-
-  it("cancelling the inline rename collapses back to the pencil trigger with no request issued", async () => {
-    const fetchSpy = vi.fn();
-    vi.stubGlobal("fetch", fetchSpy);
-    act(() => {
-      root.render(<ManageControls context={makeContext()} />);
-    });
-
-    act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
-    const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
-    act(() => {
-      setNativeInputValue(input, "changed.png");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-
-    act(() => (container.querySelector('button[aria-label="Cancel rename"]') as HTMLButtonElement).click());
-
-    expect(container.querySelector('input[aria-label="File name"]')).toBeNull();
-    expect(container.textContent).toContain("photo.png"); // the ORIGINAL name, edit discarded
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  it("submitting the inline rename via the confirm icon PATCHes and calls onUpdate", async () => {
-    (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve(makeContext({ name: "renamed.png" })),
-    });
-    vi.stubGlobal("fetch", fetchSpy);
-    const onUpdate = vi.fn();
-
-    act(() => {
-      root.render(<ManageControls context={makeContext()} onUpdate={onUpdate} />);
-    });
-
-    act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
-    const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
-    act(() => {
-      setNativeInputValue(input, "renamed.png");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-
-    await act(async () => {
-      (container.querySelector('button[aria-label="Save name"]') as HTMLButtonElement).click();
-      await flush();
-    });
-
-    expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/files/file0000000000id",
-      expect.objectContaining({
-        method: "PATCH",
-        headers: expect.objectContaining({ Authorization: "Bearer test-token" }),
-        body: JSON.stringify({ name: "renamed.png" }),
-      }),
-    );
-    expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ name: "renamed.png" }));
-    // Collapses back on success.
-    expect(container.querySelector('input[aria-label="File name"]')).toBeNull();
-  });
-
-  it("pressing Enter in the rename input submits, same as the confirm icon", async () => {
-    (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve(makeContext({ name: "renamed.png" })),
-    });
-    vi.stubGlobal("fetch", fetchSpy);
-    const onUpdate = vi.fn();
-    const ctx = makeContext();
-
-    act(() => {
-      root.render(<ManageControls context={ctx} onUpdate={onUpdate} />);
-    });
-
-    act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
-    const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
-    act(() => {
-      setNativeInputValue(input, "renamed.png");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await act(async () => {
-      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-      await flush();
-    });
-
-    expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/files/file0000000000id",
-      expect.objectContaining({
-        method: "PATCH",
-        headers: expect.objectContaining({ Authorization: "Bearer test-token" }),
-        body: JSON.stringify({ name: "renamed.png" }),
-      }),
-    );
-    expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ name: "renamed.png" }));
-  });
-
-  it("a 409 on rename surfaces a suggested-name error rather than silently failing", async () => {
-    (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 409,
-      json: () => Promise.resolve({ error: "name_taken" }),
-    });
-    vi.stubGlobal("fetch", fetchSpy);
-    const ctx = makeContext();
-
-    act(() => {
-      root.render(<ManageControls context={ctx} />);
-    });
-
-    act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
-    const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
-    act(() => {
-      setNativeInputValue(input, "taken.png");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await act(async () => {
-      (container.querySelector('button[aria-label="Save name"]') as HTMLButtonElement).click();
-      await flush();
-    });
-
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain("taken.png");
-    // Stays open on failure - the edit is not silently discarded.
-    expect(container.querySelector('input[aria-label="File name"]')).not.toBeNull();
-  });
+  // E5.1 live-testing round 2: rename moved out of this component entirely, into PreviewCard.tsx's own
+  // header - see web/test/unit/Preview.test.tsx's "rename (header)" block for that coverage now.
 
   it("changes protection: PATCH with the new level and the Bearer, then calls onUpdate", async () => {
     (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
@@ -315,44 +166,19 @@ describe("ManageControls (D-89: rename, protection, delete - owner-only)", () =>
     );
   });
 
-  it("a 400 on rename explains the name was rejected, rather than reporting a generic failure", async () => {
-    (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 400,
-      json: () => Promise.resolve({ error: "invalid_name" }),
-    });
-    vi.stubGlobal("fetch", fetchSpy);
-
-    act(() => {
-      root.render(<ManageControls context={makeContext()} />);
-    });
-
-    act(() => (container.querySelector('button[aria-label="Rename"]') as HTMLButtonElement).click());
-    const input = container.querySelector('input[aria-label="File name"]') as HTMLInputElement;
-    act(() => {
-      setNativeInputValue(input, "a/b.png");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await act(async () => {
-      (container.querySelector('button[aria-label="Save name"]') as HTMLButtonElement).click();
-      await flush();
-    });
-
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain("slashes");
-  });
-
-  it("compact mode renders ONLY the protection selector - no rename form, no delete", () => {
+  it("compact mode renders ONLY the protection selector - no delete", () => {
     vi.stubGlobal("fetch", vi.fn());
     act(() => {
       root.render(<ManageControls context={makeContext()} compact />);
     });
 
     expect(container.querySelector("select")).not.toBeNull();
-    expect(container.querySelector("form")).toBeNull();
-    expect(container.textContent).not.toContain("Delete file");
+    expect(container.querySelector('button[aria-label="Delete file"]')).toBeNull();
   });
 
+  // E5.1 live-testing round 2 ("bottom panel should be reworked to be more icon based"): delete is now a
+  // bare trash icon (D-111: btn-icon), revealing the SAME confirm/cancel icon pair the header's rename
+  // control uses (InlineRename.tsx), not a full-width "Delete file" text button.
   it("delete requires a confirm step before calling DELETE /api/files/:id", async () => {
     (window as unknown as { mosni: unknown }).mosni = { token: () => "test-token" };
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true, status: 204 });
@@ -365,16 +191,13 @@ describe("ManageControls (D-89: rename, protection, delete - owner-only)", () =>
     });
 
     // First click only reveals the confirmation - no request yet.
-    const deleteButton = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent === "Delete file",
-    ) as HTMLButtonElement;
+    const deleteButton = container.querySelector('button[aria-label="Delete file"]') as HTMLButtonElement;
+    expect(deleteButton.className).toContain("btn-icon");
     act(() => deleteButton.click());
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Delete this file permanently?");
+    expect(container.querySelector('[role="alertdialog"]')).not.toBeNull();
 
-    const confirmButton = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent === "Yes, delete",
-    ) as HTMLButtonElement;
+    const confirmButton = container.querySelector('button[aria-label="Yes, delete"]') as HTMLButtonElement;
     await act(async () => {
       confirmButton.click();
       await flush();
@@ -393,14 +216,12 @@ describe("ManageControls (D-89: rename, protection, delete - owner-only)", () =>
       root.render(<ManageControls context={makeContext()} />);
     });
 
-    const deleteButton = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent === "Delete file",
-    ) as HTMLButtonElement;
+    const deleteButton = container.querySelector('button[aria-label="Delete file"]') as HTMLButtonElement;
     act(() => deleteButton.click());
-    const cancelButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Cancel") as HTMLButtonElement;
+    const cancelButton = container.querySelector('button[aria-label="Cancel delete"]') as HTMLButtonElement;
     act(() => cancelButton.click());
 
-    expect(container.textContent).toContain("Delete file");
-    expect(container.textContent).not.toContain("Delete this file permanently?");
+    expect(container.querySelector('button[aria-label="Delete file"]')).not.toBeNull();
+    expect(container.querySelector('[role="alertdialog"]')).toBeNull();
   });
 });
