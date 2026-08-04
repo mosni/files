@@ -214,6 +214,17 @@ export function VideoPreview({ ctx }: { ctx: PreviewContext }) {
       <MediaPlayer
         key={ctx.directUrl}
         src={source}
+        // Round-4 finding (Hannah: "it could easily play in a native video element" / "renders on every
+        // video, even ones the browser can play"): without an `aspectRatio`, Vidstack's own CSS
+        // (`:where(media-player[aspect-ratio]...) { height: 0; padding-bottom: ... }`, base.css) never
+        // applies, and nothing else gives the player real box height - it reports `canPlay`/`loadedData`
+        // correctly (a real <video> briefly attaches, confirmed with a real fixture and a real browser)
+        // but renders at ~2px regardless, which D2's own MIN_PLAYER_HEIGHT_PX check then (correctly, but
+        // for the wrong underlying reason) treats as a failure and falls back to the download card - for
+        // EVERY video, not a codec-specific subset. `ctx.width`/`ctx.height` are the file's real ffprobe'd
+        // dimensions (storage/probe.ts); `null` only for the rare row ffprobe couldn't read, in which case
+        // this reproduces today's (broken) behaviour rather than guessing a ratio.
+        aspectRatio={ctx.width !== null && ctx.height !== null ? ctx.width / ctx.height : null}
         playsInline
         style={FIT}
         // F0.2/F0.3: a container `canPlayType()` reported as merely "maybe"/"probably" (it cannot see

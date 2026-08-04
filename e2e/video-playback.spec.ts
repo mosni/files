@@ -120,6 +120,13 @@ async function expectRealPlayback(page: import("@playwright/test").Page) {
     .poll(async () => video.evaluate((el: HTMLVideoElement) => el.readyState), { timeout: 15_000 })
     .toBeGreaterThanOrEqual(2);
   await expect(page.getByText("This video can't play in this browser.")).toHaveCount(0);
+  // Round 4 (Hannah: "it could easily play in a native video element" / "renders on every video, even
+  // ones the browser can play"): a player that reports ready but collapses to ~2px (missing the
+  // `aspectRatio` prop Vidstack's own CSS needs to give the box real height) fails the fallback-text
+  // assertion above too, since D2's own MIN_PLAYER_HEIGHT_PX check flips it to the download card - but a
+  // direct height assertion pins the specific failure mode down rather than relying on that as a proxy.
+  const box = await video.boundingBox();
+  expect(box?.height ?? 0).toBeGreaterThan(64);
 }
 
 // SKIPPED IN THIS SANDBOX, not deleted or weakened: `directUrl` is the REAL `https://dl.mosni.dev` origin
