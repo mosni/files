@@ -41,6 +41,12 @@ class VideoErrorBoundary extends Component<{ directUrl: string; children: ReactN
 const FIT: React.CSSProperties = { maxWidth: "100%", height: "auto", display: "block" };
 const FRAME: React.CSSProperties = { width: "100%", height: "min(70vh, 640px)", border: 0, display: "block" };
 
+// E5.1 live-testing round 4 ("the spacings seem slightly inconsistent"): the header's stacked meta lines
+// (ownership/protection badges, size, uploaded-by) all use ONE vertical rhythm, and every inline icon+label
+// pair inside them uses ONE gap - previously these were several close-but-different ad hoc rem values.
+const STACK_GAP = "0.35rem";
+const INLINE_ICON_GAP = "0.35rem";
+
 // Wrapper glue for <mosni-code> (the friction D-8 predicted for React + custom elements). The element's
 // render() reads this.textContent and then WIPES its own children to rebuild them - so it must already
 // contain its text at the moment it enters the document. React inserts an element and appends children
@@ -371,18 +377,18 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
         {ctx.isOwner && (
           <p
             className="little-link"
-            style={{ display: "flex", gap: "0.85rem", margin: "0.35rem 0 0", marginLeft: 0 }}
+            style={{ display: "flex", gap: STACK_GAP, margin: `${STACK_GAP} 0 0`, marginLeft: 0 }}
           >
-            <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: INLINE_ICON_GAP }}>
               <mosni-icon name="user-check" size="14" /> You own this file
             </span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: INLINE_ICON_GAP }}>
               <mosni-icon name={PROTECTION_ICON[ctx.protection]} size="14" /> {ctx.protection}
             </span>
           </p>
         )}
 
-        <p className="little-link" style={{ margin: "0.35rem 0 0" }}>
+        <p className="little-link" style={{ margin: `${STACK_GAP} 0 0` }}>
           {ctx.sizeLabel}
           {ctx.width !== null && ctx.height !== null ? ` · ${ctx.width}×${ctx.height}` : ""}
         </p>
@@ -395,7 +401,7 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
             showAvatar/showByLine below fold the CLIENT-side load failure into the same gate. */}
         <p
           className="little-link"
-          style={{ display: "flex", alignItems: "center", gap: "0.35rem", margin: "0.2rem 0 0", marginLeft: 0 }}
+          style={{ display: "flex", alignItems: "center", gap: INLINE_ICON_GAP, margin: `${STACK_GAP} 0 0`, marginLeft: 0 }}
         >
           <span>uploaded {formatUploadDateTimeLocal(ctx.createdAt)}</span>
           {showByLine && (
