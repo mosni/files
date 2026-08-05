@@ -153,7 +153,7 @@ describe("collectArchiveEntries() (E5.1 Wave F, D-159)", () => {
 
     expect(entries).toEqual([{ name: "a.jpg", url: "https://dl.mosni.dev/a.jpg" }]);
     expect(omitted).toEqual([]);
-    expect(fetchLevel).toHaveBeenCalledWith("root", 0);
+    expect(fetchLevel).toHaveBeenCalledWith("root", 0, null);
   });
 
   it("walks into a nested collection and preserves its subtree path in the entry name (D-159, AC-F1/F2)", async () => {
@@ -218,8 +218,57 @@ describe("collectArchiveEntries() (E5.1 Wave F, D-159)", () => {
     const { entries } = await collectArchiveEntries("root", fetchLevel);
 
     expect(entries.map((e) => e.name).sort()).toEqual(["page1.txt", "page2.txt"]);
-    expect(fetchLevel).toHaveBeenCalledWith("root", 0);
-    expect(fetchLevel).toHaveBeenCalledWith("root", 100);
+    expect(fetchLevel).toHaveBeenCalledWith("root", 0, null);
+    expect(fetchLevel).toHaveBeenCalledWith("root", 100, null);
+  });
+
+  // Session 039 (review): the walk used to pass NO token below its own root, so every level of a
+  // link-shared (`secret`) subtree 404d and vanished from the zip with nothing in the omitted tail.
+  it("hands each level the token its OWN parent's response carried for it, and the root the caller's", async () => {
+    const seen: [string, string | null][] = [];
+    const fetchLevel = vi.fn(async (collectionId: string, _offset: number, token: string | null) => {
+      seen.push([collectionId, token]);
+      if (collectionId === "root" && token === "roottok") {
+        return level({ collections: [{ id: "sub", name: "Sub", token: "subtok" }] });
+      }
+      if (collectionId === "sub" && token === "subtok") {
+        return level({ files: [{ name: "inside.txt", directUrl: "https://dl.mosni.dev/inside" }] });
+      }
+      return null; // any other token (or none) is not authorized for that level
+    });
+
+    const { entries } = await collectArchiveEntries("root", fetchLevel, {}, "roottok");
+
+    expect(entries).toEqual([{ name: "Sub/inside.txt", url: "https://dl.mosni.dev/inside" }]);
+    expect(seen).toEqual([
+      ["root", "roottok"],
+      ["sub", "subtok"],
+    ]);
+  });
+
+  it("passes null (not the root's token) for a child whose own listing carried none", async () => {
+    const seen: (string | null)[] = [];
+    const fetchLevel = vi.fn(async (collectionId: string, _offset: number, token: string | null) => {
+      seen.push(token);
+      if (collectionId === "root") return level({ collections: [{ id: "sub", name: "Sub" }] });
+      return level({ files: [{ name: "a.txt", directUrl: "https://dl.mosni.dev/a" }] });
+    });
+
+    await collectArchiveEntries("root", fetchLevel, {}, "roottok");
+
+    expect(seen).toEqual(["roottok", null]);
+  });
+
+  it("stops paginating rather than looping forever when nextOffset does not advance (F3)", async () => {
+    // A backstop against a buggy or hostile response, not an expected branch - the server always advances.
+    const fetchLevel = vi.fn(async () =>
+      level({ files: [{ name: "a.txt", directUrl: "https://dl.mosni.dev/a" }], nextOffset: 0 }),
+    );
+
+    const { entries } = await collectArchiveEntries("root", fetchLevel);
+
+    expect(fetchLevel).toHaveBeenCalledTimes(1);
+    expect(entries).toEqual([{ name: "a.txt", url: "https://dl.mosni.dev/a" }]);
   });
 
   it("a nested collection the viewer cannot browse (fetchLevel returns null) contributes nothing, with no error (AC-F3)", async () => {

@@ -411,12 +411,13 @@ const PAGES = [
   { id: "notfound-missing", label: "404 - nonexistent path", url: `/f/vis-${run}/does-not-exist.png`, note: "Styled NotFound view (P1)", expectStatuses: [404] },
   {
     id: "landing-completed-upload",
-    label: "Landing - signed in, upload just completed (compact preview card)",
+    label: "Landing - signed in, upload just completed (job stack item + the listing refreshing itself)",
     url: "/",
-    note: "E2-UPLOAD-FIXES finding 6: the compact PreviewCard replaces bare links on completion. A real " +
-      "upload through mock-idp, not a seeded row. The image's dl.mosni.dev subresource is expected to fail " +
-      "in this sandbox (no live dl. origin) - that is a sandbox artifact, not a defect; layout, the " +
-      "progress-free completed state and the copy control are what this validates.",
+    note: "D-122: on completion the floating job stack shows the finished upload (view + copy, dismissible) " +
+      "- the inline compact PreviewCard this state used to wait for was REMOVED by D-122, and E5.1 Wave E " +
+      "(D-161) moved the stack out of DropZone and mounted it once. Also the live proof of AC-E1/finding 4: " +
+      "the listing below must gain the new row with no manual refresh. The image's dl.mosni.dev subresource " +
+      "is expected to fail in this sandbox (no live dl. origin) - a sandbox artifact, not a defect.",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
       await p.locator('input[type="file"]').setInputFiles({
@@ -424,10 +425,13 @@ const PAGES = [
         mimeType: "image/png",
         buffer: PNG_1PX,
       });
-      await p.locator(".copy-field-primary input").first().waitFor({ state: "visible", timeout: 30_000 });
-      // The share field appears as soon as the upload completes; the compact card is a second, best-effort
-      // fetch to /api/preview on top of that - give it a moment to land before the screenshot.
-      await p.waitForTimeout(1000);
+      // The stack item reaching its "done" shape is the completion signal (D-122's `view` link replaced the
+      // old copy-field). Fixed by the E5/E5.1 review session (039): the previous selector had been stale
+      // since D-122, and its timeout was swallowed - the state screenshotted mid-upload for months.
+      await p.locator(".job-stack .panel a", { hasText: "view" }).first().waitFor({ state: "visible", timeout: 30_000 });
+      // AC-E1: the listing refetches itself off the shared reload signal - wait for the row, don't assume it.
+      await p.locator("table").getByText(`vis-${run}-drop.png`).first().waitFor({ state: "visible", timeout: 15_000 });
+      await p.waitForTimeout(500);
     },
   },
   {
@@ -462,7 +466,10 @@ const PAGES = [
       "copy is always isOwner:false (D-75), so this state only appears after that round trip settles.",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
-      await p.waitForSelector("text=Delete file", { timeout: 10_000 }).catch(() => {});
+      // Fixed by the E5/E5.1 review session (039): `text=Delete file` matches TEXT CONTENT, and E4.1's
+      // header redesign made rename/delete ICON-ONLY buttons whose "Delete file" lives in aria-label - so
+      // this waited 10s and swallowed the miss on every run since. getByRole matches the accessible name.
+      await p.getByRole("button", { name: "Delete file" }).waitFor({ state: "visible", timeout: 15_000 });
     },
   },
   {
@@ -474,8 +481,9 @@ const PAGES = [
       "next state/run.",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
-      await p.waitForSelector("text=Delete file", { timeout: 10_000 }).catch(() => {});
-      await p.locator("button", { hasText: "Delete file" }).click();
+      // Same stale-selector fix as preview-owner-controls above (review session 039) - the affordance is an
+      // icon button, so its name is the accessible name, never its text content.
+      await p.getByRole("button", { name: "Delete file" }).click({ timeout: 15_000 });
       await p.waitForTimeout(150);
     },
   },
@@ -684,13 +692,23 @@ try {
       let title = "(navigation failed)";
       let status = null;
       let overflow = null;
+      let interactError = null;
       try {
         const res = await p.goto(target, { waitUntil: "domcontentloaded", timeout: 20_000 });
         status = res?.status() ?? null;
         // The SPA paints from the embedded context on the first frame; a private/missing file has none
         // and must round-trip to the API first, so give the client state machine a moment to settle.
         await p.waitForTimeout(700);
-        if (page.interact) await page.interact(p);
+        if (page.interact) {
+          // Recorded separately from a navigation failure: a state whose `interact` did not complete is a
+          // screenshot of the WRONG state, which is the D-163 family this check exists to make loud.
+          try {
+            await page.interact(p);
+          } catch (err) {
+            interactError = err;
+            throw err;
+          }
+        }
         title = await p.title();
         // A page that scrolls sideways is broken, and it is easy to miss in a screenshot because the
         // capture silently widens to fit. Measure it instead of trusting the eye - the first pass of
@@ -701,6 +719,23 @@ try {
         });
       } catch (err) {
         title = `(error: ${err.message.split("\n")[0]})`;
+      }
+
+      // E5/E5.1 review session (039): an `interact` that did not complete means the page is NOT in the
+      // state this entry names - the delete-confirmation was never opened, the upload never finished, the
+      // menu never opened. Until now that was swallowed into the title string and a screenshot of the
+      // pre-interaction page was written and signed off anyway; TWO states (landing-completed-upload,
+      // preview-delete-confirm) had been doing exactly that, undetected, since D-122 and E4.1's icon-only
+      // header respectively. Same rule as the status guard below and the design-system guard above: a
+      // check that cannot tell "I captured the state" from "I captured a failure" is worse than one that
+      // fails loudly.
+      if (interactError !== null) {
+        throw new Error(
+          `visual-check ABORTED: ${page.id} @ ${vp.name} - its interact step failed, so the page is not in ` +
+            `the state this entry describes and no screenshot was written for it. Underlying error: ` +
+            `${interactError.message.split("\n")[0]}. If the UI legitimately changed, update this entry's ` +
+            "selectors - do NOT relax this guard.",
+        );
       }
 
       // E5.1 Wave H (fold-in, review session 037's VISUAL-CHECK-PASSES-ON-429 finding): a state that

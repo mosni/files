@@ -44,15 +44,16 @@ async function withDb<T>(fn: (conn: mysql.Connection) => Promise<T>): Promise<T>
 
 async function seedCollection(
   conn: mysql.Connection,
-  opts: { name: string; ownerSub: string; parentId?: string },
-): Promise<{ id: string }> {
+  opts: { name: string; ownerSub: string; parentId?: string; protection?: "unlisted" | "secret" },
+): Promise<{ id: string; linkToken: string }> {
   const id = newId();
   const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
+  const protection = opts.protection ?? "unlisted";
   await conn.execute(
-    "INSERT INTO collections (id, parent_id, name, owner_sub, protection, default_protection, link_token) VALUES (?, ?, ?, ?, 'unlisted', 'unlisted', ?)",
-    [id, opts.parentId ?? "", opts.name, opts.ownerSub, linkToken],
+    "INSERT INTO collections (id, parent_id, name, owner_sub, protection, default_protection, link_token) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [id, opts.parentId ?? "", opts.name, opts.ownerSub, protection, protection, linkToken],
   );
-  return { id };
+  return { id, linkToken };
 }
 
 async function seedFile(
@@ -155,4 +156,54 @@ test("\"Download all\" produces a real zip, preserving a nested subtree path (AC
 
   const stack = page.locator(".job-stack");
   await expect(stack).toContainText("2 files could not be included", { timeout: 15_000 });
+});
+
+// E5/E5.1 review session (039). The walk used to pass NO token below its own root, so for the one viewer
+// class that reaches a collection purely by its link - an anonymous holder of a `secret` collection's
+// /t/<token> URL, which is the whole point of that protection level - every nested collection's browse
+// call 404d and its files silently vanished from the zip, with nothing in the "could not be included"
+// tail to say so. Anonymous by construction: this is invisible to any signed-in check, exactly the class
+// of gap H6 was added for.
+test("an anonymous /t/<token> viewer's archive still reaches a NESTED collection (AC-F1, review 039)", async ({
+  page,
+}) => {
+  const run = randomUUID().slice(0, 8);
+  const owner = `user:e2e-secret-${run}`;
+
+  const root = await withDb((conn) =>
+    seedCollection(conn, { name: `sec-${run}`, ownerSub: owner, protection: "secret" }),
+  );
+  // `unlisted`, not `secret`: a stored-`secret` row is deliberately absent from every listing including a
+  // link-authorized one (D-59 - it is reachable ONLY by its own token), so it could never be walked and is
+  // not the case here. An `unlisted` child of a `secret` parent IS listed, its EFFECTIVE protection is
+  // `secret` (the chain, D-96), and the parent's response hands the viewer that child's own /t/<token>
+  // previewUrl - which is exactly how the UI navigates into it, and what the walk must use too.
+  const child = await withDb((conn) =>
+    seedCollection(conn, { name: "Nested", ownerSub: owner, parentId: root.id, protection: "unlisted" }),
+  );
+  await withDb((conn) => seedFile(conn, { collectionId: child.id, name: "deep.txt", ownerSub: owner, body: "deep" }));
+
+  // A genuine anonymous visitor holding only the link - but with an EXPLICIT signed-out stub, the same one
+  // scripts/visual-check.mjs uses. Blocking sdk.js without one leaves `window.mosni` undefined, and the
+  // client's auth subscription then never settles, so the browser renders its loading spinner forever -
+  // a harness artifact, not the product's signed-out behaviour (in production sdk.js always loads).
+  await page.route("**/sdk.js", (route) => route.abort());
+  await page.addInitScript(`
+    window.mosni = Object.assign(window.mosni ?? {}, {
+      user: () => null, token: () => null, onChange: (cb) => cb(null),
+      login: () => {}, logout: () => {}, toast: () => {},
+    });
+  `);
+  await page.goto(`${FILES_ORIGIN}/t/${root.linkToken}`);
+
+  await page.waitForFunction(() => navigator.serviceWorker.controller !== null, { timeout: 15_000 });
+
+  const downloadButton = page.getByRole("button", { name: "Download all" });
+  await expect(downloadButton).toBeVisible({ timeout: 10_000 });
+  await Promise.all([page.waitForEvent("download", { timeout: 20_000 }), downloadButton.click()]);
+
+  // Same tier limitation as the test above: the per-file fetch is CORS-blocked here, so the file lands in
+  // the failed[] tail. The COUNT is the point - it is 1 only if the walk got into the nested collection at
+  // all. Before the fix this read "0 files" (nothing discovered below the root).
+  await expect(page.locator(".job-stack")).toContainText("1 file could not be included", { timeout: 15_000 });
 });

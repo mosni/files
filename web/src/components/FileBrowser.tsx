@@ -38,7 +38,7 @@ import { toastMutationFailure } from "../lib/mutationError.ts";
 import { fetchCollections, type CollectionOption } from "../lib/collections.ts";
 import { collectArchiveEntries, downloadArchive, isArchiveSupported, type ArchiveWalkLevel } from "../lib/archive.ts";
 import { pluralize } from "../lib/format.ts";
-import { isPlainLeftClick, pathnameOf } from "../lib/links.ts";
+import { isPlainLeftClick, pathnameOf, tokenOf } from "../lib/links.ts";
 import { upsertJob, useReloadSignal } from "../lib/jobs.ts";
 import { DropZone } from "./DropZone.tsx";
 import { IconConfirmCancel, RenameInput } from "./InlineRename.tsx";
@@ -809,19 +809,23 @@ export function FileBrowser({
   // E5.1 Wave F (finding 10, D-159): each level of the walk goes through the EXACT SAME GET /api/browse
   // call the rest of this component already uses (browseUrl/authHeaders/currentToken) - §1.5 binds: this
   // is not a second, wider authorization path, just the walk driving the same endpoint level by level.
-  // Only the walk's own ROOT (this page's collectionId) may carry `initialToken` (D-98's anonymous
-  // secret-collection bypass) - a deeper node is reached purely by what ITS PARENT's browse response
-  // already returned, never by riding the root's token into a collection it does not belong to.
-  async function fetchArchiveLevel(id: string, offset: number): Promise<ArchiveWalkLevel | null> {
+  // A node is reached purely by what ITS PARENT's browse response already returned - the root by this
+  // page's own `initialToken` (D-98's anonymous secret-collection bypass), a deeper node by the token the
+  // parent's listing carried for it in its `/t/<token>` previewUrl (links.ts's tokenOf). The root's token
+  // never rides down into a collection it does not belong to; it would not work if it did, since a `secret`
+  // collection matches only its OWN linkToken. Session 039 (review) found the walk was passing NO token
+  // below the root, so every nested level of a link-shared collection 404d and vanished from the zip with
+  // nothing in the omitted tail to say so.
+  async function fetchArchiveLevel(id: string, offset: number, token: string | null): Promise<ArchiveWalkLevel | null> {
     if (scope === null) return null;
-    const url = browseUrl(scope, id, offset, id === collectionId ? initialToken : undefined);
+    const url = browseUrl(scope, id, offset, token ?? undefined);
     for (let attempt = 0; attempt < ARCHIVE_WALK_MAX_ATTEMPTS; attempt++) {
       if (attempt > 0) await delay(2 ** (attempt - 1) * 500); // exponential backoff, same shape as sw.ts's
       const res = await fetch(url, authHeaders(currentToken()));
       if (res.ok) {
         const json = (await res.json()) as BrowseResponse;
         return {
-          collections: json.collections.map((c) => ({ id: c.id, name: c.name })),
+          collections: json.collections.map((c) => ({ id: c.id, name: c.name, token: tokenOf(c.previewUrl) })),
           files: json.files.map((f) => ({ name: f.name, directUrl: f.directUrl })),
           nextOffset: json.nextOffset,
         };
@@ -847,7 +851,12 @@ export function FileBrowser({
       // F1: the walk starts at THIS collection and paginates every level itself - it does not reuse
       // `data.files`/`data.collections`, so a top level with more than one page is fully covered too, not
       // just its nested children.
-      const { entries, omitted } = await collectArchiveEntries(collectionId, fetchArchiveLevel);
+      const { entries, omitted } = await collectArchiveEntries(
+        collectionId,
+        fetchArchiveLevel,
+        {},
+        initialToken ?? null,
+      );
       lastTotal = entries.length + omitted.length;
       lastFailed = [...omitted];
       // E5.1 Wave H found this by executing (not in the original hand-off): downloadArchive()'s own

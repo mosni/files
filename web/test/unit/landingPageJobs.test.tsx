@@ -141,4 +141,57 @@ describe("the landing page's shared job stack (E5.1 Wave E)", () => {
     // there is exactly one CONTAINER, not one per mounted component.
     expect(container.querySelectorAll(".job-stack .panel")).toHaveLength(1);
   });
+
+  // Wave E's own E4 asks for BOTH halves ("do not fix 4 in a way 12 then undoes"): the landing page gaining
+  // the refresh AND the collection page keeping it. The collection case used to run through a one-off
+  // `onUploadComplete` prop and now runs through the same shared signal, so the regression it could suffer
+  // is exactly the rewiring - and nothing covered it until the E5/E5.1 review session added this.
+  it("completing an upload on a COLLECTION PAGE still refreshes that listing (Wave E, no regression)", async () => {
+    (window as unknown as { mosni: unknown }).mosni = {
+      user: () => ({ sub: "user:a", roles: ["files:write"] }),
+      token: () => "tok",
+      onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write"] }),
+    };
+    // `canUpload: true` is what makes FileBrowser render its own compact DropZone on a collection route.
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          breadcrumb: [{ id: "c1", name: "Holiday", previewUrl: "https://files.mosni.dev/f/Holiday" }],
+          collections: [],
+          files: [],
+          nextOffset: null,
+          canUpload: true,
+        }),
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <FileBrowser initialCollectionId="c1" />
+          <UploadStack />
+        </MemoryRouter>,
+      );
+    });
+    await flush();
+
+    const browseCallsBefore = fetchSpy.mock.calls.filter((call) => (call[0] as string).includes("/api/browse")).length;
+    expect(browseCallsBefore).toBe(1);
+
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(input, "a collection page the viewer may upload into renders its own compact drop zone").toBeTruthy();
+    dropFile(input, new File(["hi"], "hi.txt", { type: "text/plain" }));
+    await act(async () => {
+      uploadInstances[0]!.options.onSuccess?.({
+        lastResponse: {
+          getBody: () => JSON.stringify({ previewUrl: "https://files.mosni.dev/hi", directUrl: "https://dl.mosni.dev/hi" }),
+        },
+      });
+      await flush();
+    });
+
+    const browseCallsAfter = fetchSpy.mock.calls.filter((call) => (call[0] as string).includes("/api/browse")).length;
+    expect(browseCallsAfter).toBe(2);
+  });
 });

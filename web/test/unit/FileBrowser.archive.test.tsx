@@ -142,6 +142,80 @@ describe("Download all (E5.1 Waves E + F)", () => {
     expect(entries).toEqual([{ name: "Sub/beach.jpg", url: "https://dl.mosni.dev/beach.jpg" }]);
   });
 
+  it("carries a nested SECRET collection's own token into the walk, so a link-shared subtree archives too (AC-F1)", async () => {
+    // A `secret` collection is reachable only with its OWN link token (D-98/D-124) - which is exactly what
+    // the server already handed this viewer, inside the child row's previewUrl (`/t/<token>`). Navigating
+    // into that child in the UI uses it; the walk must use the same one, or every nested level of a
+    // link-shared collection is silently absent from the zip. The ROOT still uses initialToken, and a
+    // child's token is never the root's - §1.5 holds either way: each level is authorized by what its own
+    // parent's browse response returned, never by riding a token into a collection it does not belong to.
+    const seen: string[] = [];
+    const fetchSpy = vi.fn((url: string) => {
+      seen.push(url);
+      if (url.includes("collectionId=root-id")) {
+        return Promise.resolve(
+          jsonResponse(
+            makeResponse({
+              collections: [
+                {
+                  id: "sub-id",
+                  name: "Sub",
+                  effectiveProtection: "secret",
+                  defaultProtection: "secret",
+                  reason: "granted",
+                  previewUrl: "https://files.mosni.dev/t/childtok",
+                },
+              ],
+            }),
+          ),
+        );
+      }
+      // The child answers ONLY when its own token rides along - exactly what controllers/browse.ts does.
+      if (url.includes("collectionId=sub-id") && url.includes("token=childtok")) {
+        return Promise.resolve(
+          jsonResponse(
+            makeResponse({
+              files: [
+                {
+                  id: "f1",
+                  name: "inside.txt",
+                  bytes: 3,
+                  createdAt: "2026-08-05T00:00:00.000Z",
+                  effectiveProtection: "secret",
+                  reason: "granted",
+                  previewUrl: "https://files.mosni.dev/t/filetok",
+                  directUrl: "https://dl.mosni.dev/inside.txt",
+                  thumbUrl: null,
+                  width: null,
+                  height: null,
+                  durationSeconds: null,
+                },
+              ],
+            }),
+          ),
+        );
+      }
+      return Promise.resolve(jsonResponse(makeResponse(), false, 404));
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await renderAt("root-id");
+
+    const button = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Download all"))!;
+    expect(button).toBeTruthy();
+
+    await act(async () => {
+      button.click();
+      await flush();
+    });
+
+    expect(downloadArchiveMock).toHaveBeenCalledTimes(1);
+    const [, entries] = downloadArchiveMock.mock.calls[0]!;
+    expect(entries).toEqual([{ name: "Sub/inside.txt", url: "https://dl.mosni.dev/inside.txt" }]);
+    // The root's own walk call must NOT carry the child's token, and vice versa.
+    expect(seen.some((u) => u.includes("collectionId=sub-id") && u.includes("token=childtok"))).toBe(true);
+  });
+
   it("shows the button for a collection holding only nested collections (no direct files)", async () => {
     vi.stubGlobal(
       "fetch",
@@ -206,6 +280,53 @@ describe("Download all (E5.1 Waves E + F)", () => {
     expect(downloadArchiveMock).toHaveBeenCalledTimes(1);
     const [, entries] = downloadArchiveMock.mock.calls[0]!;
     expect(entries).toEqual([{ name: "a.txt", url: "https://dl.mosni.dev/a.txt" }]);
+  });
+
+  it("turns a failed archive start into an error job and a toast, not a stack item stuck at 0%", async () => {
+    // The one path handleDownloadAll's catch exists for: downloadArchive() rejects before the service
+    // worker ever runs (no controller yet, registration failed, module workers unsupported - archive.ts's
+    // readyController throws for each). Uncovered until the E5/E5.1 review session added this.
+    downloadArchiveMock.mockRejectedValueOnce(new Error("the archive worker isn't available in this browser"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          makeResponse({
+            files: [
+              {
+                id: "f1",
+                name: "a.txt",
+                bytes: 1,
+                createdAt: "2026-08-05T00:00:00.000Z",
+                effectiveProtection: "unlisted",
+                reason: "own",
+                previewUrl: "https://files.mosni.dev/f/a.txt",
+                directUrl: "https://dl.mosni.dev/a.txt",
+                thumbUrl: null,
+                width: null,
+                height: null,
+                durationSeconds: null,
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+
+    await renderAt("root-id");
+
+    const button = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Download all"))!;
+    await act(async () => {
+      button.click();
+      await flush();
+    });
+
+    expect(container.querySelector(".job-stack")!.textContent).toContain("Could not start the archive");
+    expect(window.mosni!.toast).toHaveBeenCalledWith("the archive worker isn't available in this browser", {
+      variant: "error",
+    });
+    // The button must come back - `archiveInFlight` is cleared in the finally, so a retry is possible.
+    expect((button as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("publishes an archiving job, then a done job, into the SAME stack an upload would use (AC-E2)", async () => {

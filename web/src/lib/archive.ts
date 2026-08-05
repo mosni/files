@@ -114,8 +114,13 @@ export async function downloadArchive(
 // returns null (unauthorized, or gone since the listing was fetched) contributes nothing; that is correct
 // behaviour, not an error to surface.
 
+// `token` is whatever the PARENT's own browse response already carried for that child (its `/t/<token>`
+// previewUrl - lib/links.ts's tokenOf), null for the `/f/<path>` shape that needs none. It exists because a
+// `secret` child answers GET /api/browse only for its OWN token (D-98/D-124): without it, every nested level
+// of a link-shared collection 404s and vanishes from the zip silently. §1.5 still holds - the token comes
+// from the level above's response, never from the root riding down into a collection it does not belong to.
 export type ArchiveWalkLevel = {
-  collections: { id: string; name: string }[];
+  collections: { id: string; name: string; token?: string | null }[];
   files: { name: string; directUrl: string }[];
   nextOffset: number | null;
 };
@@ -135,7 +140,7 @@ const DEFAULT_MAX_ARCHIVE_ENTRIES = 20_000;
 // global 100/min limiter any further than it already does.
 const WALK_CONCURRENCY = 4;
 
-type WalkNode = { collectionId: string; segments: string[]; depth: number };
+type WalkNode = { collectionId: string; segments: string[]; depth: number; token: string | null };
 
 // Display names are already validated server-side (no "/", "..", or control characters, at
 // creation/rename time - session 017's review) - this is a defense-in-depth backstop for the zip entry
@@ -168,8 +173,9 @@ function uniquePath(used: Set<string>, path: string): string {
 
 export async function collectArchiveEntries(
   rootCollectionId: string,
-  fetchLevel: (collectionId: string, offset: number) => Promise<ArchiveWalkLevel | null>,
+  fetchLevel: (collectionId: string, offset: number, token: string | null) => Promise<ArchiveWalkLevel | null>,
   guards: ArchiveWalkGuards = {},
+  rootToken: string | null = null,
 ): Promise<{ entries: ArchiveFile[]; omitted: string[] }> {
   const maxDepth = guards.maxDepth ?? DEFAULT_MAX_ARCHIVE_DEPTH;
   const maxEntries = guards.maxEntries ?? DEFAULT_MAX_ARCHIVE_ENTRIES;
@@ -179,14 +185,17 @@ export async function collectArchiveEntries(
   const usedPaths = new Set<string>();
   let entryCount = 0;
 
-  async function fetchAllPages(collectionId: string): Promise<ArchiveWalkLevel[]> {
+  async function fetchAllPages(collectionId: string, token: string | null): Promise<ArchiveWalkLevel[]> {
     const pages: ArchiveWalkLevel[] = [];
     let offset = 0;
     for (;;) {
-      const page = await fetchLevel(collectionId, offset);
+      const page = await fetchLevel(collectionId, offset, token);
       if (page === null) break; // unauthorized / gone - §1.5: contributes nothing, not an error
       pages.push(page);
-      if (page.nextOffset === null) break;
+      // F3's "a mis-seeded tree must not hang the browser" applies to pagination as much as to depth: a
+      // nextOffset that does not STRICTLY advance would re-request the same page forever. The server always
+      // advances it, so this is a backstop against a bug or a hostile response, not an expected branch.
+      if (page.nextOffset === null || page.nextOffset <= offset) break;
       offset = page.nextOffset;
     }
     return pages;
@@ -197,7 +206,7 @@ export async function collectArchiveEntries(
       omitted.push(node.segments.length > 0 ? node.segments.join("/") : "(root)");
       return;
     }
-    const pages = await fetchAllPages(node.collectionId);
+    const pages = await fetchAllPages(node.collectionId, node.token);
     for (const page of pages) {
       for (const file of page.files) {
         const wantedPath = [...node.segments, sanitizeSegment(file.name)].join("/");
@@ -213,6 +222,7 @@ export async function collectArchiveEntries(
           collectionId: child.id,
           segments: [...node.segments, sanitizeSegment(child.name)],
           depth: node.depth + 1,
+          token: child.token ?? null,
         });
       }
     }
@@ -221,7 +231,7 @@ export async function collectArchiveEntries(
   // Bounded-concurrency BFS: process the queue in batches of at most WALK_CONCURRENCY nodes at a time,
   // waiting for each batch (which may itself discover and enqueue new child nodes) before starting the
   // next one.
-  let queue: WalkNode[] = [{ collectionId: rootCollectionId, segments: [], depth: 0 }];
+  let queue: WalkNode[] = [{ collectionId: rootCollectionId, segments: [], depth: 0, token: rootToken }];
   while (queue.length > 0) {
     const batch = queue.splice(0, WALK_CONCURRENCY);
     const discovered: WalkNode[] = [];
