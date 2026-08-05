@@ -10,6 +10,11 @@ COPY package*.json .npmrc ./
 COPY scripts ./scripts
 RUN npm ci
 COPY . .
+# E6 Wave G2 (D-179): rasterizes web/public/icon.svg into web/public/icons/*.png BEFORE `vite build` runs -
+# Vite copies web/public/* into web/dist/ verbatim at build time, so the PNGs must already exist on disk.
+# This mirrors the `prebuild` npm script (package.json), which `npx vite build` here does NOT trigger on
+# its own (npm's pre<script> lifecycle hooks only fire for `npm run <script>`, not a direct `npx` call).
+RUN node scripts/generate-icons.mjs
 RUN npx vite build
 RUN npx vite build --config vite.ssr.config.ts
 

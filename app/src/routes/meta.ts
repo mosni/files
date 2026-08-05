@@ -5,7 +5,7 @@
 
 import type { FastifyInstance } from "fastify";
 import type { Config } from "../config.ts";
-import { UPLOAD_CHUNK_SIZE } from "../lib/uploadConfig.ts";
+import { UPLOAD_CHUNK_SIZE, UPLOAD_EXPIRY_MS } from "../lib/uploadConfig.ts";
 
 export async function registerMetaRoutes(app: FastifyInstance, config: Config): Promise<void> {
   const filesHost = new URL(config.appOrigin).hostname;
@@ -15,5 +15,16 @@ export async function registerMetaRoutes(app: FastifyInstance, config: Config): 
 
   app.get("/api/config", { constraints: { host: filesHost } }, async () => ({
     uploadChunkSize: UPLOAD_CHUNK_SIZE,
+    // E6 A4: so the paused-upload UI can state the resumable window honestly instead of hardcoding "7
+    // days" a second time client-side (§0.5).
+    uploadExpiryMs: UPLOAD_EXPIRY_MS,
   }));
+
+  // E6 G7: a defensive fallback for POST /share-target. The share target is only ever offered by Android
+  // for an INSTALLED PWA (which implies an active service worker, web/src/sw.ts's own fetch handler for
+  // this exact path) - the worker should always win, but without this a POST that somehow reaches the
+  // origin directly (worker not yet controlling the page, or unregistered) 404s instead of degrading.
+  app.all("/share-target", { constraints: { host: filesHost } }, async (_request, reply) => {
+    reply.redirect("/", 303);
+  });
 }

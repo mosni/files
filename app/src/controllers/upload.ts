@@ -23,6 +23,7 @@ import { generateId } from "../lib/ids.ts";
 import { actorLabel } from "../lib/audit.ts";
 import type { Protection } from "../lib/protection.ts";
 import { thumbnailApplies } from "../lib/thumbs.ts";
+import { UPLOAD_EXPIRY_MS } from "../lib/uploadConfig.ts";
 import {
   abandonFileRow,
   claimFileRow,
@@ -92,7 +93,13 @@ async function cleanupFailedClaim(
 export function buildTusServer(config: Config): TusServer {
   return new TusServer({
     path: "/api/upload",
-    datastore: new FileStore({ directory: config.tusTempDir }),
+    // D-174: makes @tus/server send Upload-Expires on create/PATCH and 410 an expired HEAD/PATCH
+    // (dist/handlers/HeadHandler.js, PatchHandler.js) - the actual disk sweep is routes/upload.ts's
+    // cleanUpExpiredUploads() interval (A2); this alone only governs what @tus/server considers expired.
+    datastore: new FileStore({
+      directory: config.tusTempDir,
+      expirationPeriodInMilliseconds: UPLOAD_EXPIRY_MS,
+    }),
 
     // Without this, @tus/server builds the Location header it hands the client from the raw request and
     // assumes http://, so behind nginx the browser is told to PATCH `http://files.mosni.dev/api/upload/<id>`
@@ -251,7 +258,9 @@ export function buildTusServer(config: Config): TusServer {
           // onUploadFinish doc comment anticipates).
           status_code: 200,
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(urls),
+          // E6 Wave C (D-175): `id` alongside the URLs - grouping needs to PATCH /api/files/:id for each
+          // completed upload, and a display-name-shaped previewUrl/directUrl carries no way back to it.
+          body: JSON.stringify({ ...urls, id: record.id }),
         };
       } catch (err) {
         // Anything unexpected between the claim and the commit (mkdir/rename/probe/commit failures the

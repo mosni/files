@@ -61,6 +61,115 @@ function isManifestMessage(
   );
 }
 
+// E6 Wave G5 (D-133 stays unchanged: additive only, still no caching): the Android share-target handoff.
+// A file shared to the installed PWA arrives here as a POST /share-target - it is persisted to a
+// single-purpose IndexedDB store under a fresh id, deleted the moment the page claims it (or after
+// SHARE_TARGET_TTL_MS, whichever first), and NEVER stored as a Response. This is a transient hand-off, not
+// a cache - do not read this as license to grow one.
+function isShareTargetClaimMessage(data: unknown): data is { type: "share-target-claim"; id: string } {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    (data as { type?: unknown }).type === "share-target-claim" &&
+    typeof (data as { id?: unknown }).id === "string"
+  );
+}
+
+const SHARE_TARGET_DB = "files-share-target";
+const SHARE_TARGET_STORE = "pending";
+const SHARE_TARGET_TTL_MS = 5 * 60 * 1000;
+
+type ShareTargetEntry = { id: string; files: File[]; storedAt: number };
+
+function openShareTargetDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(SHARE_TARGET_DB, 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(SHARE_TARGET_STORE, { keyPath: "id" });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function storeShareTargetFiles(entry: ShareTargetEntry): Promise<void> {
+  const db = await openShareTargetDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(SHARE_TARGET_STORE, "readwrite");
+      tx.objectStore(SHARE_TARGET_STORE).put(entry);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+// Reads and deletes in the SAME transaction - a second claim (a reload of the same "?share-target=<id>"
+// URL, say) finds nothing rather than the files a second time.
+async function claimShareTargetFiles(id: string): Promise<File[]> {
+  const db = await openShareTargetDb();
+  try {
+    return await new Promise<File[]>((resolve, reject) => {
+      const tx = db.transaction(SHARE_TARGET_STORE, "readwrite");
+      const store = tx.objectStore(SHARE_TARGET_STORE);
+      const getRequest = store.get(id);
+      getRequest.onsuccess = () => {
+        const entry = getRequest.result as ShareTargetEntry | undefined;
+        if (entry === undefined) {
+          resolve([]);
+          return;
+        }
+        store.delete(id);
+        resolve(entry.files);
+      };
+      getRequest.onerror = () => reject(getRequest.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+// Best-effort, never awaited by a caller that needs to move on - drops any entry nobody ever claimed
+// (the share sheet was opened but the page was never reached, a stale/duplicate id, etc).
+async function sweepExpiredShareTargets(): Promise<void> {
+  const db = await openShareTargetDb();
+  try {
+    const cutoff = Date.now() - SHARE_TARGET_TTL_MS;
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(SHARE_TARGET_STORE, "readwrite");
+      const store = tx.objectStore(SHARE_TARGET_STORE);
+      const cursorRequest = store.openCursor();
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (!cursor) return;
+        if ((cursor.value as ShareTargetEntry).storedAt < cutoff) cursor.delete();
+        cursor.continue();
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function handleShareTarget(request: Request): Promise<Response> {
+  const formData = await request.formData();
+  const files = formData.getAll("files").filter((entry): entry is File => entry instanceof File);
+  const id = crypto.randomUUID();
+  if (files.length > 0) {
+    await storeShareTargetFiles({ id, files, storedAt: Date.now() });
+  }
+  void sweepExpiredShareTargets(); // never blocks the redirect
+  // Absolute, built from the REQUEST's own origin rather than a bare relative path - Response.redirect()
+  // resolves a relative URL against the worker's scope in a real browser, but that resolution is
+  // environment-specific (Node's undici, which the Vitest/jsdom test environment's global fetch actually
+  // uses, requires an absolute URL outright) - anchoring explicitly is correct in both.
+  return Response.redirect(new URL(`/?share-target=${id}`, request.url).toString(), 303);
+}
+
 scope.addEventListener("install", () => {
   // Take over immediately rather than waiting for every open tab to close - this worker has no cached
   // state to be careful about migrating.
@@ -74,8 +183,16 @@ scope.addEventListener("activate", (event) => {
 scope.addEventListener("message", (event) => {
   const messageEvent = event as MessageEventLike;
   const data = messageEvent.data;
-  if (!isManifestMessage(data)) return;
-  pendingArchives.set(data.id, { name: data.name, files: data.files, source: messageEvent.source });
+  if (isManifestMessage(data)) {
+    pendingArchives.set(data.id, { name: data.name, files: data.files, source: messageEvent.source });
+    return;
+  }
+  if (isShareTargetClaimMessage(data)) {
+    const source = messageEvent.source;
+    void claimShareTargetFiles(data.id).then((files) => {
+      source?.postMessage({ type: "share-target-files", id: data.id, files });
+    });
+  }
 });
 
 // Only a transient failure is worth another attempt. A 404/403 is the server's settled answer (most often
@@ -191,6 +308,14 @@ function buildArchiveResponse(id: string, archive: PendingArchive): Response {
 scope.addEventListener("fetch", (event) => {
   const fetchEvent = event as FetchEvent;
   const url = new URL(fetchEvent.request.url);
+
+  // E6 Wave G5: the share-target handoff, additive next to the archive path above - neither branch's
+  // respondWith touches the other's requests.
+  if (fetchEvent.request.method === "POST" && url.pathname === "/share-target") {
+    fetchEvent.respondWith(handleShareTarget(fetchEvent.request));
+    return;
+  }
+
   if (!url.pathname.startsWith(ARCHIVE_PREFIX)) return; // not ours - let the browser handle it normally
 
   const id = url.pathname.slice(ARCHIVE_PREFIX.length).split("/")[0];

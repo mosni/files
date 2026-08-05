@@ -105,11 +105,11 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
   // 127.0.0.1).
   await registerMetaRoutes(app, config);
   await registerUploadRoutes(app, config, redis);
-  await registerDeliveryRoutes(app, config);
+  await registerDeliveryRoutes(app, config, redis);
   await registerPreviewRoutes(app, config);
   // E3: the app's first mutating API (rename/delete/protection-change for files and collections).
   // files.mosni.dev-only, same containment reasoning as upload/preview above.
-  await registerManageRoutes(app, config);
+  await registerManageRoutes(app, config, redis);
   // E4: the file browser's listing API. files.mosni.dev-only; scope=visible is this app's first and only
   // anonymous listing endpoint (D-94).
   await registerBrowseRoutes(app, config);

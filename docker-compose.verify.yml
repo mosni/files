@@ -88,6 +88,7 @@ services:
       - sh
       - -lc
       - >-
+        node scripts/generate-icons.mjs &&
         npx vite build &&
         npx vitest run --coverage &&
         npx vite build --config vite.ssr.config.ts

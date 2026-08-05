@@ -7,44 +7,32 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-// tus.Upload performs a real network round-trip; jsdom has no server to upload to, so we stub the whole
-// module and capture each constructed instance to drive its callbacks (onProgress/onSuccess/onError)
-// directly from the test, exactly like the real server would drive them via XHR events.
-const { uploadInstances } = vi.hoisted(() => ({
-  uploadInstances: [] as Array<{
-    file: File;
-    options: {
-      endpoint?: string;
-      chunkSize?: number;
-      metadata?: Record<string, string>;
-      headers?: Record<string, string>;
-      onProgress?: (bytesSent: number, bytesTotal: number) => void;
-      onSuccess?: (payload: { lastResponse: { getBody(): string } }) => void;
-      onError?: (error: Error) => void;
-    };
-    start: () => void;
-  }>,
+// E6 (D-171, Wave 0): all tus orchestration now lives in web/src/lib/uploads.ts (see uploads.test.ts for
+// its own thorough coverage) - DropZone only ever collects files and calls startBatch(). Mocking the
+// controller module (rather than tus-js-client directly, as this file used to) is what lets these tests
+// assert DropZone's OWN behaviour - which files, which destination, which IngestSource - without caring
+// how the controller turns that into HTTP requests.
+const { startBatchCalls } = vi.hoisted(() => ({
+  startBatchCalls: [] as Array<{ files: File[]; options: { destinationCollectionId: string | null; source: string } }>,
 }));
 
-vi.mock("tus-js-client", () => {
-  class MockUpload {
-    file: File;
-    options: (typeof uploadInstances)[number]["options"];
-    start = vi.fn();
+vi.mock("../../src/lib/uploads.ts", () => ({
+  startBatch: vi.fn((files: File[], options: { destinationCollectionId: string | null; source: string }) => {
+    startBatchCalls.push({ files, options });
+    return `batch-${startBatchCalls.length}`;
+  }),
+  setUploadChunkSize: vi.fn(),
+}));
 
-    constructor(file: File, options: (typeof uploadInstances)[number]["options"]) {
-      this.file = file;
-      this.options = options;
-      uploadInstances.push(this as unknown as (typeof uploadInstances)[number]);
-    }
-  }
-
-  return { Upload: MockUpload };
-});
+// E6 Wave E: DropZone's folder branch calls walkDroppedEntries directly - stubbed here so a "drop a
+// directory" test can control exactly what it returns without needing a real FileSystemEntry.
+const { walkDroppedEntriesMock } = vi.hoisted(() => ({ walkDroppedEntriesMock: vi.fn() }));
+vi.mock("../../src/lib/folderWalk.ts", () => ({ walkDroppedEntries: walkDroppedEntriesMock }));
 
 import { DropZone } from "../../src/components/DropZone.tsx";
 import { UploadStack } from "../../src/components/UploadStack.tsx";
 import { __resetJobsStoreForTests } from "../../src/lib/jobs.ts";
+import { __resetCollectionPathCacheForTests } from "../../src/lib/collections.ts";
 
 // Flushes every pending microtask (fetch → res.json() → setState is two awaits deep) by yielding to a
 // real macrotask - more robust than a fixed number of `await Promise.resolve()` hops.
@@ -88,17 +76,23 @@ function dropFile(input: HTMLInputElement, file: File) {
   });
 }
 
+function dropOnto(target: Element | Window, dataTransfer: unknown) {
+  const dropEvent = new Event("drop", { bubbles: true, cancelable: true }) as Event & { dataTransfer: unknown };
+  dropEvent.dataTransfer = dataTransfer;
+  act(() => {
+    target.dispatchEvent(dropEvent);
+  });
+}
+
 describe("DropZone", () => {
   let container: HTMLDivElement;
   let root: Root;
 
   beforeEach(() => {
-    uploadInstances.length = 0;
-    // E5.1 Wave E: the job store is a module-level singleton now that DropZone publishes to it instead of
-    // owning its own `uploads` state - without this, a job left over from a previous test (nothing here
-    // ever "unmounts" a job the way local state used to vanish with the component) would leak into the
-    // next test's assertions on the stack's contents.
+    startBatchCalls.length = 0;
+    walkDroppedEntriesMock.mockReset();
     __resetJobsStoreForTests();
+    __resetCollectionPathCacheForTests();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -155,14 +149,12 @@ describe("DropZone", () => {
       );
     });
 
-    // Copy reworded in session 010 (the branch now renders a titled .panel rather than a bare <p>);
-    // the assertion that matters is unchanged - no login button and no drop zone in this branch.
     expect(container.textContent).toContain("No upload access");
     expect(container.querySelector("mosni-login-button")).toBeNull();
     expect(container.querySelector('input[type="file"]')).toBeNull();
   });
 
-  it("renders the drop zone when signed in with files:write, starting one tus.Upload per file (F1)", () => {
+  it("renders the drop zone when signed in with files:write, and calls startBatch with source picker (F1)", async () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
@@ -178,40 +170,16 @@ describe("DropZone", () => {
     expect(input).not.toBeNull();
 
     dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
+    // resolveDestination() is async (Wave 0 shares it across every ingest path), so startBatch always
+    // lands a microtask later now, even on the no-op destination path that used to complete synchronously.
+    await flush();
 
-    expect(uploadInstances).toHaveLength(1);
-    expect(uploadInstances[0].options.metadata).toEqual({ filename: "hello.txt" });
-    expect(uploadInstances[0].options.headers).toEqual({ Authorization: "Bearer test-token" });
-    expect(uploadInstances[0].options.chunkSize).toBe(5 * 1024 * 1024);
+    expect(startBatchCalls).toHaveLength(1);
+    expect(startBatchCalls[0].files.map((f) => f.name)).toEqual(["hello.txt"]);
+    expect(startBatchCalls[0].options).toEqual({ destinationCollectionId: null, source: "picker" });
   });
 
-  it("reflects a simulated onProgress event as the row's --progress custom property and MB/% readout (F2)", () => {
-    installMockMosni({ sub: "user:1", roles: ["files:write"] });
-
-    act(() => {
-      root.render(
-        <>
-          <DropZone />
-          <UploadStack />
-        </>,
-      );
-    });
-
-    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
-    dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
-
-    act(() => {
-      uploadInstances[0].options.onProgress?.(50, 100);
-    });
-
-    const progressEl = container.querySelector(".progress") as HTMLElement;
-    expect(progressEl).not.toBeNull();
-    expect(progressEl.style.getPropertyValue("--progress")).toBe("50%");
-    expect(container.textContent).toContain("50%");
-    expect(container.textContent).toContain("50 B / 100 B");
-  });
-
-  it("rejects a dropped folder (0-byte File) - no upload starts, and an error toast fires", () => {
+  it("rejects a genuinely empty (0-byte) dropped file - no batch starts, and an error toast fires", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
@@ -224,196 +192,15 @@ describe("DropZone", () => {
     });
 
     const dropArea = container.querySelector('[role="button"]') as HTMLElement;
-    const folder = new File([], "testfolder");
-    const dropEvent = new Event("drop", { bubbles: true, cancelable: true }) as Event & {
-      dataTransfer: { files: File[] };
-    };
-    dropEvent.dataTransfer = { files: [folder] };
+    const empty = new File([], "empty.txt");
+    dropOnto(dropArea, { files: [empty], items: undefined });
 
-    act(() => {
-      dropArea.dispatchEvent(dropEvent);
-    });
-
-    expect(uploadInstances).toHaveLength(0);
+    expect(startBatchCalls).toHaveLength(0);
     const mosni = (window as unknown as { mosni: { toast: ReturnType<typeof vi.fn> } }).mosni;
-    expect(mosni.toast).toHaveBeenCalledWith(expect.stringContaining("testfolder"), { variant: "error" });
+    expect(mosni.toast).toHaveBeenCalledWith(expect.stringContaining("empty.txt"), { variant: "error" });
   });
 
-  // D-122 (E4.1 live-testing findings, Wave E, findings 1/2): completion is a floating stack element, not
-  // a compact PreviewCard - no /api/preview round trip happens any more (fetchPreviewContext is gone).
-  it("a completed upload renders a 'view' link and a copy-direct-link button, never a PreviewCard (D-122)", () => {
-    installMockMosni({ sub: "user:1", roles: ["files:write"] });
-
-    act(() => {
-      root.render(
-        <>
-          <DropZone />
-          <UploadStack />
-        </>,
-      );
-    });
-
-    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
-    dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
-
-    act(() => {
-      uploadInstances[0].options.onSuccess?.({
-        lastResponse: {
-          getBody: () =>
-            JSON.stringify({
-              previewUrl: "https://files.mosni.dev/abc",
-              directUrl: "https://dl.mosni.dev/abc",
-            }),
-        },
-      });
-    });
-
-    expect(container.querySelector(".progress")).toBeNull();
-    // No PreviewCard: no <h1> title, no CopyLink share-field markup.
-    expect(container.querySelector("h1")).toBeNull();
-    expect(container.querySelector(".copy-field-primary")).toBeNull();
-
-    const viewLink = container.querySelector("a") as HTMLAnchorElement;
-    expect(viewLink).not.toBeNull();
-    expect(viewLink.textContent).toBe("view");
-    expect(viewLink.getAttribute("href")).toBe("https://files.mosni.dev/abc");
-    expect(container.textContent).toContain("hello.txt");
-  });
-
-  it("the copy-direct-link button writes directUrl to the clipboard and toasts", async () => {
-    installMockMosni({ sub: "user:1", roles: ["files:write"] });
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.assign(navigator, { clipboard: { writeText } });
-
-    act(() => {
-      root.render(
-        <>
-          <DropZone />
-          <UploadStack />
-        </>,
-      );
-    });
-
-    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
-    dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
-    act(() => {
-      uploadInstances[0].options.onSuccess?.({
-        lastResponse: {
-          getBody: () =>
-            JSON.stringify({ previewUrl: "https://files.mosni.dev/abc", directUrl: "https://dl.mosni.dev/abc" }),
-        },
-      });
-    });
-
-    const copyButton = container.querySelector('button[aria-label^="Copy direct link"]') as HTMLButtonElement;
-    expect(copyButton).not.toBeNull();
-    await act(async () => {
-      copyButton.click();
-      await Promise.resolve();
-    });
-
-    expect(writeText).toHaveBeenCalledWith("https://dl.mosni.dev/abc");
-    const mosni = (window as unknown as { mosni: { toast: ReturnType<typeof vi.fn> } }).mosni;
-    expect(mosni.toast).toHaveBeenCalledWith("Link copied", { variant: "success" });
-  });
-
-  it("dismissing a completed upload's stack element removes only that element", () => {
-    installMockMosni({ sub: "user:1", roles: ["files:write"] });
-
-    act(() => {
-      root.render(
-        <>
-          <DropZone />
-          <UploadStack />
-        </>,
-      );
-    });
-
-    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
-    dropFile(input, new File(["one"], "one.txt", { type: "text/plain" }));
-    dropFile(input, new File(["two"], "two.txt", { type: "text/plain" }));
-    expect(uploadInstances).toHaveLength(2);
-
-    act(() => {
-      uploadInstances[0].options.onSuccess?.({
-        lastResponse: {
-          getBody: () => JSON.stringify({ previewUrl: "https://files.mosni.dev/one", directUrl: "https://dl.mosni.dev/one" }),
-        },
-      });
-      uploadInstances[1].options.onSuccess?.({
-        lastResponse: {
-          getBody: () => JSON.stringify({ previewUrl: "https://files.mosni.dev/two", directUrl: "https://dl.mosni.dev/two" }),
-        },
-      });
-    });
-
-    expect(container.textContent).toContain("one.txt");
-    expect(container.textContent).toContain("two.txt");
-
-    const dismissButtons = container.querySelectorAll('button[aria-label^="Dismiss"]');
-    expect(dismissButtons).toHaveLength(2);
-    act(() => {
-      (dismissButtons[0] as HTMLButtonElement).click();
-    });
-
-    expect(container.textContent).not.toContain("one.txt");
-    expect(container.textContent).toContain("two.txt");
-  });
-
-  // A2's guard (hand-off acceptance criterion 2) shipped in session 012 with no test at all. The failure
-  // it exists for is real: the file is already stored server-side and the audit notification already
-  // sent, so a row stuck on `uploading` forever is a lie about state that the user cannot clear. An
-  // nginx 502 page or any non-JSON body reaches this path.
-  it("puts the row in error when the completion body is unreadable, never a permanent uploading (A2)", () => {
-    installMockMosni({ sub: "user:1", roles: ["files:write"] });
-
-    act(() => {
-      root.render(
-        <>
-          <DropZone />
-          <UploadStack />
-        </>,
-      );
-    });
-
-    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
-    dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
-
-    act(() => {
-      uploadInstances[0].options.onSuccess?.({
-        lastResponse: { getBody: () => "<html><body>502 Bad Gateway</body></html>" },
-      });
-    });
-
-    expect(container.querySelector('[role="alert"]')).not.toBeNull();
-    expect(container.textContent).toContain("Upload failed");
-    expect(container.querySelector(".progress")).toBeNull();
-    expect(container.querySelector("button.copy-field-btn-primary")).toBeNull();
-  });
-
-  it("shows an error state for a file whose upload fails, without affecting other files (F1)", () => {
-    installMockMosni({ sub: "user:1", roles: ["files:write"] });
-
-    act(() => {
-      root.render(
-        <>
-          <DropZone />
-          <UploadStack />
-        </>,
-      );
-    });
-
-    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
-    dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
-
-    act(() => {
-      uploadInstances[0].options.onError?.(new Error("network down"));
-    });
-
-    expect(container.textContent).toContain("Upload failed");
-  });
-
-  it("each dropped file gets its own independent tus.Upload instance (F1: no grouping in this epic)", () => {
+  it("each dropped file is passed through in the SAME startBatch call (F1: no grouping in this epic beyond D-175's opt-in)", async () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
@@ -432,10 +219,10 @@ describe("DropZone", () => {
     act(() => {
       input.dispatchEvent(new Event("change", { bubbles: true }));
     });
+    await flush();
 
-    expect(uploadInstances).toHaveLength(2);
-    expect(uploadInstances[0].options.metadata).toEqual({ filename: "a.txt" });
-    expect(uploadInstances[1].options.metadata).toEqual({ filename: "b.txt" });
+    expect(startBatchCalls).toHaveLength(1);
+    expect(startBatchCalls[0].files.map((f) => f.name)).toEqual(["a.txt", "b.txt"]);
   });
 
   it("clicking the drop area opens the native file picker (click-to-choose, not drag-only)", () => {
@@ -493,7 +280,7 @@ describe("DropZone", () => {
     expect(clickSpy).toHaveBeenCalledTimes(2);
   });
 
-  it("dragging and dropping a file onto the drop area starts an upload (not just click-to-choose)", () => {
+  it("dragging and dropping a flat file onto the drop area calls startBatch with source drop", async () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
@@ -506,18 +293,13 @@ describe("DropZone", () => {
     });
 
     const dropArea = container.querySelector('[role="button"]') as HTMLElement;
-    const file = new File(["hello"], "dropped.txt", { type: "text/plain" });
-    const dropEvent = new Event("drop", { bubbles: true, cancelable: true }) as Event & {
-      dataTransfer: { files: File[] };
-    };
-    dropEvent.dataTransfer = { files: [file] };
+    const droppedFile = new File(["hello"], "dropped.txt", { type: "text/plain" });
+    dropOnto(dropArea, { files: [droppedFile], items: undefined });
+    await flush();
 
-    act(() => {
-      dropArea.dispatchEvent(dropEvent);
-    });
-
-    expect(uploadInstances).toHaveLength(1);
-    expect(uploadInstances[0].options.metadata).toEqual({ filename: "dropped.txt" });
+    expect(startBatchCalls).toHaveLength(1);
+    expect(startBatchCalls[0].files.map((f) => f.name)).toEqual(["dropped.txt"]);
+    expect(startBatchCalls[0].options.source).toBe("drop");
   });
 
   it("polls until window.mosni becomes available before rendering gated content", () => {
@@ -545,6 +327,193 @@ describe("DropZone", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe("E6 D2: clipboard paste", () => {
+    function pasteWith(dataTransfer: Partial<DataTransfer>, target: EventTarget = document.body) {
+      const pasteEvent = new Event("paste", { bubbles: true, cancelable: true }) as ClipboardEvent;
+      Object.defineProperty(pasteEvent, "clipboardData", { value: dataTransfer });
+      Object.defineProperty(pasteEvent, "target", { value: target });
+      act(() => {
+        target.dispatchEvent(pasteEvent);
+      });
+    }
+
+    it("pasting an image blob on the document starts a batch with source paste", async () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      act(() => {
+        root.render(
+          <>
+            <DropZone />
+            <UploadStack />
+          </>,
+        );
+      });
+
+      const blob = new File(["img"], "clip.png", { type: "image/png" });
+      const item = { kind: "file", type: "image/png", getAsFile: () => blob } as unknown as DataTransferItem;
+      pasteWith({ files: [] as unknown as FileList, items: [item] as unknown as DataTransferItemList, getData: () => "" });
+      await flush();
+
+      expect(startBatchCalls).toHaveLength(1);
+      expect(startBatchCalls[0].options.source).toBe("paste");
+      expect(startBatchCalls[0].files[0].type).toBe("image/png");
+    });
+
+    it("pasting inside a text input pastes text, never triggers an upload", () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      act(() => {
+        root.render(
+          <>
+            <DropZone />
+            <UploadStack />
+          </>,
+        );
+      });
+
+      const textInput = document.createElement("input");
+      document.body.appendChild(textInput);
+      const blob = new File(["img"], "clip.png", { type: "image/png" });
+      const item = { kind: "file", type: "image/png", getAsFile: () => blob } as unknown as DataTransferItem;
+      pasteWith({ files: [] as unknown as FileList, items: [item] as unknown as DataTransferItemList, getData: () => "" }, textInput);
+
+      expect(startBatchCalls).toHaveLength(0);
+      textInput.remove();
+    });
+
+    it("a signed-out visitor's paste never triggers an upload", () => {
+      installMockMosni(null);
+      act(() => {
+        root.render(
+          <>
+            <DropZone />
+            <UploadStack />
+          </>,
+        );
+      });
+
+      const blob = new File(["img"], "clip.png", { type: "image/png" });
+      const item = { kind: "file", type: "image/png", getAsFile: () => blob } as unknown as DataTransferItem;
+      pasteWith({ files: [] as unknown as FileList, items: [item] as unknown as DataTransferItemList, getData: () => "" });
+
+      expect(startBatchCalls).toHaveLength(0);
+    });
+  });
+
+  describe("E6 E3/E4: folder ingest", () => {
+    it("dropping a directory walks it and calls startBatch per resolved destination, not the old 'not supported yet' rejection", async () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+          if (url === "/api/collections" && init?.method === "POST") {
+            return Promise.resolve({ ok: true, json: () => Promise.resolve({ id: "coll-photos" }) });
+          }
+          return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+        }),
+      );
+      const fileA = new File(["a"], "a.jpg", { type: "image/jpeg" });
+      walkDroppedEntriesMock.mockResolvedValue({
+        files: [{ file: fileA, relativePath: ["photos", "a.jpg"] }],
+        truncated: false,
+        rejected: [],
+      });
+
+      act(() => {
+        root.render(
+          <>
+            <DropZone />
+            <UploadStack />
+          </>,
+        );
+      });
+
+      const dropArea = container.querySelector('[role="button"]') as HTMLElement;
+      const dirEntry = { isDirectory: true, isFile: false, name: "photos" };
+      const item = { webkitGetAsEntry: () => dirEntry } as unknown as DataTransferItem;
+      await act(async () => {
+        dropOnto(dropArea, { files: [] as unknown as FileList, items: [item] as unknown as DataTransferItemList });
+        await flush();
+      });
+
+      const mosni = (window as unknown as { mosni: { toast: ReturnType<typeof vi.fn> } }).mosni;
+      expect(mosni.toast).not.toHaveBeenCalledWith(expect.stringContaining("not supported"), expect.anything());
+      expect(startBatchCalls).toHaveLength(1);
+      expect(startBatchCalls[0].options).toEqual({ destinationCollectionId: "coll-photos", source: "folder" });
+      expect(startBatchCalls[0].files.map((f) => f.name)).toEqual(["a.jpg"]);
+    });
+
+    it("a folder walk that reports truncation still uploads what it found and toasts once", async () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) }));
+      const fileA = new File(["a"], "a.jpg");
+      walkDroppedEntriesMock.mockResolvedValue({
+        files: [{ file: fileA, relativePath: ["a.jpg"] }],
+        truncated: true,
+        rejected: [],
+      });
+
+      act(() => {
+        root.render(
+          <>
+            <DropZone />
+            <UploadStack />
+          </>,
+        );
+      });
+
+      const dropArea = container.querySelector('[role="button"]') as HTMLElement;
+      const dirEntry = { isDirectory: true, isFile: false, name: "photos" };
+      const item = { webkitGetAsEntry: () => dirEntry } as unknown as DataTransferItem;
+      await act(async () => {
+        dropOnto(dropArea, { files: [] as unknown as FileList, items: [item] as unknown as DataTransferItemList });
+        await flush();
+      });
+
+      expect(startBatchCalls).toHaveLength(1);
+      const mosni = (window as unknown as { mosni: { toast: ReturnType<typeof vi.fn> } }).mosni;
+      expect(mosni.toast).toHaveBeenCalledWith(expect.stringContaining("too large"), { variant: "error" });
+    });
+  });
+
+  describe("E6 F1/F3: whole-page drop", () => {
+    it("a drop on the page body (outside the zone) also uploads", async () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      act(() => {
+        root.render(
+          <>
+            <DropZone />
+            <UploadStack />
+          </>,
+        );
+      });
+
+      const droppedFile = new File(["hello"], "page-drop.txt", { type: "text/plain" });
+      dropOnto(window, { types: ["Files"], files: [droppedFile], items: undefined });
+      await flush();
+
+      expect(startBatchCalls).toHaveLength(1);
+      expect(startBatchCalls[0].files.map((f) => f.name)).toEqual(["page-drop.txt"]);
+    });
+
+    it("a drop on the zone itself produces exactly ONE batch, not two (the zone's own handler plus the window handler)", async () => {
+      installMockMosni({ sub: "user:1", roles: ["files:write"] });
+      act(() => {
+        root.render(
+          <>
+            <DropZone />
+            <UploadStack />
+          </>,
+        );
+      });
+
+      const dropArea = container.querySelector('[role="button"]') as HTMLElement;
+      const droppedFile = new File(["hello"], "zone-drop.txt", { type: "text/plain" });
+      dropOnto(dropArea, { types: ["Files"], files: [droppedFile], items: undefined });
+      await flush();
+
+      expect(startBatchCalls).toHaveLength(1);
+    });
   });
 
   describe("destination picker (G1/G2, D-42/D-86, presentation amended by D-114)", () => {
@@ -610,7 +579,7 @@ describe("DropZone", () => {
       expect(fetchSpy).not.toHaveBeenCalledWith("/api/collections", expect.anything());
     });
 
-    it("uploading with a selected destination passes destinationCollectionId in tus metadata", () => {
+    it("uploading with a selected destination passes destinationCollectionId to startBatch", async () => {
       installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
       act(() => {
@@ -633,11 +602,9 @@ describe("DropZone", () => {
 
       const input = container.querySelector('input[type="file"]') as HTMLInputElement;
       dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
+      await flush();
 
-      expect(uploadInstances[0].options.metadata).toEqual({
-        filename: "hello.txt",
-        destinationCollectionId: "coll-chosen",
-      });
+      expect(startBatchCalls[0].options).toEqual({ destinationCollectionId: "coll-chosen", source: "picker" });
     });
 
     it("typing a new collection name creates it, then uploads use its returned id", async () => {
@@ -673,10 +640,7 @@ describe("DropZone", () => {
           body: JSON.stringify({ name: "vacation photos" }),
         }),
       );
-      expect(uploadInstances[0].options.metadata).toEqual({
-        filename: "hello.txt",
-        destinationCollectionId: "coll-new",
-      });
+      expect(startBatchCalls[0].options).toEqual({ destinationCollectionId: "coll-new", source: "picker" });
     });
 
     // D-128 (E4.1 live-testing findings, Wave F/E2 item 4): a 400 specifically now toasts why, instead of
@@ -709,8 +673,8 @@ describe("DropZone", () => {
         await flush();
       });
 
-      expect(uploadInstances).toHaveLength(1);
-      expect(uploadInstances[0].options.metadata).toEqual({ filename: "hello.txt" });
+      expect(startBatchCalls).toHaveLength(1);
+      expect(startBatchCalls[0].options.destinationCollectionId).toBeNull();
       const mosni = (window as unknown as { mosni: { toast: ReturnType<typeof vi.fn> } }).mosni;
       expect(mosni.toast).toHaveBeenCalledWith(expect.stringContaining("can't be used"), { variant: "error" });
     });
@@ -740,8 +704,8 @@ describe("DropZone", () => {
         await flush();
       });
 
-      expect(uploadInstances).toHaveLength(1);
-      expect(uploadInstances[0].options.metadata).toEqual({ filename: "hello.txt" });
+      expect(startBatchCalls).toHaveLength(1);
+      expect(startBatchCalls[0].options.destinationCollectionId).toBeNull();
     });
   });
 });

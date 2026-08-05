@@ -327,3 +327,154 @@ test("the three-action path in a real browser: drop a file, get a link", async (
   expect(preview.status(), "the copied link must work").toBe(200);
   expect(await preview.text()).toContain(filename);
 });
+
+// E6 Wave I2 (D-172/D-173): closing the tab mid-upload and reopening it must resume from the server's
+// offset, not silently re-upload from zero - which is exactly what disabling
+// `resumeFromPreviousUpload()` in web/src/lib/uploads.ts would produce (both leave the stack showing a
+// completed upload with the right name), so the only thing that actually distinguishes them is the
+// server's received byte count. This test was run against a build with that call commented out before
+// being written against the real one, and failed exactly as expected (fresh upload, not a continuation) -
+// see the hand-off's §0.3 warning this exists to make visible.
+test("resumption: closing the tab mid-upload and reopening it shows Paused, and re-offering the file finishes it byte-for-byte (D-172/D-173)", async ({
+  page,
+  request,
+}) => {
+  const sub = `user:e2e-${randomUUID()}`;
+  const token = await mintToken(request, sub);
+  const filename = `resume-${randomUUID().slice(0, 8)}.bin`;
+  // Large enough to span several 5 MB chunks, so a reload partway through genuinely leaves a partial
+  // upload on the server rather than racing its own completion.
+  const size = 22 * 1024 * 1024;
+  const body = Buffer.alloc(size);
+  for (let i = 0; i < body.length; i++) body[i] = i % 256;
+
+  await page.route("**/sdk.js", (route) => route.abort());
+  await page.addInitScript(`
+    window.mosni = Object.assign(window.mosni ?? {}, {
+      user: () => ({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+      token: () => ${JSON.stringify(token)},
+      onChange: (cb) => cb({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+      login: () => {}, logout: () => {},
+      toast: (m) => { window.__toast = m; },
+    });
+  `);
+
+  await page.goto(`${FILES_ORIGIN}/`);
+
+  const fileChooserPromise = page.waitForEvent("filechooser");
+  await page.locator('[role="button"]').first().click();
+  const chooser = await fileChooserPromise;
+  await chooser.setFiles({ name: filename, mimeType: "application/octet-stream", buffer: body });
+
+  // Wait for real upload progress (at least one full chunk PATCHed) before reloading, so there is
+  // something on the server to resume FROM - not just a create with nothing uploaded yet.
+  await expect(page.locator(".progress-label", { hasText: "%" }).first()).toBeVisible({ timeout: 15_000 });
+  await page.waitForTimeout(500);
+
+  await page.reload();
+
+  // B4/B8: the reload's restorePausedUploads() call HEADs the stored URL and republishes the job as
+  // Paused with the server's real offset - this is the tab-closed-and-reopened case (D-172), distinct
+  // from the still-open-tab retry case (D-173) the previous test's network layer covers indirectly via
+  // tus's own retry loop.
+  const pausedItem = page.locator(".panel", { hasText: filename });
+  await expect(pausedItem).toBeVisible({ timeout: 15_000 });
+  await expect(pausedItem).toContainText("Paused");
+  await expect(pausedItem).not.toContainText("Retry");
+
+  const resumeFileChooser = page.waitForEvent("filechooser");
+  await pausedItem.getByRole("button", { name: /^Resume/ }).click();
+  const resumeChooser = await resumeFileChooser;
+  // Re-offering the SAME file (same name/size/lastModified) is what matchPausedJob() needs to accept it -
+  // Playwright's Buffer-backed setFiles gives every offered File a fresh lastModified, so this only
+  // proves the byte-identity path, not the exact-lastModified match; that finer point is covered by
+  // uploads.test.ts's own unit coverage instead.
+  await resumeChooser.setFiles({ name: filename, mimeType: "application/octet-stream", buffer: body });
+
+  const viewLink = pausedItem.locator("a", { hasText: "view" });
+  await expect(viewLink).toBeVisible({ timeout: 30_000 });
+  const shareUrl = await viewLink.getAttribute("href");
+
+  // The decisive assertion: the server holds the WHOLE file, not just the bytes that arrived before the
+  // reload plus a truncated remainder, and not the file re-sent from zero on top of what it already had.
+  const conn = await mysql.createConnection({
+    host: process.env.DB_HOST ?? "mariadb",
+    port: Number(process.env.DB_PORT ?? 3306),
+    user: process.env.DB_USER ?? "files",
+    password: process.env.DB_PASS ?? "filespass",
+    database: process.env.DB_NAME ?? "files",
+  });
+  let diskRelPath: string;
+  try {
+    const [rows] = await conn.execute("SELECT disk_dir, disk_name FROM files WHERE name = ?", [filename]);
+    const row = (rows as { disk_dir: string; disk_name: string }[])[0];
+    expect(row, "the resumed file's row must exist").toBeTruthy();
+    diskRelPath = `${row!.disk_dir}/${row!.disk_name}`;
+  } finally {
+    await conn.end();
+  }
+  const onDisk = await readFile(path.join(STORAGE_ROOT, diskRelPath));
+  expect(onDisk.length).toBe(body.length);
+  expect(createHash("sha256").update(onDisk).digest("hex")).toBe(
+    createHash("sha256").update(body).digest("hex"),
+  );
+  void shareUrl;
+});
+
+// E6 Wave I3 (D-176): a folder chosen through the picker (E4) recreates its directory structure as
+// nested collections. The drag-drop entries path (E3, walkDroppedEntries) cannot be driven through
+// Playwright's synthetic DataTransfer - a real directory drag populates FileSystemDirectoryEntry objects
+// at the OS/browser level that JS-dispatched drag events cannot fake - so this proves the picker path
+// end-to-end instead; the walk itself (readEntries pagination, depth/entry guards) has its own thorough
+// unit coverage in web/test/unit/folderWalk.test.ts, and DropZone.test.tsx proves the component wires a
+// dropped directory into the same ingestWalkedFiles()/ensureCollectionPath() path this test exercises.
+test("folder ingest: a chosen folder recreates its directory structure as nested collections (D-176)", async ({
+  page,
+  request,
+}) => {
+  const sub = `user:e2e-${randomUUID()}`;
+  const token = await mintToken(request, sub);
+  const stamp = randomUUID().slice(0, 8);
+  const topDir = `trip-${stamp}`;
+
+  await page.route("**/sdk.js", (route) => route.abort());
+  await page.addInitScript(`
+    window.mosni = Object.assign(window.mosni ?? {}, {
+      user: () => ({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+      token: () => ${JSON.stringify(token)},
+      onChange: (cb) => cb({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+      login: () => {}, logout: () => {},
+      toast: (m) => { window.__toast = m; },
+    });
+  `);
+
+  await page.goto(`${FILES_ORIGIN}/`);
+
+  const fileChooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "or choose a folder" }).click();
+  const chooser = await fileChooserPromise;
+  // webkitRelativePath is what E4's handler reads to group files by directory - Chromium derives it from
+  // each file's own `name` when the picker input is `webkitdirectory`, so a name containing "/" here is
+  // what a real folder pick produces, not a Playwright-specific shortcut.
+  await chooser.setFiles([
+    { name: `${topDir}/root.txt`, mimeType: "text/plain", buffer: Buffer.from("root level") },
+    { name: `${topDir}/2026/nested.txt`, mimeType: "text/plain", buffer: Buffer.from("nested level") },
+  ]);
+
+  await expect(page.locator(".panel", { hasText: "root.txt" }).locator("a", { hasText: "view" })).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(page.locator(".panel", { hasText: "nested.txt" }).locator("a", { hasText: "view" })).toBeVisible({
+    timeout: 30_000,
+  });
+
+  const collections = await request.get(`${FILES_ORIGIN}/api/collections`, {
+    headers: { host: FILES_HOST, authorization: `Bearer ${token}` },
+  });
+  expect(collections.status()).toBe(200);
+  const rows = (await collections.json()) as { id: string; name: string; parentId: string }[];
+  const top = rows.find((r) => r.name === topDir);
+  expect(top, "the top-level directory must become a root collection").toBeTruthy();
+  const nested = rows.find((r) => r.name === "2026" && r.parentId === top!.id);
+  expect(nested, "the nested directory must become a collection UNDER the top-level one").toBeTruthy();
+});

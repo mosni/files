@@ -21,6 +21,8 @@ function makeUploadJob(overrides: Partial<UploadJob> = {}): UploadJob {
     id: "upload-1",
     kind: "upload",
     name: "photo.png",
+    batchId: "batch-1",
+    collectionId: null,
     state: { status: "uploading", progress: 0, loaded: 0, total: 100 },
     ...overrides,
   };
@@ -52,12 +54,12 @@ describe("jobs store (E5.1 Wave E, D-161)", () => {
   it("upsertJob replaces an existing job with the same id in place, preserving order", () => {
     upsertJob(makeUploadJob({ id: "a" }));
     upsertJob(makeUploadJob({ id: "b" }));
-    upsertJob(makeUploadJob({ id: "a", state: { status: "done", previewUrl: "https://files.mosni.dev/f/x" } }));
+    upsertJob(makeUploadJob({ id: "a", state: { status: "done", previewUrl: "https://files.mosni.dev/f/x", fileId: "file-1" } }));
 
     const snapshot = getJobsSnapshot();
     expect(snapshot).toHaveLength(2);
     expect(snapshot[0]).toEqual(
-      makeUploadJob({ id: "a", state: { status: "done", previewUrl: "https://files.mosni.dev/f/x" } }),
+      makeUploadJob({ id: "a", state: { status: "done", previewUrl: "https://files.mosni.dev/f/x", fileId: "file-1" } }),
     );
     expect(snapshot[1]).toEqual(makeUploadJob({ id: "b" }));
   });

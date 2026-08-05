@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { Redis } from "ioredis";
 
 vi.mock("../../src/auth/verify.ts", () => ({ verify: vi.fn() }));
 
@@ -21,6 +22,7 @@ const FILES_HOST = "files.mosni.dev";
 describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () => {
   let root: string;
   let app: FastifyInstance;
+  let redis: Redis;
 
   beforeAll(async () => {
     initDb({
@@ -34,13 +36,15 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
     root = await mkdtemp(path.join(os.tmpdir(), "manage-test-"));
     initFilesStorage(root);
 
+    redis = new Redis(process.env.REDIS_URL ?? "redis://redis:6379");
     app = Fastify({ logger: false });
-    await registerManageRoutes(app, makeTestConfig({ storageRoot: root }));
+    await registerManageRoutes(app, makeTestConfig({ storageRoot: root }), redis);
     await app.ready();
   }, 30_000);
 
   afterAll(async () => {
     await app.close();
+    await redis.quit();
     await closeDb();
     await rm(root, { recursive: true, force: true });
   }, 30_000);

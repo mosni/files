@@ -370,4 +370,125 @@ describe("Download all (E5.1 Waves E + F)", () => {
     expect(stack).not.toBeNull();
     expect(stack!.textContent).toContain("Archive ready");
   });
+
+  // E6 Wave H (D-181): the previously-unbounded wait on the service worker's completion signal
+  // (issues.md -> ARCHIVE-STALL-NO-TIMEOUT).
+  describe("archive stall timeout (Wave H)", () => {
+    function fileEntry(name: string) {
+      return {
+        id: "f1",
+        name,
+        bytes: 1,
+        createdAt: "2026-08-05T00:00:00.000Z",
+        effectiveProtection: "unlisted" as const,
+        reason: "own" as const,
+        previewUrl: "https://files.mosni.dev/f/a.txt",
+        directUrl: "https://dl.mosni.dev/a.txt",
+        thumbUrl: null,
+        width: null,
+        height: null,
+        durationSeconds: null,
+      };
+    }
+
+    it("settles as an error naming the stall after 60s with no progress message, and releases the button", async () => {
+      // Simulates a service worker that never posts a single progress message - the walk succeeds, the
+      // manifest is handed off, and then nothing.
+      downloadArchiveMock.mockImplementation(async () => {});
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ files: [fileEntry("a.txt")] }))));
+
+      await renderAt("root-id");
+      const button = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Download all"))!;
+
+      vi.useFakeTimers();
+      try {
+        await act(async () => {
+          button.click();
+          await vi.advanceTimersByTimeAsync(60_000);
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(container.querySelector(".job-stack")!.textContent).toContain("Could not start the archive");
+      expect(window.mosni!.toast).toHaveBeenCalledWith("Archive stalled — nothing received for 60s", {
+        variant: "error",
+      });
+      // Released exactly as on success (H1) - a retry must be possible.
+      expect((button as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it("does not stall while progress messages keep arriving every 30s, even past 3 minutes total (H2)", async () => {
+      let progressCb: ((p: { completed: number; total: number; failed: string[] }) => void) | undefined;
+      downloadArchiveMock.mockImplementation(async (_name: string, _files: unknown, onProgress) => {
+        progressCb = onProgress;
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(jsonResponse(makeResponse({ files: [fileEntry("a.txt"), fileEntry("b.txt")] }))),
+      );
+
+      await renderAt("root-id");
+      const button = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Download all"))!;
+
+      vi.useFakeTimers();
+      try {
+        await act(async () => {
+          button.click();
+          await vi.advanceTimersByTimeAsync(0);
+        });
+
+        // Six 30s ticks = 3 minutes, each resetting the stall timer (H2) - never a 60s gap.
+        for (let i = 0; i < 6; i++) {
+          await act(async () => {
+            progressCb?.({ completed: 1, total: 2, failed: [] });
+            await vi.advanceTimersByTimeAsync(30_000);
+          });
+        }
+        await act(async () => {
+          progressCb?.({ completed: 2, total: 2, failed: [] });
+          await vi.advanceTimersByTimeAsync(0);
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(container.querySelector(".job-stack")!.textContent).toContain("Archive ready");
+      expect(window.mosni!.toast).not.toHaveBeenCalled();
+    });
+
+    it("an archive whose every entry was omitted by a guard still resolves immediately, unaffected by the stall guard", async () => {
+      // The button only renders when there is SOMETHING at the top level (a file or a nested collection),
+      // but the nested collection itself resolves completely empty - the walk therefore has nothing to
+      // fetch (lastTotal 0), and the service worker never posts a single progress message for an empty
+      // manifest, exactly like the genuinely-omitted-by-a-guard case this exists for (§1.5/H1).
+      const fetchMock = vi.fn((url: string) => {
+        if (url.includes("collectionId=empty-sub")) return Promise.resolve(jsonResponse(makeResponse()));
+        return Promise.resolve(
+          jsonResponse(
+            makeResponse({
+              collections: [{ id: "empty-sub", name: "Empty", effectiveProtection: "unlisted", defaultProtection: "unlisted", reason: "own", previewUrl: "https://files.mosni.dev/f/Empty" }],
+            }),
+          ),
+        );
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      // Never called at all if the resolution is truly immediate - a `never` implementation would make
+      // any accidental wait hang the test until Vitest's own timeout, which is exactly the failure mode
+      // this test exists to catch.
+      downloadArchiveMock.mockImplementation(async () => {});
+
+      await renderAt("root-id");
+      const button = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Download all"))!;
+      expect(button).toBeTruthy();
+
+      await act(async () => {
+        button.click();
+        await flush();
+      });
+
+      expect(container.querySelector(".job-stack")!.textContent).toContain("Archive ready");
+      expect(window.mosni!.toast).not.toHaveBeenCalled();
+    });
+  });
 });

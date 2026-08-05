@@ -58,6 +58,11 @@ const PNG_1PX = Buffer.from(
   "base64",
 );
 
+// E6 Wave I1: one chunk (UPLOAD_CHUNK_SIZE, 5 MB) over the boundary, so a route handler can let the FIRST
+// PATCH land for real (giving the server a genuine non-zero offset) and then block the second - the
+// paused/resumable-error states need a real partial upload on the server, not a 0-byte one.
+const PAUSABLE_BYTES = Buffer.alloc(6 * 1024 * 1024, 0x42);
+
 function newId() {
   return randomUUID().replace(/-/g, "").slice(0, 16);
 }
@@ -455,6 +460,113 @@ const PAGES = [
         fireDrag(zone, "dragover");
       });
       await p.waitForTimeout(100);
+    },
+  },
+  {
+    id: "landing-queued-uploading",
+    label: "Landing - signed in, a multi-file drop showing Queued + uploading concurrently (E6 Wave C, D-171)",
+    url: "/",
+    note: "UPLOAD_MAX_CONCURRENT (3) uploads run at once; the rest sit as Queued and start as slots free. " +
+      "Every /api/upload PATCH is throttled for THIS state only, so five small files stay visibly split " +
+      "across Queued and uploading long enough for the screenshot instead of finishing before Chromium " +
+      "paints - the throttle is removed again before the interact step returns.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.route("**/api/upload/**", async (route) => {
+        if (route.request().method() === "PATCH") await new Promise((r) => setTimeout(r, 1500));
+        await route.continue();
+      });
+      await p.locator('input[type="file"]').setInputFiles(
+        Array.from({ length: 5 }, (_, i) => ({
+          name: `vis-${run}-concurrency-${i}.png`,
+          mimeType: "image/png",
+          buffer: PNG_1PX,
+        })),
+      );
+      await p.waitForSelector(".job-stack .panel", { timeout: 10_000 });
+      await p.waitForTimeout(500);
+      await p.unroute("**/api/upload/**");
+    },
+  },
+  {
+    id: "landing-paused-upload",
+    label: "Landing - signed in, a paused upload offering Resume (E6 Wave B, D-172)",
+    url: "/",
+    note: "The tab is reloaded mid-upload, simulating a closed-and-reopened tab - restorePausedUploads() " +
+      "on mount HEADs the stored tus URL and republishes it as Paused with the server's real byte offset. " +
+      "The control's label must read Resume, never Retry (D-173, never-delete for this state).",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      let patchCount = 0;
+      await p.route("**/api/upload/**", async (route) => {
+        if (route.request().method() === "PATCH") {
+          patchCount++;
+          // Let the FIRST chunk land for real, then go silent - the server now genuinely holds a partial
+          // upload to resume from.
+          if (patchCount > 1) {
+            await route.abort("failed");
+            return;
+          }
+        }
+        await route.continue();
+      });
+      await p.locator('input[type="file"]').setInputFiles({
+        name: `vis-${run}-pausable.bin`,
+        mimeType: "application/octet-stream",
+        buffer: PAUSABLE_BYTES,
+      });
+      await p.waitForTimeout(4_000); // give the first 5 MB chunk time to really land server-side
+      await p.unroute("**/api/upload/**");
+      await p.reload({ waitUntil: "domcontentloaded" });
+      await p.waitForSelector(".job-stack .panel", { timeout: 15_000 });
+      await p.getByText("Paused", { exact: false }).first().waitFor({ state: "visible", timeout: 10_000 });
+      await p.waitForTimeout(300);
+    },
+  },
+  {
+    id: "landing-resumable-error",
+    label: "Landing - signed in, a resumable error offering Resume (E6 Wave B, D-173)",
+    url: "/",
+    note: "Every PATCH after the create is blocked, so tus exhausts its ~103s of backoff (D-173's \"~2 " +
+      "minutes\") and settles into error WITH a known resource URL - resumable: true, so a Resume control " +
+      "is offered (no file picker needed, the tab still holds the File). Slow by design: this state alone " +
+      "takes well over a minute to reach, which is why it is not part of the fast npm run verify gate.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.route("**/api/upload/**", async (route) => {
+        if (route.request().method() === "PATCH") {
+          await route.abort("failed");
+          return;
+        }
+        await route.continue();
+      });
+      await p.locator('input[type="file"]').setInputFiles({
+        name: `vis-${run}-resumable-error.bin`,
+        mimeType: "application/octet-stream",
+        buffer: PAUSABLE_BYTES,
+      });
+      await p.getByRole("button", { name: /^Resume/ }).waitFor({ state: "visible", timeout: 130_000 });
+      await p.unroute("**/api/upload/**");
+    },
+  },
+  {
+    id: "landing-grouping-expanded",
+    label: "Landing - signed in, the grouping control expanded with its name field (E6 Wave C4, D-175)",
+    url: "/",
+    note: "A completed 2-file batch offers 'Group these 2 files'; clicking it expands an inline text field " +
+      "prefilled with a date default plus a confirm button. D-1: grouping is opt-in and after the fact, so " +
+      "this state is reached only by choosing it, never automatically.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.locator('input[type="file"]').setInputFiles([
+        { name: `vis-${run}-group-a.png`, mimeType: "image/png", buffer: PNG_1PX },
+        { name: `vis-${run}-group-b.png`, mimeType: "image/png", buffer: PNG_1PX },
+      ]);
+      const groupButton = p.getByRole("button", { name: "Group these 2 files" });
+      await groupButton.waitFor({ state: "visible", timeout: 20_000 });
+      await groupButton.click();
+      await p.waitForSelector(".job-stack input[type=text]", { timeout: 5_000 });
+      await p.waitForTimeout(200);
     },
   },
   {

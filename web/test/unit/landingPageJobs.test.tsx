@@ -1,6 +1,11 @@
 // E5.1 Wave E (findings 4 + 12, D-161): the landing page's own regression coverage for the shared job
 // stack - mounts the EXACT composition main.tsx renders on "/" (DropZone, FileBrowser, UploadStack, all
 // three) and drives a real upload completion through the shared store, the way a real drop would.
+//
+// E6 (D-171, Wave 0): DropZone no longer talks to tus-js-client directly (web/src/lib/uploads.ts does,
+// see uploads.test.ts) - it only ever calls startBatch(). Mocking that module lets this file keep proving
+// the thing it exists to prove (the reload wiring, and that there is exactly one job-stack container)
+// without caring how a completion actually happens.
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,30 +13,37 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 
-const { uploadInstances } = vi.hoisted(() => ({
-  uploadInstances: [] as Array<{
-    options: {
-      onSuccess?: (payload: { lastResponse: { getBody(): string } }) => void;
-    };
-  }>,
-}));
-
-vi.mock("tus-js-client", () => {
-  class MockUpload {
-    options: (typeof uploadInstances)[number]["options"];
-    start = vi.fn();
-    constructor(_file: File, options: (typeof uploadInstances)[number]["options"]) {
-      this.options = options;
-      uploadInstances.push(this as unknown as (typeof uploadInstances)[number]);
+vi.mock("../../src/lib/uploads.ts", () => ({
+  // Simulates an upload that starts and completes immediately - publishing a `done` job and bumping the
+  // shared reload signal is exactly what a real completion in web/src/lib/uploads.ts does (see that
+  // module's own onSuccess handler); this file only needs to prove that wiring reaches FileBrowser.
+  startBatch: vi.fn((files: File[]) => {
+    let i = 0;
+    for (const file of files) {
+      upsertJob({
+        id: `upload-${i++}`,
+        kind: "upload",
+        name: file.name,
+        batchId: "batch-0",
+        collectionId: null,
+        state: {
+          status: "done",
+          previewUrl: `https://files.mosni.dev/${file.name}`,
+          directUrl: `https://dl.mosni.dev/${file.name}`,
+          fileId: `file-${file.name}`,
+        },
+      });
     }
-  }
-  return { Upload: MockUpload };
-});
+    bumpReload();
+    return "batch-0";
+  }),
+  setUploadChunkSize: vi.fn(),
+}));
 
 import { DropZone } from "../../src/components/DropZone.tsx";
 import { FileBrowser } from "../../src/components/FileBrowser.tsx";
 import { UploadStack } from "../../src/components/UploadStack.tsx";
-import { __resetJobsStoreForTests } from "../../src/lib/jobs.ts";
+import { __resetJobsStoreForTests, bumpReload, upsertJob } from "../../src/lib/jobs.ts";
 
 async function flush() {
   await act(async () => {
@@ -51,7 +63,6 @@ let root: Root;
 
 describe("the landing page's shared job stack (E5.1 Wave E)", () => {
   beforeEach(() => {
-    uploadInstances.length = 0;
     __resetJobsStoreForTests();
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -97,14 +108,7 @@ describe("the landing page's shared job stack (E5.1 Wave E)", () => {
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     dropFile(input, new File(["hello"], "hello.txt", { type: "text/plain" }));
-    await act(async () => {
-      uploadInstances[0]!.options.onSuccess?.({
-        lastResponse: {
-          getBody: () => JSON.stringify({ previewUrl: "https://files.mosni.dev/hello", directUrl: "https://dl.mosni.dev/hello" }),
-        },
-      });
-      await flush();
-    });
+    await flush();
 
     const browseCallsAfter = fetchSpy.mock.calls.filter((call) => (call[0] as string).includes("/api/browse")).length;
     expect(browseCallsAfter).toBe(2); // refetched once, automatically, with no manual refresh
@@ -182,14 +186,7 @@ describe("the landing page's shared job stack (E5.1 Wave E)", () => {
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     expect(input, "a collection page the viewer may upload into renders its own compact drop zone").toBeTruthy();
     dropFile(input, new File(["hi"], "hi.txt", { type: "text/plain" }));
-    await act(async () => {
-      uploadInstances[0]!.options.onSuccess?.({
-        lastResponse: {
-          getBody: () => JSON.stringify({ previewUrl: "https://files.mosni.dev/hi", directUrl: "https://dl.mosni.dev/hi" }),
-        },
-      });
-      await flush();
-    });
+    await flush();
 
     const browseCallsAfter = fetchSpy.mock.calls.filter((call) => (call[0] as string).includes("/api/browse")).length;
     expect(browseCallsAfter).toBe(2);

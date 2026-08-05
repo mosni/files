@@ -18,13 +18,30 @@ import { useSyncExternalStore } from "react";
 // Kept nested (state: UploadState) rather than flattened, deliberately: this is a GENERALISATION of the
 // upload variant, not a rewrite of upload progress, which already works and is D-122's shipped behaviour -
 // DropZone.tsx's onProgress/onSuccess/onError callbacks construct exactly this shape today.
+//
+// E6 Wave 0/B/C (D-171): three additions for ingest breadth + resumption.
+//   - "queued" - accepted by startBatch, waiting for a concurrency slot (Wave C).
+//   - "paused" - a resumable upload restored from localStorage on mount whose File the page does not have
+//     (the tab was closed mid-upload and reopened) - `loaded` is the server's offset, `total` the size
+//     recorded at create time.
+//   - error.resumable - true when the upload has a stored tus URL and can be continued; drives whether the
+//     stack item offers a Resume control or only a dismiss (D-173).
 export type UploadState =
+  | { status: "queued" }
   | { status: "uploading"; progress: number; loaded: number; total: number }
-  | { status: "done"; previewUrl: string; directUrl?: string }
-  | { status: "error"; message: string };
+  | { status: "paused"; loaded: number; total: number }
+  // E6 Wave C: `fileId` is the server's own file record id (added to the tus completion response
+  // alongside previewUrl/directUrl specifically so grouping - PATCH /api/files/:id - has something to
+  // address; the plan's §1.1 contract didn't carry it, but there is no other way to recover a file's id
+  // from a display-name-shaped previewUrl/directUrl).
+  | { status: "done"; previewUrl: string; directUrl?: string; fileId: string }
+  | { status: "error"; message: string; resumable: boolean };
 
 export type FileUpload = { id: string; name: string; state: UploadState };
-export type UploadJob = FileUpload & { kind: "upload" };
+// E6 Wave 0/C: batchId groups every file from one drop/paste/pick (D-175's opt-in grouping needs to find
+// them); collectionId records where the upload landed once it completes, null for the root - both are set
+// by web/src/lib/uploads.ts, never by a component directly.
+export type UploadJob = FileUpload & { kind: "upload"; batchId: string; collectionId: string | null };
 
 // Flat, not a discriminated union per status - unlike the upload variant, every archive status shares the
 // same fields (completed/total/failed are meaningful even mid-archive, and `failed` is what the stack item
@@ -70,6 +87,17 @@ export function upsertJob(job: Job): void {
 export function dismissJob(id: string): void {
   jobs = jobs.filter((job) => job.id !== id);
   emitJobs();
+}
+
+// E6 Wave C3: pure selectors over the snapshot, used by the grouping affordance (UploadStack.tsx) to find
+// every job from one drop/paste/pick and to know when it is safe to offer grouping (D-175).
+export function jobsInBatch(batchId: string): UploadJob[] {
+  return jobs.filter((job): job is UploadJob => job.kind === "upload" && job.batchId === batchId);
+}
+
+export function batchIsComplete(batchId: string): boolean {
+  const batch = jobsInBatch(batchId);
+  return batch.length > 0 && batch.every((job) => job.state.status === "done" || job.state.status === "error");
 }
 
 let reloadCounter = 0;

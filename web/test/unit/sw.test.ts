@@ -3,7 +3,7 @@
 // objects (augmented with the extra properties a real ServiceWorkerGlobalScope event would carry) exercises
 // the exact same listener code a real browser would run. `window.skipWaiting`/`window.clients` are stubbed
 // before import since jsdom's `window` has neither.
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ZipReader, Uint8ArrayReader, Uint8ArrayWriter } from "@zip.js/zip.js";
 
 type FetchEventLike = Event & { request: Request; respondWith: (response: Response | Promise<Response>) => void };
@@ -218,5 +218,211 @@ describe("archive fetch interception (D-133)", () => {
 
     const second = dispatchFetch("https://files.mosni.dev/__archive/archive-3/Once.zip");
     expect(second.respondWith).not.toHaveBeenCalled();
+  });
+});
+
+// E6 Wave G5: the share-target handoff. jsdom does not implement IndexedDB at all, and adding a dependency
+// for it is out of scope for a single test file (working-conventions.md §6's vetting gate) - this fakes
+// exactly the surface sw.ts actually calls (open/onupgradeneeded, one object store, put/get/delete/
+// openCursor), backed by a plain in-memory Map, async via queueMicrotask the same way the real API is.
+type FakeRequest<T> = { onsuccess: (() => void) | null; onerror: (() => void) | null; result: T };
+type FakeCursor = { value: unknown; delete: () => void; continue: () => void };
+
+function makeFakeIndexedDb() {
+  const dbs = new Map<string, Map<string, Map<string, unknown>>>();
+
+  function makeStoreApi(storeMap: Map<string, unknown>, scheduleComplete: () => void) {
+    return {
+      put: (value: { id: string }) => {
+        storeMap.set(value.id, value);
+        scheduleComplete();
+        return {} as FakeRequest<undefined>;
+      },
+      get: (key: string) => {
+        const req: FakeRequest<unknown> = { onsuccess: null, onerror: null, result: undefined };
+        queueMicrotask(() => {
+          req.result = storeMap.get(key);
+          req.onsuccess?.();
+          scheduleComplete();
+        });
+        return req;
+      },
+      delete: (key: string) => {
+        storeMap.delete(key);
+        return {} as FakeRequest<undefined>;
+      },
+      openCursor: () => {
+        const req: FakeRequest<FakeCursor | null> = { onsuccess: null, onerror: null, result: null };
+        const keys = Array.from(storeMap.keys());
+        let i = 0;
+        function step() {
+          if (i >= keys.length) {
+            req.result = null;
+            req.onsuccess?.();
+            scheduleComplete();
+            return;
+          }
+          const key = keys[i];
+          req.result = {
+            get value() {
+              return storeMap.get(key);
+            },
+            delete: () => storeMap.delete(key),
+            continue: () => {
+              i++;
+              queueMicrotask(step);
+            },
+          };
+          req.onsuccess?.();
+        }
+        queueMicrotask(step);
+        return req;
+      },
+    };
+  }
+
+  return {
+    open: (name: string, _version: number) => {
+      const request: { onupgradeneeded: (() => void) | null; onsuccess: (() => void) | null; onerror: (() => void) | null; result: unknown } = {
+        onupgradeneeded: null,
+        onsuccess: null,
+        onerror: null,
+        result: null,
+      };
+      let stores = dbs.get(name);
+      const isNew = stores === undefined;
+      if (stores === undefined) {
+        stores = new Map();
+        dbs.set(name, stores);
+      }
+      const storesRef = stores;
+      const db = {
+        createObjectStore: (storeName: string) => {
+          if (!storesRef.has(storeName)) storesRef.set(storeName, new Map());
+        },
+        transaction: (storeName: string) => {
+          const tx: { oncomplete: (() => void) | null; onerror: (() => void) | null; objectStore: (n: string) => ReturnType<typeof makeStoreApi> } = {
+            oncomplete: null,
+            onerror: null,
+            objectStore: () => makeStoreApi(storesRef.get(storeName)!, () => {
+              // Two microtask ticks is enough headroom for every call site in sw.ts, which always
+              // assigns tx.oncomplete synchronously right after the triggering store call.
+              queueMicrotask(() => queueMicrotask(() => tx.oncomplete?.()));
+            }),
+          };
+          return tx;
+        },
+        close: () => {},
+      };
+      request.result = db;
+      queueMicrotask(() => {
+        if (isNew) request.onupgradeneeded?.();
+        request.onsuccess?.();
+      });
+      return request;
+    },
+  };
+}
+
+describe("share-target handoff (E6 Wave G5)", () => {
+  // A FRESH fake per test, not just per file - a prior test's fire-and-forget sweepExpiredShareTargets()
+  // call (mirroring the real code's own "never blocks the redirect" contract) can still be resolving its
+  // own microtask chain after that test function returns; sharing one backing store across tests let it
+  // interfere with a later test's data. Isolating per test removes the hazard regardless of timing.
+  beforeEach(() => {
+    (globalThis as unknown as { indexedDB: unknown }).indexedDB = makeFakeIndexedDb();
+  });
+
+  // Builds the FormData directly and hands it back via a stubbed .formData() rather than round-tripping
+  // it through a real multipart-encoded Request body: Vitest's jsdom environment parses that back with a
+  // File implementation from a DIFFERENT realm than this file's global `File` (confirmed directly -
+  // `entry instanceof File` comes back false, and the parsed name/size do not even match what was sent),
+  // which is a gap in that environment's Fetch API support, not a defect in sw.ts's own
+  // `entry instanceof File` filter - a real browser round-trips this correctly. Handing over the SAME
+  // FormData object (built in-process, never serialized) sidesteps the broken step entirely without
+  // weakening the real filter to accommodate a test-environment artifact.
+  function shareTargetRequest(files: { name: string; type: string; content: string }[]): Request {
+    const formData = new FormData();
+    for (const f of files) formData.append("files", new File([f.content], f.name, { type: f.type }));
+    return {
+      url: "https://files.mosni.dev/share-target",
+      method: "POST",
+      formData: () => Promise.resolve(formData),
+    } as unknown as Request;
+  }
+
+  function dispatchSharePost(files: { name: string; type: string; content: string }[]) {
+    const event = new Event("fetch") as unknown as FetchEventLike;
+    const respondWith = vi.fn();
+    Object.assign(event, { request: shareTargetRequest(files), respondWith });
+    window.dispatchEvent(event);
+    return respondWith;
+  }
+
+  it("POST /share-target stores the files and redirects to /?share-target=<id>", async () => {
+    const respondWith = dispatchSharePost([{ name: "photo.jpg", type: "image/jpeg", content: "img" }]);
+
+    expect(respondWith).toHaveBeenCalledTimes(1);
+    const response = await respondWith.mock.calls[0][0];
+    expect(response.status).toBe(303);
+    const location = response.headers.get("Location");
+    expect(location).toMatch(/^https:\/\/files\.mosni\.dev\/\?share-target=[0-9a-f-]+$/);
+  });
+
+  it("a claim message returns the stored files and deletes the entry - a second claim gets nothing", async () => {
+    const respondWith = dispatchSharePost([{ name: "a.txt", type: "text/plain", content: "hello" }]);
+    const response = await respondWith.mock.calls[0][0];
+    const id = new URL(response.headers.get("Location")!).searchParams.get("share-target")!;
+
+    const source = { postMessage: vi.fn() };
+    dispatchMessage({ type: "share-target-claim", id }, source);
+    await vi.waitFor(() => expect(source.postMessage).toHaveBeenCalledTimes(1));
+    const [claimPayload] = source.postMessage.mock.calls[0];
+    expect(claimPayload.type).toBe("share-target-files");
+    expect(claimPayload.id).toBe(id);
+    expect(claimPayload.files).toHaveLength(1);
+    expect(claimPayload.files[0].name).toBe("a.txt");
+
+    const secondSource = { postMessage: vi.fn() };
+    dispatchMessage({ type: "share-target-claim", id }, secondSource);
+    await vi.waitFor(() => expect(secondSource.postMessage).toHaveBeenCalledTimes(1));
+    expect(secondSource.postMessage.mock.calls[0][0].files).toEqual([]);
+  });
+
+  it("claiming an unknown id returns an empty file list rather than throwing", async () => {
+    const source = { postMessage: vi.fn() };
+    dispatchMessage({ type: "share-target-claim", id: "never-existed" }, source);
+    await vi.waitFor(() => expect(source.postMessage).toHaveBeenCalledTimes(1));
+    expect(source.postMessage).toHaveBeenCalledWith({ type: "share-target-files", id: "never-existed", files: [] });
+  });
+
+  it("a share-target POST with no files still redirects, storing nothing", async () => {
+    const respondWith = dispatchSharePost([]);
+    const response = await respondWith.mock.calls[0][0];
+    expect(response.status).toBe(303);
+  });
+
+  it("sweeps an entry older than 5 minutes, triggered as a side effect of the next POST", async () => {
+    vi.useFakeTimers();
+    try {
+      const firstRespond = dispatchSharePost([{ name: "old.txt", type: "text/plain", content: "x" }]);
+      await vi.advanceTimersByTimeAsync(0);
+      const firstResponse = await firstRespond.mock.calls[0][0];
+      const oldId = new URL(firstResponse.headers.get("Location")!).searchParams.get("share-target")!;
+
+      await vi.advanceTimersByTimeAsync(6 * 60 * 1000); // 6 minutes later - past the 5-minute TTL
+
+      const secondRespond = dispatchSharePost([{ name: "new.txt", type: "text/plain", content: "y" }]);
+      await vi.advanceTimersByTimeAsync(0); // lets both the redirect AND the fire-and-forget sweep settle
+
+      const source = { postMessage: vi.fn() };
+      dispatchMessage({ type: "share-target-claim", id: oldId }, source);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(source.postMessage).toHaveBeenCalledWith({ type: "share-target-files", id: oldId, files: [] });
+      void secondRespond;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -6,6 +6,7 @@
   "description": "files.mosni.dev - Hannah's File Drop",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/generate-icons.mjs",
     "build": "vite build && vite build --config vite.ssr.config.ts",
     "test:unit": "docker compose -f docker-compose.verify.yml run --build --rm -T verify-unit",
     "verify": "node node_modules/typescript/bin/tsc --noEmit && docker compose -f docker-compose.verify.yml run --build --rm -T verify",
