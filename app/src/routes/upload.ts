@@ -53,5 +53,22 @@ export async function registerUploadRoutes(app: FastifyInstance, config: Config,
     };
     scoped.all("/api/upload", { constraints: { host: filesHost } }, handleTus);
     scoped.all("/api/upload/*", { constraints: { host: filesHost } }, handleTus);
+
+    // E6 (D-174/A2): a partial upload past UPLOAD_EXPIRY_MS is already 410'd by @tus/server (A1's
+    // `expirationPeriodInMilliseconds`), but the bytes and the config sidecar in STORAGE_ROOT/.tus stay on
+    // disk until something calls cleanUpExpiredUploads() - @tus/server never schedules this itself. Once
+    // per hour: a 7-day window does not need finer granularity, and the box is a 2011 Atom (D-78) - an
+    // hourly readdir of .tus is the right cost.
+    const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+    const sweepTimer = setInterval(() => {
+      // A sweep failure must never take the server down - swallow and log, try again next hour.
+      tusServer.cleanUpExpiredUploads().catch((err: unknown) => {
+        console.error("upload: expired-upload sweep failed", err);
+      });
+    }, SWEEP_INTERVAL_MS);
+    scoped.addHook("onClose", (_instance, done) => {
+      clearInterval(sweepTimer);
+      done();
+    });
   });
 }

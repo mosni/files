@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- E6 Wave G1 (D-179): "a file folder type symbol in the colour scheme of mosni svg and cat", flat
+       fills only (no gradients, filters, or embedded raster; G2 rasterizes this at build time via sharp),
+       full-bleed background (the OS masks the corners itself), every mark inside the central 80% so the
+       maskable variant survives a circular crop. Colours pulled directly from
+       ../mosni-chrome/src/scss/_tokens.scss: mosni-surface (#303030), mosni-purple-light (#ab7fff, the
+       same purple as mosni.svg's chevrons), and white. -->
+  <title>Hannah's File Drop</title>
+  <rect width="512" height="512" fill="#303030"/>
+  <!-- Folder glyph -->
+  <path
+    d="M90 250 L90 402 Q90 412 100 412 L412 412 Q422 412 422 402 L422 260 Q422 250 412 250 L262 250 L232 214 Q226 208 218 208 L100 208 Q90 208 90 218 Z"
+    fill="#ab7fff"
+  />
+  <!-- A downward drop/arrow motif, echoing mosni.svg's white chevron stack, entering the folder -->
+  <path d="M196 96 L316 96 L316 132 L256 176 L196 132 Z" fill="#ffffff"/>
+  <path d="M211 168 L301 168 L301 198 L256 234 L211 198 Z" fill="#ffffff"/>
+  <path d="M226 226 L286 226 L286 248 L256 268 L226 248 Z" fill="#ffffff"/>
+</svg>

@@ -15,10 +15,12 @@ import { can, isSuperuser, type Claims, type VerifiedClaims } from "../lib/roles
 import { mostRestrictive, PROTECTION_ORDER, type Protection } from "../lib/protection.ts";
 import { isReservedRootName, safeSegment } from "../lib/paths.ts";
 import { actorLabel } from "../lib/audit.ts";
+import { buildCollectionPreviewUrl } from "../lib/fileUrls.ts";
 import { ownerContextFor } from "./preview.ts";
 import { emitAuditEvent } from "../storage/audit.ts";
 import {
   canUploadTo,
+  collectionPath,
   countDescendants,
   createCollection,
   deleteCollectionRecursive,
@@ -97,7 +99,10 @@ function isDuplicateNameError(err: unknown, constraintName: string): boolean {
   );
 }
 
-function collectionResponse(record: CollectionRecord) {
+// E6 A5 (D-175): gains `previewUrl` - grouping needs a link to show for the collection it just created. A
+// newly-created collection is at the root and inherits `unlisted` (D-105), so buildCollectionPreviewUrl
+// returns the `/f/<name>` shape - do not assume the token shape holds for every caller of this function.
+async function collectionResponse(config: Config, record: CollectionRecord) {
   return {
     id: record.id,
     parentId: record.parentId,
@@ -105,6 +110,7 @@ function collectionResponse(record: CollectionRecord) {
     ownerSub: record.ownerSub,
     protection: record.protection,
     defaultProtection: record.defaultProtection,
+    previewUrl: buildCollectionPreviewUrl(config, record.protection, await collectionPath(record.id), record.linkToken),
   };
 }
 
@@ -115,7 +121,7 @@ export async function listCollections(request: FastifyRequest, reply: FastifyRep
   const claims = await requireClaims(request, reply, config);
   if (claims === null) return;
   const collections = await listCollectionsFor(claims.sub);
-  reply.send(collections.map(collectionResponse));
+  reply.send(await Promise.all(collections.map((record) => collectionResponse(config, record))));
 }
 
 export async function createCollectionHandler(
@@ -149,7 +155,7 @@ export async function createCollectionHandler(
 
   try {
     const created = await createCollection({ parentId, name, ownerSub: claims.sub, protection });
-    reply.code(201).send(collectionResponse(created));
+    reply.code(201).send(await collectionResponse(config, created));
   } catch (err) {
     if (isDuplicateNameError(err, "uniq_sibling_name")) {
       reply.code(409).send({ error: "name_taken" });
@@ -291,7 +297,7 @@ export async function updateCollectionHandler(
   }
 
   const updated = await resolveCollectionById(id);
-  reply.send(collectionResponse(updated!));
+  reply.send(await collectionResponse(config, updated!));
 }
 
 export async function deleteCollectionHandler(

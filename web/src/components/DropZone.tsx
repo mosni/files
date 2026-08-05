@@ -9,12 +9,12 @@
 // longer exists.
 
 import { useEffect, useRef, useState } from "react";
-import * as tus from "tus-js-client";
 import { can, type Claims } from "../../../app/src/lib/roles.ts";
-import { UPLOAD_CHUNK_SIZE } from "../../../app/src/lib/uploadConfig.ts";
 import { toastMutationFailure } from "../lib/mutationError.ts";
-import { fetchCollections, type CollectionOption } from "../lib/collections.ts";
-import { bumpReload, upsertJob, type UploadState } from "../lib/jobs.ts";
+import { fetchCollections, ensureCollectionPath, type CollectionOption } from "../lib/collections.ts";
+import { startBatch, setUploadChunkSize, type IngestSource } from "../lib/uploads.ts";
+import { filesFromClipboard } from "../lib/ingest.ts";
+import { walkDroppedEntries, type WalkedFile } from "../lib/folderWalk.ts";
 
 type MosniUser = Claims | null;
 type MosniToastOptions = { variant?: "success" | "error" | "info" };
@@ -43,37 +43,66 @@ declare module "react" {
   }
 }
 
-let nextUploadId = 0;
-
 function toastError(message: string): void {
   if (typeof window.mosni !== "undefined" && window.mosni.toast) {
     window.mosni.toast(message, { variant: "error" });
   }
 }
 
-// A dropped folder appears in dataTransfer.files as a 0-byte File. tus would POST it as a
-// create-with-upload that completes on create (length 0) → the server answers 200 + JSON with NO
-// Location header → tus-js-client errors and RETRIES (default [0,1000,3000,5000] = 5 attempts), each
-// attempt creating another collision-suffixed 0-byte file and firing an audit notification (the storm
-// Hannah saw). Real folder upload is E6. The size===0 guard is load-bearing (it stops the storm for
-// folders AND genuinely empty files, which hit the identical tus edge); webkitGetAsEntry only sharpens
-// the message to "folder" where the browser exposes it.
+// A genuinely empty (0-byte) File would make tus POST a create-with-upload that completes on create
+// (length 0) → the server answers 200 + JSON with NO Location header → tus-js-client errors and RETRIES
+// (default [0,1000,3000,5000] = 5 attempts), each attempt creating another collision-suffixed 0-byte file
+// and firing an audit notification (the storm Hannah saw, session 011). The size===0 guard stays
+// load-bearing for exactly that case. E6 (E1/E3): a DROPPED FOLDER no longer lands here at all - a real
+// directory is walked (walkDroppedEntries) rather than rejected, so this function is only ever reached for
+// a flat (no-directory) drop or the plain file picker.
 function uploadableFiles(dataTransfer: DataTransfer): { files: File[]; rejected: string[] } {
-  const dirNames = new Set<string>();
-  const items = dataTransfer.items;
-  if (items && items.length > 0 && typeof items[0].webkitGetAsEntry === "function") {
-    for (const item of Array.from(items)) {
-      const entry = item.webkitGetAsEntry?.();
-      if (entry && entry.isDirectory) dirNames.add(entry.name);
-    }
-  }
   const files: File[] = [];
   const rejected: string[] = [];
   for (const file of Array.from(dataTransfer.files)) {
-    if (file.size === 0 || dirNames.has(file.name)) rejected.push(file.name);
+    if (file.size === 0) rejected.push(file.name);
     else files.push(file);
   }
   return { files, rejected };
+}
+
+// E6 E3: true when any item in the drag/drop payload is a real directory entry - the signal that decides
+// whether this drop needs the recursive folder walk instead of the flat path above.
+function containsDirectory(dataTransfer: DataTransfer): boolean {
+  const items = dataTransfer.items;
+  if (!items) return false;
+  return Array.from(items).some((item) => item.webkitGetAsEntry?.()?.isDirectory === true);
+}
+
+// E6 (E3/E4): shared by a folder DROP (walkDroppedEntries, relativePath from the entries API) and a folder
+// PICK (input[webkitdirectory], relativePath from File.webkitRelativePath) - both land here as the same
+// WalkedFile[] shape so grouping/collection-creation happens exactly once. Groups files by their
+// directory (every path segment but the last), resolves or creates ONE collection per distinct directory
+// under `rootDestination` (E2), then starts one batch per directory - a loose file with no directory
+// (relativePath.length === 1) goes straight to `rootDestination`, no ensureCollectionPath call at all.
+async function ingestWalkedFiles(
+  walked: WalkedFile[],
+  token: string | null,
+  rootDestination: string | null,
+): Promise<void> {
+  const groups = new Map<string, WalkedFile[]>();
+  for (const entry of walked) {
+    const dirPath = entry.relativePath.slice(0, -1);
+    const key = dirPath.join("/");
+    const existing = groups.get(key);
+    if (existing) existing.push(entry);
+    else groups.set(key, [entry]);
+  }
+
+  for (const [key, entries] of groups) {
+    const dirPath = key === "" ? [] : key.split("/");
+    const destination =
+      dirPath.length === 0 ? rootDestination : ((await ensureCollectionPath(token, dirPath, rootDestination)) ?? rootDestination);
+    startBatch(
+      entries.map((e) => e.file),
+      { destinationCollectionId: destination, source: "folder" },
+    );
+  }
 }
 
 function authHeaders(token: string | null): Record<string, string> {
@@ -103,46 +132,6 @@ async function createCollection(token: string | null, name: string): Promise<str
   }
 }
 
-function startUpload(
-  file: File,
-  token: string | null,
-  chunkSize: number,
-  destinationCollectionId: string | null,
-  onUpdate: (state: UploadState) => void,
-) {
-  const upload = new tus.Upload(file, {
-    endpoint: "/api/upload",
-    chunkSize,
-    metadata: {
-      filename: file.name,
-      ...(destinationCollectionId ? { destinationCollectionId } : {}),
-    },
-    headers: { Authorization: `Bearer ${token ?? ""}` },
-    onProgress: (bytesSent, bytesTotal) => {
-      onUpdate({ status: "uploading", progress: Math.round((bytesSent / bytesTotal) * 100), loaded: bytesSent, total: bytesTotal });
-    },
-    onSuccess: (payload) => {
-      // The server deliberately overrides tus's usual 204 with a 200 + JSON body on the completing
-      // request (a 204 can't carry one) - lastResponse.getBody() is that JSON, as a string. Guarded:
-      // an unreadable body must land the row in `error`, not leave it stuck on `uploading` forever
-      // while the file is already stored server-side (finding 5 hardening).
-      try {
-        const { previewUrl, directUrl } = JSON.parse(payload.lastResponse.getBody()) as {
-          previewUrl: string;
-          directUrl?: string;
-        };
-        onUpdate({ status: "done", previewUrl, directUrl });
-      } catch {
-        onUpdate({ status: "error", message: "upload finished but the server response was unreadable" });
-      }
-    },
-    onError: (error) => {
-      onUpdate({ status: "error", message: error.message });
-    },
-  });
-  upload.start();
-}
-
 // D-129 (E4.1 live-testing findings, Wave G): a compact, fixed-destination mode for a collection page's
 // own upload box (finding 11) - reuses this component rather than building a second control (Q5). In
 // compact mode the Options block does not render at all (there is nothing to pick: the destination is
@@ -162,10 +151,10 @@ export function DropZone({
 }: { compact?: boolean; fixedCollectionId?: string } = {}) {
   const [user, setUser] = useState<MosniUser>(null);
   const [authReady, setAuthReady] = useState(false);
-  // Server-authoritative chunk size (P10): the shared constant is the compile-time fallback, but the
-  // running server is the source of truth so the client and the server's rate-limit budget cannot drift.
-  const [chunkSize, setChunkSize] = useState(UPLOAD_CHUNK_SIZE);
   const inputRef = useRef<HTMLInputElement>(null);
+  // E6 E4: a SECOND, separate hidden input for "choose a folder" - `webkitdirectory` must never land on
+  // the primary input, or the primary click-to-choose would turn folder-only and break D-1's path.
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const [dragDepth, setDragDepth] = useState(0); // >0 ⇒ a file drag is somewhere over the page
   const [zoneHover, setZoneHover] = useState(false); // a file drag is over the drop zone itself
 
@@ -190,9 +179,16 @@ export function DropZone({
     const onOver = (e: DragEvent) => {
       if (hasFiles(e)) e.preventDefault();
     };
+    // E6 F1/F3: a drop anywhere on the page now actually ingests, not just prevents the browser navigating
+    // away. The zone's OWN onDrop handler (below) calls stopPropagation(), so this native window-level
+    // listener never fires for a drop that landed on the zone itself - a drop reaches here only when it
+    // missed the zone, which is exactly the "whole-page drop" case. A test asserts one drop produces
+    // exactly one batch (§0.3's "obvious regression" warning) - this guard is how.
     const onWindowDrop = (e: DragEvent) => {
-      if (hasFiles(e)) e.preventDefault();
       setDragDepth(0);
+      if (!hasFiles(e) || !e.dataTransfer) return;
+      e.preventDefault();
+      void ingestDropped(e.dataTransfer, "drop");
     };
     window.addEventListener("dragenter", onEnter);
     window.addEventListener("dragleave", onLeave);
@@ -211,13 +207,60 @@ export function DropZone({
     fetch("/api/config")
       .then((res) => (res.ok ? res.json() : null))
       .then((cfg: { uploadChunkSize?: unknown } | null) => {
-        if (!cancelled && cfg && typeof cfg.uploadChunkSize === "number") setChunkSize(cfg.uploadChunkSize);
+        // Server-authoritative chunk size (P10): the upload controller (web/src/lib/uploads.ts) owns the
+        // actual tus construction now (Wave 0) and reads its own module-level chunk size, defaulted to the
+        // shared UPLOAD_CHUNK_SIZE constant until this resolves - tell it about the real value so the
+        // client and the server's rate-limit budget cannot drift apart.
+        if (!cancelled && cfg && typeof cfg.uploadChunkSize === "number") setUploadChunkSize(cfg.uploadChunkSize);
       })
       .catch(() => {}); // unreachable /api/config just means we keep the fallback - never blocks uploads
     return () => {
       cancelled = true;
     };
   }, []);
+
+  // E6 E4: `webkitdirectory` (and `multiple`, so every file inside the chosen folder comes back at once)
+  // are set imperatively - `webkitdirectory` is a real DOM property but not a standard JSX attribute.
+  useEffect(() => {
+    if (folderInputRef.current) {
+      folderInputRef.current.webkitdirectory = true;
+      folderInputRef.current.multiple = true;
+    }
+  }, []);
+
+  // E6 D2: a window-level paste listener. Registered per user change (mirroring the collections-loading
+  // effect below) so the gate below always reads the CURRENT sign-in state rather than a stale closure.
+  useEffect(() => {
+    if (user === null || !can(user, "files:write")) return;
+
+    function onPaste(event: ClipboardEvent) {
+      const target = event.target as HTMLElement | null;
+      // Load-bearing, not polish: the app has a rename field, a new-collection name field and (Wave C) a
+      // grouping name field - pasting into any of them must paste TEXT, never trigger an upload.
+      const isTextEntry =
+        target !== null &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      if (isTextEntry) return;
+
+      const data = event.clipboardData;
+      if (!data) return;
+      const files = filesFromClipboard(data, new Date());
+      if (files.length === 0) return;
+
+      event.preventDefault();
+      void (async () => {
+        const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
+        const destination = await resolveDestination(token);
+        startBatch(files, { destinationCollectionId: destination, source: "paste" });
+      })();
+    }
+
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+    // Deliberately not re-subscribing on every keystroke in the destination fields: resolveDestination()
+    // reads that state fresh via closure on each call it makes, so the listener itself only needs to be
+    // current with sign-in/eligibility, not with the picker's field values.
+  }, [user, compact, fixedCollectionId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -253,12 +296,11 @@ export function DropZone({
     if (!compact && user !== null && can(user, "files:write")) loadCollectionsOnce();
   }, [compact, user]);
 
-  async function startUploads(files: File[]) {
-    if (files.length === 0) return;
-    const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
-
-    // G1: a compact mount has nothing to pick - the destination is fixed, and there is no picker state
-    // (destinationCollectionId/newCollectionName) to read at all.
+  // G1: a compact mount has nothing to pick - the destination is fixed, and there is no picker state
+  // (destinationCollectionId/newCollectionName) to read at all. Extracted out of startUploads (E6) so
+  // every ingest path (drop, picker, paste, folder) resolves the SAME destination the same way, instead of
+  // each one re-implementing it.
+  async function resolveDestination(token: string | null): Promise<string | null> {
     let destination = fixedCollectionId ?? null;
     if (!compact) {
       // A typed-in new-collection name takes priority over a selected existing one; resolved to an id
@@ -270,21 +312,58 @@ export function DropZone({
         setNewCollectionName("");
       }
     }
+    return destination;
+  }
 
-    // Each file gets its own tus.Upload and its own row - multi-file grouping into a single shared link
-    // is a later epic (E6), not this one.
-    files.forEach((file) => {
-      const id = `upload-${nextUploadId++}`;
-      const name = file.name;
-      const publish = (state: UploadState) => upsertJob({ id, kind: "upload", name, state });
-      publish({ status: "uploading", progress: 0, loaded: 0, total: file.size });
-      startUpload(file, token, chunkSize, destination, (state) => {
-        publish(state);
-        // E5.1 Wave E (finding 4): bump the SHARED signal on every completion, root-mounted or
-        // compact-collection alike - see the header comment above.
-        if (state.status === "done") bumpReload();
-      });
-    });
+  async function startUploads(files: File[], source: IngestSource) {
+    if (files.length === 0) return;
+    const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
+    const destination = await resolveDestination(token);
+    // web/src/lib/uploads.ts owns the queue, the tus wiring and resumption from here (Wave 0) - this
+    // component only ever collects files and hands them off.
+    startBatch(files, { destinationCollectionId: destination, source });
+  }
+
+  // E6 (E3/F1): shared by the zone's own onDrop and the whole-page window drop handler - branches into the
+  // recursive folder walk when the payload contains a real directory entry, otherwise the flat path.
+  async function ingestDropped(dataTransfer: DataTransfer, source: IngestSource): Promise<void> {
+    if (containsDirectory(dataTransfer)) {
+      const items = Array.from(dataTransfer.items ?? []);
+      const { files, truncated, rejected } = await walkDroppedEntries(items);
+      rejected.forEach((name) => toastError(`Can't upload "${name}" — it's empty.`));
+      if (truncated) {
+        toastError("This folder is too large — some files were skipped (a depth or file-count limit was hit).");
+      }
+      const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
+      const rootDestination = await resolveDestination(token);
+      await ingestWalkedFiles(files, token, rootDestination);
+      return;
+    }
+
+    const { files, rejected } = uploadableFiles(dataTransfer);
+    rejected.forEach((name) => toastError(`Can't upload "${name}" — it's empty.`));
+    await startUploads(files, source);
+  }
+
+  // E6 E4: the folder-picker input's change handler - webkitdirectory gives each File a real
+  // webkitRelativePath ("photos/2026/a.jpg"), so this needs no entries-API walk at all, just the same
+  // grouping ingestWalkedFiles already does for a folder DROP.
+  async function handleFolderInputFiles(fileList: FileList | null): Promise<void> {
+    if (!fileList) return;
+    const all = Array.from(fileList);
+    const walked: WalkedFile[] = [];
+    for (const file of all) {
+      if (file.size === 0) {
+        toastError(`Can't upload "${file.name}" — it's empty.`);
+        continue;
+      }
+      const relativePath = file.webkitRelativePath ? file.webkitRelativePath.split("/") : [file.name];
+      walked.push({ file, relativePath });
+    }
+    if (walked.length === 0) return;
+    const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
+    const rootDestination = await resolveDestination(token);
+    await ingestWalkedFiles(walked, token, rootDestination);
   }
 
   function loadCollectionsOnce() {
@@ -299,7 +378,7 @@ export function DropZone({
     const all = Array.from(fileList);
     const files = all.filter((f) => f.size > 0);
     all.filter((f) => f.size === 0).forEach((f) => toastError(`Can't upload "${f.name}" — it's empty.`));
-    void startUploads(files);
+    void startUploads(files, "picker");
   }
 
   if (!authReady) {
@@ -348,11 +427,11 @@ export function DropZone({
             border: "3px dashed var(--mosni-purple)",
           }}
         >
-          {/* The zone is still the only drop target (the hand-off scoped whole-page drop out, and E6 owns
-              it). A viewport-wide "Drop to upload" therefore promised something a drop on the header or
-              the margins does not honour - it silently does nothing. The copy points at the zone instead,
-              which the overlay's own translucency leaves highlighted underneath. */}
-          <span style={{ fontSize: "1.5rem", color: "var(--mosni-white)" }}>Drop on the box below to upload</span>
+          {/* E6 F2: reverts to the viewport-wide promise this originally made. Session 013 narrowed it to
+              "Drop on the box below" specifically because whole-page drop was scoped out and this copy
+              would otherwise have promised something the app silently ignored - F1 makes that promise
+              true again (the window-level drop handler now actually ingests). */}
+          <span style={{ fontSize: "1.5rem", color: "var(--mosni-white)" }}>Drop anywhere to upload</span>
         </div>
       )}
       {/* D1/D-114: ONE panel for the drop target and its Options - previously two sibling `.panel`s (the
@@ -379,13 +458,12 @@ export function DropZone({
           onDragLeave={() => setZoneHover(false)}
           onDrop={(event) => {
             event.preventDefault();
+            // E6 F3: stops this drop from ALSO reaching the window-level whole-page handler below - without
+            // it, a drop on the zone would ingest twice (once here, once there).
+            event.stopPropagation();
             setZoneHover(false);
             setDragDepth(0);
-            const { files, rejected } = uploadableFiles(event.dataTransfer);
-            rejected.forEach((name) =>
-              toastError(`Can't upload "${name}" — folders and empty files aren't supported yet.`),
-            );
-            void startUploads(files);
+            void ingestDropped(event.dataTransfer, "drop");
           }}
           // D1: the dashed rectangle is now the drop target's permanent resting state (previously only a
           // hover affordance) - hovering just accents it further, it never starts undecorated. G1: smaller
@@ -422,6 +500,31 @@ export function DropZone({
               event.target.value = "";
             }}
           />
+          {/* E6 E4: a SECOND picker, folder-only (`webkitdirectory`, set imperatively below since it is
+              not a standard JSX/DOM attribute) - deliberately never on the primary input above, which
+              would turn click-to-choose folder-only and break D-1's three-action path. */}
+          <div style={{ marginTop: "0.5rem" }}>
+            <button
+              type="button"
+              className="btn-tertiary"
+              onClick={(event) => {
+                event.stopPropagation();
+                folderInputRef.current?.click();
+              }}
+            >
+              or choose a folder
+            </button>
+            <input
+              ref={folderInputRef}
+              type="file"
+              style={{ display: "none" }}
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) => {
+                void handleFolderInputFiles(event.target.files);
+                event.target.value = "";
+              }}
+            />
+          </div>
         </div>
 
         {/* G1 (D-42/D-86, amended by D-114): expanded rather than behind a disclosure - D3's check is

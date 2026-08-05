@@ -4,6 +4,7 @@ import { DropZone } from "./components/DropZone.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { UploadStack } from "./components/UploadStack.tsx";
 import { PreviewPage } from "./pages/Preview.tsx";
+import { restorePausedUploads, startBatch } from "./lib/uploads.ts";
 
 // Moved out of index.html (round 4, live-testing: Hannah found dev-rationale comments shipping verbatim
 // in the served page source - a .html entry file's comments survive `vite build` untouched, unlike a
@@ -13,6 +14,10 @@ import { PreviewPage } from "./pages/Preview.tsx";
 // index.html's <head> loads auth.mosni.dev/sdk.js BEFORE ui.mosni.dev/mosnicat.js, deliberately
 // (belt-and-braces): out of order, the chrome's toast and the auth SDK can clobber each other's
 // window.mosni depending on load order. The cross-repo half of that fix already landed separately.
+//
+// E6 Wave G4: index.html's <head> also carries <link rel="manifest"> + <meta name="theme-color"> -
+// web/embed.html gets NEITHER, deliberately: the embeddable player route is not the app and must not be
+// installable.
 //
 // index.html's <body> renders mosni-chrome's own <mosni-header> directly (NOT <mosni-layout>: that
 // component's grid hard-codes a sidebar column - `grid-template-columns: $sidebar-width 1fr` - whether
@@ -43,6 +48,35 @@ if ("serviceWorker" in navigator) {
     // without module-worker support lands here; archive.ts turns that into a visible error rather than an
     // indefinite wait.
   });
+}
+
+// E6 Wave B5: restore any upload paused by a closed tab, as a `paused` job in the shared stack. Fire and
+// forget - it must never block or delay first paint, and a restore failure is already swallowed inside
+// the function itself (§0.5's "never throw into main.tsx's render path").
+void restorePausedUploads();
+
+// E6 Wave G6: the Android share-target handoff. The worker's own fetch handler (sw.ts) redirects a shared
+// file's POST to "/?share-target=<id>" - claim the files it stashed in IndexedDB, start uploading them,
+// then drop the query parameter so a reload of this exact URL does not re-claim (the worker deletes the
+// entry on read, so a second claim would get nothing anyway, but the stale query string would still be a
+// lie about what just happened).
+const shareTargetId = new URLSearchParams(location.search).get("share-target");
+if (shareTargetId !== null) {
+  if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+    const controller = navigator.serviceWorker.controller;
+    const onShareTargetMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: unknown; id?: unknown; files?: unknown } | null;
+      if (data === null || data.type !== "share-target-files" || data.id !== shareTargetId) return;
+      navigator.serviceWorker.removeEventListener("message", onShareTargetMessage);
+      const files = Array.isArray(data.files) ? data.files.filter((f): f is File => f instanceof File) : [];
+      if (files.length > 0) {
+        startBatch(files, { destinationCollectionId: null, source: "share-target" });
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", onShareTargetMessage);
+    controller.postMessage({ type: "share-target-claim", id: shareTargetId });
+  }
+  history.replaceState(null, "", location.pathname + location.hash);
 }
 
 // F1-F5: the drop zone was the whole landing page (D-64); E4 adds the browser BELOW it (D-1, D-93) - the

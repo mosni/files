@@ -868,10 +868,31 @@ export function FileBrowser({
       // all (every entry omitted by a guard) resolve it immediately, since the worker never posts a
       // progress message for an empty manifest (its per-file loop never runs).
       let resolveFinished: () => void;
-      const finished = new Promise<void>((resolve) => {
+      let rejectFinished: (err: Error) => void;
+      const finished = new Promise<void>((resolve, reject) => {
         resolveFinished = resolve;
+        rejectFinished = reject;
       });
+      // E6 Wave H (D-181): handleDownloadAll's wait on the service worker's completed >= total signal used
+      // to be unbounded (issues.md -> ARCHIVE-STALL-NO-TIMEOUT) - a worker that stops posting progress
+      // (a crashed/evicted worker, a network path that goes fully silent) left this awaiting forever with
+      // "Download all" stuck disabled. Bounded on time SINCE THE LAST progress message, not total elapsed
+      // - a multi-GB archive is legitimately slow, that must not itself count as a stall.
+      const STALL_TIMEOUT_MS = 60_000;
+      let stallTimer: ReturnType<typeof setTimeout> | undefined;
+      const armStallTimer = () => {
+        if (stallTimer) clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => {
+          rejectFinished(new Error("Archive stalled — nothing received for 60s"));
+        }, STALL_TIMEOUT_MS);
+      };
+      const clearStallTimer = () => {
+        if (stallTimer) clearTimeout(stallTimer);
+      };
       const report = (completed: number, failed: string[]) => {
+        // H2: reset on EVERY progress message, not just one that advances `completed` - a run of
+        // failed-but-still-arriving messages is not silence.
+        armStallTimer();
         lastFailed = [...omitted, ...failed];
         const completedTotal = omitted.length + completed;
         upsertJob({
@@ -883,7 +904,10 @@ export function FileBrowser({
           total: lastTotal,
           failed: lastFailed,
         });
-        if (completedTotal >= lastTotal) resolveFinished();
+        if (completedTotal >= lastTotal) {
+          clearStallTimer();
+          resolveFinished();
+        }
       };
       report(0, []); // the walk's own guard omissions (F3/F5) are visible immediately, before any fetch starts
       await downloadArchive(archiveName, entries, (progress) => report(progress.completed, progress.failed));
