@@ -2,6 +2,7 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router";
 import { DropZone } from "./components/DropZone.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
+import { UploadStack } from "./components/UploadStack.tsx";
 import { PreviewPage } from "./pages/Preview.tsx";
 
 // Moved out of index.html (round 4, live-testing: Hannah found dev-rationale comments shipping verbatim
@@ -49,6 +50,13 @@ if ("serviceWorker" in navigator) {
 // D-70/D-73: the preview page is now a route inside this SPA rather than a server-rendered document.
 // Declarative mode only (BrowserRouter + Routes/Route) - no createBrowserRouter, no loaders, no framework
 // mode, no Vite plugin.
+//
+// E5.1 Wave E (D-161): <UploadStack /> mounts exactly ONCE, as a sibling of <Routes> rather than inside
+// any one route's element - an archive started from a collection page must still show while the viewer
+// navigates elsewhere (D-133's "Download all" keeps running via the service worker regardless of what's
+// on screen), and the "/" route already has its own DropZone-driven jobs to show. Mounting it inside a
+// per-route element would remount (and lose) the stack on every navigation; mounting it here, once, does
+// not.
 const root = document.getElementById("root");
 if (root) {
   createRoot(root).render(
@@ -66,6 +74,7 @@ if (root) {
         <Route path="/f/*" element={<PreviewPage />} />
         <Route path="/t/:token" element={<PreviewPage />} />
       </Routes>
+      <UploadStack />
     </BrowserRouter>,
   );
 }

@@ -43,6 +43,8 @@ vi.mock("tus-js-client", () => {
 });
 
 import { DropZone } from "../../src/components/DropZone.tsx";
+import { UploadStack } from "../../src/components/UploadStack.tsx";
+import { __resetJobsStoreForTests } from "../../src/lib/jobs.ts";
 
 // Flushes every pending microtask (fetch → res.json() → setState is two awaits deep) by yielding to a
 // real macrotask - more robust than a fixed number of `await Promise.resolve()` hops.
@@ -92,6 +94,11 @@ describe("DropZone", () => {
 
   beforeEach(() => {
     uploadInstances.length = 0;
+    // E5.1 Wave E: the job store is a module-level singleton now that DropZone publishes to it instead of
+    // owning its own `uploads` state - without this, a job left over from a previous test (nothing here
+    // ever "unmounts" a job the way local state used to vanish with the component) would leak into the
+    // next test's assertions on the stack's contents.
+    __resetJobsStoreForTests();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -114,7 +121,12 @@ describe("DropZone", () => {
     installMockMosni(null);
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     expect(container.querySelector("mosni-login-button")).not.toBeNull();
@@ -135,7 +147,12 @@ describe("DropZone", () => {
     installMockMosni({ sub: "user:1", roles: [] });
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     // Copy reworded in session 010 (the branch now renders a titled .panel rather than a bare <p>);
@@ -149,7 +166,12 @@ describe("DropZone", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -167,7 +189,12 @@ describe("DropZone", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -188,7 +215,12 @@ describe("DropZone", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     const dropArea = container.querySelector('[role="button"]') as HTMLElement;
@@ -213,7 +245,12 @@ describe("DropZone", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -249,7 +286,12 @@ describe("DropZone", () => {
     Object.assign(navigator, { clipboard: { writeText } });
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -279,7 +321,12 @@ describe("DropZone", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -321,7 +368,12 @@ describe("DropZone", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -343,7 +395,12 @@ describe("DropZone", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -360,7 +417,12 @@ describe("DropZone", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -380,7 +442,12 @@ describe("DropZone", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -398,7 +465,12 @@ describe("DropZone", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
@@ -425,7 +497,12 @@ describe("DropZone", () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
     act(() => {
-      root.render(<DropZone />);
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
     });
 
     const dropArea = container.querySelector('[role="button"]') as HTMLElement;
@@ -448,7 +525,12 @@ describe("DropZone", () => {
     try {
       // window.mosni is deliberately absent at mount - the auth SDK's <script> tag can still be loading.
       act(() => {
-        root.render(<DropZone />);
+        root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
       });
 
       expect(container.querySelector("mosni-login-button")).toBeNull();
@@ -471,7 +553,12 @@ describe("DropZone", () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve([]) }));
 
       act(() => {
-        root.render(<DropZone />);
+        root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
       });
 
       expect(container.querySelector("details")).toBeNull();
@@ -491,7 +578,12 @@ describe("DropZone", () => {
       vi.stubGlobal("fetch", fetchSpy);
 
       act(() => {
-        root.render(<DropZone />);
+        root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
       });
       await flush();
 
@@ -506,7 +598,12 @@ describe("DropZone", () => {
       vi.stubGlobal("fetch", fetchSpy);
 
       act(() => {
-        root.render(<DropZone />);
+        root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
       });
       await flush();
 
@@ -517,7 +614,12 @@ describe("DropZone", () => {
       installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
       act(() => {
-        root.render(<DropZone />);
+        root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
       });
 
       const select = container.querySelector("#destination-select") as HTMLSelectElement;
@@ -544,7 +646,12 @@ describe("DropZone", () => {
       vi.stubGlobal("fetch", fetchSpy);
 
       act(() => {
-        root.render(<DropZone />);
+        root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
       });
 
       const nameInput = container.querySelector("#new-collection-name") as HTMLInputElement;
@@ -582,7 +689,12 @@ describe("DropZone", () => {
       );
 
       act(() => {
-        root.render(<DropZone />);
+        root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
       });
 
       const nameInput = container.querySelector("#new-collection-name") as HTMLInputElement;
@@ -608,7 +720,12 @@ describe("DropZone", () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
 
       act(() => {
-        root.render(<DropZone />);
+        root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
       });
 
       const nameInput = container.querySelector("#new-collection-name") as HTMLInputElement;

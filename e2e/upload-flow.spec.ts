@@ -20,11 +20,13 @@ const IDP = process.env.MOCK_IDP ?? "http://mock-idp:9000";
 // so these flows traverse the deployed topology - location precedence, client_max_body_size, buffering,
 // the X-Forwarded-* headers - instead of hitting the container directly. That is what would have caught
 // the two production bugs (http:// Location, and a 413 on every chunk) before they reached the box.
+// E5.1 Wave H (D-162): https, not http - nginx-e2e now terminates real TLS for this tier.
 const FILES_HOST = "files-e2e.test";
-const FILES_ORIGIN = `http://${FILES_HOST}`;
-// app-direct.test reaches the container WITHOUT nginx, for the one assertion that must control the
-// X-Forwarded-* headers itself (the sandbox's nginx has no TLS, so its $scheme is http and it cannot
-// stand in for production's https-terminating proxy).
+const FILES_ORIGIN = `https://${FILES_HOST}`;
+// app-direct.test reaches the container WITHOUT nginx, for the one assertion below that must control the
+// X-Forwarded-* headers itself rather than let a real proxy set them (D-76's regression test wants to
+// prove the APP correctly TRUSTS and uses a forwarded https scheme, which is a distinct thing from nginx
+// now genuinely terminating TLS - see that test's own updated comment).
 const APP_DIRECT_ORIGIN = "http://app-direct.test";
 const STORAGE_ROOT = "/data/storage";
 
@@ -146,7 +148,7 @@ test("a real authorized tus upload lands the bytes, and the returned link serves
   // whole D-5 path end to end: the app authorizes and returns an empty body with X-Accel-Redirect, and
   // NGINX serves the actual bytes from the internal-only location. Nothing had ever tested that nginx
   // serves what the app redirects to - only that the app set the header.
-  const direct = await request.get(`http://dl.mosni.dev/${relPath}`);
+  const direct = await request.get(`https://dl.mosni.dev/${relPath}`);
   expect(direct.status()).toBe(200);
   expect(Buffer.from(await direct.body()).equals(body), "nginx must deliver the exact bytes").toBeTruthy();
   expect(direct.headers()["x-content-type-options"]).toBe("nosniff");
@@ -179,7 +181,7 @@ test("delivery's Content-Type follows the DISPLAY name after a rename, not the p
   const { previewUrl, directUrl } = await completeUpload(request, token, filename, body);
 
   // Uploaded as .txt -> text/plain, from both the app and the disk name. Nothing distinguishes them yet.
-  const before = await request.get(`http://dl.mosni.dev/${new URL(directUrl).pathname.replace(/^\//, "")}`);
+  const before = await request.get(`https://dl.mosni.dev/${new URL(directUrl).pathname.replace(/^\//, "")}`);
   expect(before.status()).toBe(200);
   expect(before.headers()["content-type"]).toBe("text/plain");
 
@@ -197,7 +199,7 @@ test("delivery's Content-Type follows the DISPLAY name after a rename, not the p
   expect(patched.status()).toBe(200);
 
   const after = await request.get(
-    `http://dl.mosni.dev/${new URL((await patched.json()).directUrl).pathname.replace(/^\//, "")}`,
+    `https://dl.mosni.dev/${new URL((await patched.json()).directUrl).pathname.replace(/^\//, "")}`,
   );
   expect(after.status()).toBe(200);
   expect(after.headers()["content-type"]).toBe("application/octet-stream");
@@ -241,11 +243,14 @@ test("an upload larger than nginx's default body limit succeeds (the 413 regress
 test("behind a TLS-terminating proxy tus builds an https:// Location, never http:// (D-76 regression)", async ({
   request,
 }) => {
-  // The one case that must set the X-Forwarded-* headers itself: the sandbox's nginx has no TLS, so its
-  // $scheme is http and it cannot stand in for production's https-terminating proxy. So hit the app
-  // DIRECTLY and send exactly what production nginx sends. Without respectForwardedHeaders the app builds
-  // the Location from the raw request and returns http://, which an https page's CSP blocks - the bug
-  // masked by helmet's upgrade-insecure-requests until D-76 removed it.
+  // The one case that must set the X-Forwarded-* headers itself: hitting the app DIRECTLY (bypassing
+  // nginx-e2e) and sending exactly what production nginx sends proves the APP's own trust of a forwarded
+  // scheme, independent of whichever proxy happens to be in front of it. (E5.1 Wave H gave nginx-e2e a
+  // real TLS listener of its own - this test's point was never "nginx has no TLS here", it is "prove the
+  // app respects X-Forwarded-Proto regardless of transport", which app-direct.test isolates cleanly.)
+  // Without respectForwardedHeaders the app builds the Location from the raw request and returns http://,
+  // which an https page's CSP blocks - the bug masked by helmet's upgrade-insecure-requests until D-76
+  // removed it.
   const token = await mintToken(request, `user:e2e-${randomUUID()}`);
   const create = await request.post(`${APP_DIRECT_ORIGIN}/api/upload`, {
     headers: {

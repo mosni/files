@@ -1418,6 +1418,46 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       expect(modal!.contains(select)).toBe(true);
     });
 
+    // E5.1 Wave H (H7, working-conventions.md §8): a mount-only assertion cannot catch a teardown that only
+    // shows up on the NEXT render - D-8, D-112 and D-164 are all this shape. Forces one unrelated re-render
+    // (root.render() of an equivalent tree, the createRoot equivalent of `rerender(<Same />)`) while the
+    // modal is open, and re-asserts containment rather than trusting the mount-time assertion above.
+    it("the Move modal's destination select stays inside mosni-modal after an unrelated re-render (H7)", async () => {
+      installMosni();
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] })))
+          .mockResolvedValueOnce(jsonResponse([{ id: "dest-1", name: "Vacation" }])),
+      );
+
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+      });
+      await flush();
+
+      const row = container.querySelector("[data-row-id]")!;
+      await selectRowAction(row, "move");
+      await flush();
+
+      expect(container.querySelector('mosni-modal[heading^="Move"]')!.contains(container.querySelector("select"))).toBe(true);
+
+      // The unrelated re-render: same element tree, same props from this test's own point of view -
+      // exactly what a parent-driven refetch/reload elsewhere on the page would trigger while this modal
+      // stays open.
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+      });
+      await flush();
+
+      const modal = container.querySelector('mosni-modal[heading^="Move"]');
+      const select = container.querySelector("select");
+      expect(modal).not.toBeNull();
+      expect(select).not.toBeNull();
+      expect(modal!.contains(select)).toBe(true);
+    });
+
     it("the picker lists Root plus the caller's collections; confirming PATCHes collectionId and reloads", async () => {
       installMosni();
       const fetchSpy = vi

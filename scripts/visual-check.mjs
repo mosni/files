@@ -15,15 +15,19 @@
 // with surrogate ids, D-81), rather than driven through a real upload.
 
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium, devices } from "playwright";
 import mysql from "mysql2/promise";
 
 const STORAGE_ROOT = "/data/storage";
 // Must be the host-constrained alias, not the container name - see docker-compose.verify.yml's long note
 // on why app-e2e answers on port 80 under `files-e2e.test`.
-const ORIGIN = "http://files-e2e.test";
+// E5.1 Wave H (D-162): https, not http - nginx-e2e now terminates real TLS for this tier (a self-signed
+// cert covering files-e2e.test AND dl.mosni.dev), which is also why the archive/video page states below
+// finally show their real behaviour instead of a structurally-broken one.
+const ORIGIN = "https://files-e2e.test";
 const OUT_DIR = process.argv[2] ?? "/out";
 
 // ignoreHTTPSErrors is LOAD-BEARING for this script, not a convenience (review session 022). The design
@@ -35,10 +39,12 @@ const OUT_DIR = process.argv[2] ?? "/out";
 // is undefined, `document.styleSheets.length` is 0, and EVERY page screenshots as unstyled black-on-white
 // with no header, no panels and no badges - which is indistinguishable from a genuinely broken page and is
 // exactly how sessions 017 and 020 signed off 78 screenshots that showed nothing of what D-79 exists to
-// check ("layout, typography and chrome"). Nothing real is masked: the e2e stack terminates no TLS at all
-// (nginx-e2e strips the 443 blocks), so the only certificate this can wave through is the sandbox proxy's.
-// Same technique, same reason, as session 021's scoped `test.use({ ignoreHTTPSErrors: true })` in
-// e2e/browse.spec.ts.
+// check ("layout, typography and chrome"). Same technique, same reason, as session 021's scoped
+// `test.use({ ignoreHTTPSErrors: true })` in e2e/browse.spec.ts.
+// E5.1 Wave H (D-162): nginx-e2e now DOES terminate real TLS for `ORIGIN` itself (a self-signed cert), so
+// this flag now waves through TWO different untrusted certs for two different reasons - the sandbox
+// proxy's (for ui.mosni.dev) and nginx-e2e's own self-signed one (for files-e2e.test/dl.mosni.dev). Both
+// are test-only trust relaxations; neither exists in production, which terminates real, CA-issued certs.
 const IGNORE_TLS = { ignoreHTTPSErrors: true };
 
 const VIEWPORTS = [
@@ -143,7 +149,15 @@ const image = await seed(conn, {
   width: 1200,
   height: 800,
 });
-const video = await seed(conn, { relPath: `vis-${run}/clip.mp4`, bytes: Buffer.from("fake mp4 bytes") });
+// E5.1 Wave H (H3): a REAL, browser-decodable video, not the old `Buffer.from("fake mp4 bytes")` -
+// otherwise this state can never distinguish a player that genuinely decodes from one that only LOOKS
+// mounted (finding 5/D-164's exact failure mode, which shipped invisibly behind D-79 sign-offs that all
+// used fake bytes). Same VP9 fixture e2e/video-playback.spec.ts uses, for the same reason: Playwright's
+// bundled Chromium has no H.264 decoder at all.
+const VIDEO_FIXTURE_BYTES = await readFile(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "e2e", "fixtures", "clip.webm"),
+);
+const video = await seed(conn, { relPath: `vis-${run}/clip.webm`, bytes: VIDEO_FIXTURE_BYTES });
 const pdf = await seed(conn, { relPath: `vis-${run}/invoice.pdf`, bytes: Buffer.from("%PDF-1.4 fake") });
 const TXT_BODY = [
   "# deploy notes",
@@ -217,11 +231,10 @@ async function seedBrowserFile(collectionId, name, ownerSub, protection = "publi
   await mkdir(path.dirname(abs), { recursive: true });
   await writeFile(abs, "browser fixture bytes");
   const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
-  // D-137 (E5): `thumbName` mirrors thumbNameFor(fileId) exactly - the disk bytes don't need to be a REAL
-  // webp for this check (dl.mosni.dev's own bytes are unreachable in this sandbox regardless, same known
-  // limitation as every other dl.-hosted subresource here - see IGNORE_TLS's header comment); what this
-  // state validates is that a listing row renders an <img>, not the generic file icon, once thumbUrl is
-  // non-null.
+  // D-137 (E5): `thumbName` mirrors thumbNameFor(fileId) exactly. E5.1 Wave H: dl.mosni.dev now has a real
+  // TLS listener in this tier (nginx-e2e's self-signed cert), so this thumbnail's bytes (a real 1x1 PNG,
+  // see PNG_1PX below) genuinely load through it - this state validates both that a listing row renders an
+  // <img>, not the generic file icon, once thumbUrl is non-null, AND that the image actually decodes.
   const thumbName = thumb ? `${fileId}-thumb.webp` : null;
   if (thumb) await writeFile(path.join(STORAGE_ROOT, diskDir, thumbName), PNG_1PX);
   await conn.execute(
@@ -344,19 +357,26 @@ const PAGES = [
     id: "preview-video",
     label: "Preview - video",
     url: `/f/${video.relPath}`,
-    note: "E5 Wave F: the lazy-loaded Vidstack player (D-144), not a bare <video controls>. The fixture's " +
-      "bytes are not a real mp4 and dl.mosni.dev is unreachable in this sandbox, so which exact sub-state " +
-      "renders (styled controls before the load fails, or the runtime download-card fallback once it does) " +
-      "is not guaranteed - either is informative; a bare unstyled <video> tag would be the actual defect.",
+    note: "E5 Wave F: the lazy-loaded Vidstack player (D-144), not a bare <video controls>. E5.1 Wave H: " +
+      "the fixture is now a REAL, browser-decodable VP9 clip (H3) and dl.mosni.dev has a real TLS listener " +
+      "in this tier, and a <video src> load is NOT subject to CORS (only a script-initiated fetch() is) - " +
+      "so this state should show the player ACTUALLY DECODING, the strongest evidence this check can give " +
+      "that D-164's regression has not returned. A bare unstyled <video> tag, or the download-card " +
+      "fallback, is now a real finding worth investigating, not an expected sandbox artifact.",
   },
-  { id: "preview-pdf", label: "Preview - PDF", url: `/f/${pdf.relPath}`, note: "iframe to dl. - the frame-src/frame-ancestors fix (D-77)" },
+  { id: "preview-pdf", label: "Preview - PDF", url: `/f/${pdf.relPath}`, note: "iframe to dl. - the frame-src/frame-ancestors fix (D-77). An <iframe src> is not CORS-gated either, so this should now load for real too (E5.1 Wave H)." },
   {
     id: "preview-text",
     label: "Preview - text, full content (below the 256KB cap)",
     url: `/f/${txt.relPath}`,
     note: "E5 Wave E (D-141): renders via <mosni-code>, fetching the FULL file from dl. rather than the " +
-      "400-char snippet. dl.mosni.dev is unreachable in this sandbox, so the fetch fails and the ingest " +
-      "snippet (seeded above) is what actually shows - a real deploy fetches the real full file.",
+      "400-char snippet. E5.1 Wave H: dl.mosni.dev has a real TLS listener now, but this is a script " +
+      "fetch() (not an <img>/<video>/<iframe> src), so it IS subject to CORS - nginx's " +
+      "Access-Control-Allow-Origin is hardcoded to the REAL \"https://files.mosni.dev\" (a mandatory " +
+      "never-delete assertion, deliberately never rewritten for this tier - verification-concept.md), which " +
+      "this tier's own origin (files-e2e.test) never matches. So the fetch still fails here, for a DIFFERENT " +
+      "reason than before (CORS, not a dead transport) - the ingest snippet (seeded above) is still what " +
+      "actually shows. A real deploy, running at the real files.mosni.dev, has no such mismatch.",
   },
   {
     id: "preview-text-above-cap",
@@ -387,8 +407,8 @@ const PAGES = [
   },
   { id: "preview-secret-token", label: "Preview - secret via /t/<token>", url: `/t/${secret.linkToken}`, note: "The only way to reach a secret file (D-59)" },
   { id: "preview-private-anon", label: "Preview - private, signed out", url: `/f/${priv.relPath}`, note: "Must reveal nothing: shared not-found panel (D-72/D-75)" },
-  { id: "notfound-secret-path", label: "404 - secret at its readable path", url: `/f/${secret.relPath}`, note: "Must 404, never 403 (D-59, never-delete)" },
-  { id: "notfound-missing", label: "404 - nonexistent path", url: `/f/vis-${run}/does-not-exist.png`, note: "Styled NotFound view (P1)" },
+  { id: "notfound-secret-path", label: "404 - secret at its readable path", url: `/f/${secret.relPath}`, note: "Must 404, never 403 (D-59, never-delete)", expectStatuses: [404] },
+  { id: "notfound-missing", label: "404 - nonexistent path", url: `/f/vis-${run}/does-not-exist.png`, note: "Styled NotFound view (P1)", expectStatuses: [404] },
   {
     id: "landing-completed-upload",
     label: "Landing - signed in, upload just completed (compact preview card)",
@@ -607,8 +627,8 @@ const PAGES = [
     label: "Embeddable player route (E5 Wave H, D-140)",
     url: `/embed/f/${video.relPath}`,
     note: "No app chrome at all - no <mosni-header>, no auth SDK script tags (H1). Same lazy Vidstack " +
-      "player as the ordinary preview page; the fixture's fake bytes and unreachable dl.mosni.dev apply " +
-      "here too (see preview-video's note).",
+      "player as the ordinary preview page, same real-decode expectation since E5.1 Wave H - see " +
+      "preview-video's note.",
   },
   {
     id: "embed-player-route-rejected",
@@ -616,6 +636,7 @@ const PAGES = [
     url: `/embed/f/${priv.relPath}`,
     note: "The styled NotFound view, not a player - a private (or secret) file must never render here " +
       "even though its ordinary /f/ path would 200 anonymously with a reveal-nothing shell.",
+    expectStatuses: [404],
   },
 ];
 
@@ -624,6 +645,30 @@ const results = [];
 const overflowFailures = [];
 
 try {
+  // E5.1 Wave H (H4/D-163): ABORT before writing a single screenshot if the design system has not
+  // actually loaded. Session 022 found every D-79 screenshot ever taken up to that point had rendered
+  // with no design system at all (78 signed off); session 035 hit the EXACT same trap again despite the
+  // written warning - a comment has now failed to prevent this twice, so it becomes a hard check. Uses
+  // the same two probes session 022 used to measure the original gap.
+  const preflightContext = await browser.newContext(IGNORE_TLS);
+  const preflightPage = await preflightContext.newPage();
+  await preflightPage.goto(`${ORIGIN}/`, { waitUntil: "domcontentloaded", timeout: 20_000 });
+  await preflightPage.waitForTimeout(700);
+  const designSystem = await preflightPage.evaluate(() => ({
+    tabsRegistered: typeof customElements.get("mosni-tabs") !== "undefined",
+    styleSheetCount: document.styleSheets.length,
+  }));
+  await preflightContext.close();
+  if (!designSystem.tabsRegistered || designSystem.styleSheetCount === 0) {
+    throw new Error(
+      "visual-check ABORTED before writing any screenshot: the design system did not load " +
+        `(customElements.get("mosni-tabs") ${designSystem.tabsRegistered ? "is" : "is NOT"} registered, ` +
+        `document.styleSheets.length=${designSystem.styleSheetCount}). A screenshot that cannot show the ` +
+        "design system is not weak evidence about appearance - it is ZERO evidence, and worse than none " +
+        "because it looks like evidence (session 022, repeated session 035 despite a written warning).",
+    );
+  }
+
   for (const vp of VIEWPORTS) {
     const context = await browser.newContext(vp.options);
     for (const page of PAGES) {
@@ -657,6 +702,24 @@ try {
       } catch (err) {
         title = `(error: ${err.message.split("\n")[0]})`;
       }
+
+      // E5.1 Wave H (fold-in, review session 037's VISUAL-CHECK-PASSES-ON-429 finding): a state that
+      // expects 2xx and gets anything else - most likely the global rate limiter
+      // (E5-DELIVERY-RATE-LIMIT/E5.1-E2E-RATE-LIMIT) - must ABORT the run, not be written to disk as if it
+      // were the real page. Measured: 13 of 30 mobile states came back 429 in one full run and were
+      // captured and reported success anyway. Same D-163 family as the design-system guard above: a check
+      // that cannot tell "I captured the page" from "I captured a failure" is worse than one that fails
+      // loudly.
+      const expected = page.expectStatuses ?? [200];
+      if (status !== null && !expected.includes(status)) {
+        throw new Error(
+          `visual-check ABORTED: ${page.id} @ ${vp.name} returned HTTP ${status}, expected one of ` +
+            `[${expected.join(", ")}]. No screenshot was written for this state, and the run stops here ` +
+            "rather than producing a partial, silently-wrong sign-off set. If this is the rate limiter, " +
+            "re-run once its window has passed - see E5-DELIVERY-RATE-LIMIT / E5.1-E2E-RATE-LIMIT.",
+        );
+      }
+
       const file = `${page.id}-${vp.name}.png`;
       await p.screenshot({ path: path.join(OUT_DIR, file), fullPage: true });
       const overflows = overflow !== null && overflow.scrollWidth > overflow.clientWidth + 1;

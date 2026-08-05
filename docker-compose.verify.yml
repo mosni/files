@@ -127,8 +127,34 @@ services:
   # parked on :8080 where nothing calls them). Everything that carries BEHAVIOUR is used verbatim from the
   # committed file: location precedence, client_max_body_size, proxy_request_buffering, the X-Forwarded-*
   # headers, and the internal-only storage location.
+  # E5.1 Wave H (D-162): a REAL TLS listener, not the plain-HTTP tier this used to be. Deleting the
+  # `listen 443 ssl;`/`ssl_certificate` lines (as this transform used to) meant the whole e2e tier ran on
+  # plain HTTP - and service workers require a secure context, so `navigator.serviceWorker` was `undefined`
+  # here, `isArchiveSupported()` was false, and the client-side archive (Wave G/D-133) was structurally
+  # UNTESTABLE by anything automated - it shipped non-functional in every browser for a full epic before a
+  # human found it (D-149/D-150). A self-signed cert, built into the image below, not a Chromium flag: a
+  # flag would make this tier diverge from production on exactly the axis under test, and would have to be
+  # threaded through every spec's own context options.
+  # E5.1 Wave H: the self-signed cert is generated from a FIXED, committed dev-only key
+  # (e2e/fixtures/dev-tls-key.pem), not a fresh random one per build - a random key would give a different
+  # SPKI hash every rebuild, and Chromium's service-worker registration needs that EXACT hash pinned at
+  # browser launch (see playwright.config.ts's SW_CERT_SPKI - `ignoreHTTPSErrors` alone is proven
+  # INSUFFICIENT for SW registration specifically, a real, previously-undocumented Chromium gap found by
+  # executing this wave, not by reading anything). This key is never used for anything but this throwaway,
+  # never-trusted-by-anything-real dev cert - committing it is not a secret-exposure concern.
   nginx-e2e:
-    image: nginx:1.28-alpine
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM nginx:1.28-alpine
+        # A real cert requirement, not sandbox-specific - this test tier needs a TLS listener on every
+        # environment it ever runs in, box included.
+        RUN apk add --no-cache openssl
+        COPY e2e/fixtures/dev-tls-key.pem /etc/nginx/e2e-certs/privkey.pem
+        RUN openssl req -x509 -key /etc/nginx/e2e-certs/privkey.pem -days 36500 \
+              -out /etc/nginx/e2e-certs/fullchain.pem \
+              -subj "/CN=files-e2e.test" \
+              -addext "subjectAltName=DNS:files-e2e.test,DNS:dl.mosni.dev"
     depends_on:
       app-e2e:
         condition: service_healthy
@@ -139,7 +165,7 @@ services:
       - sh
       - -lc
       - |
-        sed -e 's#proxy_pass http://127.0.0.1:33001;#proxy_pass http://app-e2e:80;#g'             -e 's#server_name files.mosni.dev;#server_name files-e2e.test;#g'             -e '/listen 443 ssl;/d' -e '/ssl_certificate/d'             -e 's#listen 80;#listen 8080;#g'             /seed/nginx.conf > /etc/nginx/conf.d/default.conf
+        sed -e 's#proxy_pass http://127.0.0.1:33001;#proxy_pass http://app-e2e:80;#g'             -e 's#server_name files.mosni.dev;#server_name files-e2e.test;#g'             -e 's#/etc/letsencrypt/live/files.mosni.dev/fullchain.pem#/etc/nginx/e2e-certs/fullchain.pem#g'             -e 's#/etc/letsencrypt/live/files.mosni.dev/privkey.pem#/etc/nginx/e2e-certs/privkey.pem#g'             /seed/nginx.conf > /etc/nginx/conf.d/default.conf
         nginx -t && exec nginx -g 'daemon off;'
     networks:
       default:
@@ -150,7 +176,10 @@ services:
           # that nginx actually serves what the app redirects to - only that the header was set.
           - dl.mosni.dev
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      # https, not http: the plain-:80 server blocks are now real 301-to-https redirects (unrewritten,
+      # matching production nginx.conf verbatim), same as the vhosts they mirror - --no-check-certificate
+      # is the self-signed cert's own equivalent of Playwright's ignoreHTTPSErrors below.
+      test: ["CMD", "wget", "--no-check-certificate", "-qO-", "https://127.0.0.1/health"]
       interval: 2s
       timeout: 5s
       retries: 20

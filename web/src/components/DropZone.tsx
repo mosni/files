@@ -14,7 +14,7 @@ import { can, type Claims } from "../../../app/src/lib/roles.ts";
 import { UPLOAD_CHUNK_SIZE } from "../../../app/src/lib/uploadConfig.ts";
 import { toastMutationFailure } from "../lib/mutationError.ts";
 import { fetchCollections, type CollectionOption } from "../lib/collections.ts";
-import { UploadStack, type FileUpload, type UploadState } from "./UploadStack.tsx";
+import { bumpReload, upsertJob, type UploadState } from "../lib/jobs.ts";
 
 type MosniUser = Claims | null;
 type MosniToastOptions = { variant?: "success" | "error" | "info" };
@@ -148,15 +148,20 @@ function startUpload(
 // compact mode the Options block does not render at all (there is nothing to pick: the destination is
 // fixed), and startUploads uploads straight into `fixedCollectionId`, skipping the destination-picker
 // state and the createCollection step entirely. Everything else - drag handling, the folder/empty-file
-// guard, the upload machinery, the floating stack - is shared, unchanged.
+// guard, the upload machinery - is shared, unchanged.
+//
+// E5.1 Wave E (D-161, finding 4/12): this component no longer owns the upload list or renders the
+// floating stack itself - it publishes each upload as a job to the shared store (web/src/lib/jobs.ts),
+// which main.tsx's single <UploadStack /> renders. There is therefore no `onUploadComplete` prop any
+// more: EVERY completed upload bumps the shared reload signal, and any mounted FileBrowser (root or
+// compact-collection) reacts to that ONE signal - see jobs.ts's header comment for why a second,
+// component-specific callback would just be a second path to the same thing.
 export function DropZone({
   compact = false,
   fixedCollectionId,
-  onUploadComplete,
-}: { compact?: boolean; fixedCollectionId?: string; onUploadComplete?: () => void } = {}) {
+}: { compact?: boolean; fixedCollectionId?: string } = {}) {
   const [user, setUser] = useState<MosniUser>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [uploads, setUploads] = useState<FileUpload[]>([]);
   // Server-authoritative chunk size (P10): the shared constant is the compile-time fallback, but the
   // running server is the source of truth so the client and the server's rate-limit budget cannot drift.
   const [chunkSize, setChunkSize] = useState(UPLOAD_CHUNK_SIZE);
@@ -248,13 +253,6 @@ export function DropZone({
     if (!compact && user !== null && can(user, "files:write")) loadCollectionsOnce();
   }, [compact, user]);
 
-  function updateUpload(id: string, state: UploadState) {
-    setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, state } : u)));
-    // G2: a collection-page mount reloads its FileBrowser listing on completion, so the new file appears
-    // with no page refresh. A no-op for the root-mounted `/` drop zone, which has no listing to refresh.
-    if (state.status === "done") onUploadComplete?.();
-  }
-
   async function startUploads(files: File[]) {
     if (files.length === 0) return;
     const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
@@ -277,18 +275,16 @@ export function DropZone({
     // is a later epic (E6), not this one.
     files.forEach((file) => {
       const id = `upload-${nextUploadId++}`;
-      setUploads((prev) => [
-        ...prev,
-        { id, name: file.name, state: { status: "uploading", progress: 0, loaded: 0, total: file.size } },
-      ]);
+      const name = file.name;
+      const publish = (state: UploadState) => upsertJob({ id, kind: "upload", name, state });
+      publish({ status: "uploading", progress: 0, loaded: 0, total: file.size });
       startUpload(file, token, chunkSize, destination, (state) => {
-        updateUpload(id, state);
+        publish(state);
+        // E5.1 Wave E (finding 4): bump the SHARED signal on every completion, root-mounted or
+        // compact-collection alike - see the header comment above.
+        if (state.status === "done") bumpReload();
       });
     });
-  }
-
-  function dismissUpload(id: string) {
-    setUploads((prev) => prev.filter((u) => u.id !== id));
   }
 
   function loadCollectionsOnce() {
@@ -467,11 +463,6 @@ export function DropZone({
           </div>
         )}
       </div>
-
-      {/* D-122 (E4.1 live-testing findings, Wave E, findings 1/2): upload progress/completion is a
-          floating bottom-right stack, not inline panels - one element per file, staying until dismissed
-          or its "view" link is clicked. */}
-      <UploadStack uploads={uploads} onDismiss={dismissUpload} />
     </div>
   );
 }

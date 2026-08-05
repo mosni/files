@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 import mysql from "mysql2/promise";
 
@@ -22,8 +23,21 @@ const STORAGE_ROOT = "/data/storage";
 // on port 80 in this compose tier specifically so the browser's Host header omits the port (Fastify's
 // `constraints: { host }` is an exact string match against the bare hostname) - mirroring how production
 // omits 443 for HTTPS.
+//
+// E5.1 Wave H (D-162): the SCHEME changed from http to https - nginx-e2e now terminates real TLS (a
+// self-signed cert, `ignoreHTTPSErrors: true` in playwright.config.ts). `files-e2e.test` itself is
+// unaffected by Chromium's HSTS preload list (that only ever applied to the real `mosni.dev`), so this is
+// a pure scheme change, not a re-litigation of the paragraph above.
 const FILES_HOST = "files-e2e.test";
-const FILES_ORIGIN = `http://${FILES_HOST}`;
+const FILES_ORIGIN = `https://${FILES_HOST}`;
+
+const IDP = process.env.MOCK_IDP ?? "http://mock-idp:9000";
+
+async function mintToken(request: import("@playwright/test").APIRequestContext, sub: string) {
+  const res = await request.get(`${IDP}/token?sub=${encodeURIComponent(sub)}&roles=files:write`);
+  expect(res.ok(), "mock-idp must mint a token").toBeTruthy();
+  return (await res.json()).token as string;
+}
 
 function newId(): string {
   // D-81's surrogate ids are base62, but any unique CHAR(16) string satisfies the schema - these fixtures
@@ -40,6 +54,15 @@ async function seed(opts: {
   protection?: "public" | "unlisted" | "secret" | "private";
   width?: number;
   height?: number;
+  // E5.1 Wave H (H6): owner/uploader identity, so a seeded fixture can exercise the SAME owner-only
+  // surfaces (rename, protection, delete, the uploader block) a real upload would - previously every
+  // fixture here was ownerless, so nothing in this file could ever render them.
+  ownerSub?: string;
+  uploaderSub?: string;
+  uploaderName?: string;
+  // H3: a real fixture's bytes, when the test needs the browser to actually decode something (the
+  // placeholder text default is fine for every test that only asserts metadata/markup).
+  bytes?: Buffer | string;
 }): Promise<{ linkToken: string }> {
   const segments = opts.relPath.split("/");
   const name = segments[segments.length - 1]!;
@@ -57,7 +80,7 @@ async function seed(opts: {
 
   const abs = path.join(STORAGE_ROOT, diskDir, diskName);
   await mkdir(path.dirname(abs), { recursive: true });
-  await writeFile(abs, "e2e preview fixture bytes");
+  await writeFile(abs, opts.bytes ?? "e2e preview fixture bytes");
 
   const conn = await mysql.createConnection({
     host: process.env.DB_HOST ?? "mariadb",
@@ -68,13 +91,14 @@ async function seed(opts: {
   });
   try {
     await conn.execute(
-      "INSERT INTO collections (id, parent_id, name, owner_sub, default_protection, link_token) VALUES (?, '', ?, 'user:e2e-fixture', 'unlisted', ?)",
-      [collectionId, collectionName, collectionLinkToken],
+      "INSERT INTO collections (id, parent_id, name, owner_sub, default_protection, link_token) VALUES (?, '', ?, ?, 'unlisted', ?)",
+      [collectionId, collectionName, opts.ownerSub ?? "user:e2e-fixture", collectionLinkToken],
     );
     await conn.execute(
       `INSERT INTO files
-        (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, width, height)
-        VALUES (?, ?, ?, ?, ?, 25, ?, ?, 'committed', ?, ?)`,
+        (id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, width, height,
+         owner_sub, uploader_sub, uploader_name)
+        VALUES (?, ?, ?, ?, ?, 25, ?, ?, 'committed', ?, ?, ?, ?, ?)`,
       [
         fileId,
         collectionId,
@@ -85,6 +109,9 @@ async function seed(opts: {
         linkToken,
         opts.width ?? null,
         opts.height ?? null,
+        opts.ownerSub ?? null,
+        opts.uploaderSub ?? null,
+        opts.uploaderName ?? null,
       ],
     );
   } finally {
@@ -141,9 +168,14 @@ test("no CSP violation is raised loading a PDF preview (guards Wave C5's frame-s
   //
   // SCOPE, stated plainly so nobody trusts this further than it goes: this guards `frame-src` only, which
   // the PARENT document enforces at request time. It canNOT guard `frame-ancestors`, which only the CHILD
-  // response can violate - and the child here is dl.mosni.dev, which has no TLS listener on this network,
-  // so the iframe never loads and no frame-ancestors violation could ever fire. The frame-ancestors half
-  // of the fix is covered only by the header assertion in app/test/integration/security-headers.test.ts.
+  // response can violate. The frame-ancestors half of the fix is covered by the header assertion in
+  // app/test/integration/security-headers.test.ts (and, since the E5/E5.1 review, by an assertion on BOTH
+  // the embed route and an ordinary route in app/test/integration/embed.test.ts - defect 1, session 037).
+  // ⚠ Corrected E5.1 Wave H (D-162): this comment used to say the dl.mosni.dev child could never load here
+  // because this network had no TLS listener for it - that stopped being true the moment nginx-e2e gained
+  // one. The iframe genuinely attempts to load `https://dl.mosni.dev` now; this test still only asserts
+  // that no CSP violation is raised, not that the byte fetch itself succeeds (that is
+  // e2e/upload-flow.spec.ts's job, against files-e2e.test's own dl. alias).
   const cspViolations: string[] = [];
   page.on("console", (msg) => {
     if (
@@ -156,11 +188,63 @@ test("no CSP violation is raised loading a PDF preview (guards Wave C5's frame-s
   });
 
   await page.goto(`${FILES_ORIGIN}/f/${relPath}`);
-  // The iframe points at https://dl.mosni.dev, unreachable from this sandbox network (no TLS listener) -
-  // the point of this test is only that the CSP directive permits the attempt at all (Wave C5's fix), not
-  // that it succeeds.
   await page.locator("iframe").waitFor({ state: "attached" });
   await page.waitForTimeout(500);
 
   expect(cspViolations).toEqual([]);
+});
+
+// E5.1 Wave H (H6): the measured reason finding 5 (D-164) shipped - `preview.spec.ts` had ZERO
+// `window.mosni` stubs and ZERO tokens, so the preview page was never exercised signed in, and D-164's
+// teardown only happens on the OWNER's Bearer re-fetch (a signed-out visitor never triggers the extra
+// render that broke it). This is the regression test for that: it must be proved red against a deliberate
+// revert of VideoPreview.tsx's memoised `src` before it counts (done manually this session, not committed
+// - see the session log for the transcript), and it also covers the other owner-only surfaces (AC10's
+// uploader block, rename, protection, delete) that live on this exact page and were equally unexercised.
+test("owner, signed in: the uploader block, rename, protection and delete all render, and a real video survives the post-mount Bearer re-fetch (H6, D-164 regression)", async ({
+  page,
+  request,
+}) => {
+  const sub = `user:e2e-preview-owner-${randomUUID()}`;
+  const token = await mintToken(request, sub);
+  const relPath = `e2e-owner-${randomUUID()}/clip.webm`;
+  // The same real, small VP9 fixture e2e/video-playback.spec.ts uses (H3) - Playwright's bundled Chromium
+  // has no H.264 decoder at all, so a real codec is required for `readyState` to ever reach HAVE_CURRENT_
+  // DATA; a placeholder buffer would prove nothing about whether the player actually decodes anything.
+  const fixtureBytes = await readFile(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "clip.webm"),
+  );
+  await seed({ relPath, ownerSub: sub, uploaderSub: sub, uploaderName: "E2E Owner", bytes: fixtureBytes });
+
+  await page.route("**/sdk.js", (route) => route.abort());
+  await page.addInitScript(`
+    window.mosni = Object.assign(window.mosni ?? {}, {
+      user: () => ({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+      token: () => ${JSON.stringify(token)},
+      onChange: (cb) => cb({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+      login: () => {}, logout: () => {},
+      toast: () => {},
+    });
+  `);
+
+  await page.goto(`${FILES_ORIGIN}/f/${relPath}`);
+
+  // AC10 / the uploader block: a captured name renders, signed in as the owner who has one.
+  await expect(page.getByText("E2E Owner")).toBeVisible({ timeout: 10_000 });
+  // Owner-only surfaces (D-89/ManageControls, PreviewCard's header): rename, delete, protection.
+  await expect(page.getByRole("button", { name: "Rename" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Delete file" })).toBeVisible();
+  await expect(page.getByLabel("Who can access this")).toBeVisible();
+
+  // D-164 regression: Preview.tsx's owner branch re-fetches the context WITH a Bearer after the initial
+  // anonymous mount - exactly the extra render that tore the player down when `src` was an inline object
+  // literal (a new identity every render). If this regresses, the player collapses to an empty
+  // `<media-player>` with no `<video>` at all, and the two assertions below fail.
+  const video = page.locator("video");
+  await expect(video).toBeAttached({ timeout: 15_000 });
+  await expect
+    .poll(async () => video.evaluate((el: HTMLVideoElement) => el.readyState), { timeout: 15_000 })
+    .toBeGreaterThanOrEqual(2);
+  const box = await video.boundingBox();
+  expect(box?.height ?? 0).toBeGreaterThan(64); // rules out the D-164 "reports ready but collapses" mode
 });

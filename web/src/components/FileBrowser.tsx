@@ -36,8 +36,10 @@ import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../../
 import { formatUploadDate, humanSize } from "../../../app/src/lib/previewContext.ts";
 import { toastMutationFailure } from "../lib/mutationError.ts";
 import { fetchCollections, type CollectionOption } from "../lib/collections.ts";
-import { downloadArchive, isArchiveSupported, type ArchiveProgress } from "../lib/archive.ts";
+import { collectArchiveEntries, downloadArchive, isArchiveSupported, type ArchiveWalkLevel } from "../lib/archive.ts";
+import { pluralize } from "../lib/format.ts";
 import { isPlainLeftClick, pathnameOf } from "../lib/links.ts";
+import { upsertJob, useReloadSignal } from "../lib/jobs.ts";
 import { DropZone } from "./DropZone.tsx";
 import { IconConfirmCancel, RenameInput } from "./InlineRename.tsx";
 import { ProtectionControl } from "./ProtectionControl.tsx";
@@ -81,6 +83,8 @@ const SCOPE_TABS: { scope: Scope; label: string }[] = [
 
 const TABLE_COLUMN_COUNT = 6; // icon, name, size, added, visibility, actions - the colSpan an expanded row panel needs
 
+let nextArchiveId = 0; // E5.1 Wave E: mirrors DropZone.tsx's nextUploadId - a simple, testable job-id source
+
 function authHeaders(token: string | null): { headers: Record<string, string> } | undefined {
   return token ? { headers: { Authorization: `Bearer ${token}` } } : undefined;
 }
@@ -104,6 +108,22 @@ function currentToken(): string | null {
   return typeof window.mosni !== "undefined" ? window.mosni.token() : null;
 }
 
+// E5.1 Wave F5: the archive walk multiplies request count (one browse call per node, on top of the one
+// delivery request per file the archive already made) against the same global 100/min per-IP limiter
+// (E5-DELIVERY-RATE-LIMIT). Reusing review session 034's own rule for the per-file delivery fetches
+// (sw.ts's fetchWithRetries/isRetryableStatus) rather than inventing a second one: 429/5xx are transient
+// and worth a bounded retry with backoff, any other non-2xx (401/403/404) is the server's SETTLED answer -
+// most often a node the viewer may not browse - and retrying it would only delay the rest of the walk.
+const ARCHIVE_WALK_MAX_ATTEMPTS = 3;
+
+function isRetryableBrowseStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // D-104: rename/protection stay owner-or-superuser only. D-115 (closes BROWSE-ADMIN-DELETE): delete is
 // ADDITIONALLY offered to a files:delete holder, with the same affordance and confirmation as an owner's -
 // a strictly wider gate than manage, never a separate path.
@@ -123,10 +143,6 @@ async function copyLinkToClipboard(url: string): Promise<void> {
 }
 
 type RowPanel = "rename" | "protection" | null;
-
-function pluralize(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
-}
 
 // G3 (E4.1 live-testing findings, Wave G): move, shared between a file row (PATCH .../collectionId) and a
 // collection row (PATCH .../parentId) - the modal itself doesn't care which. Options are Root plus the
@@ -639,9 +655,27 @@ export function FileBrowser({
   // happens until confirm, and cancel touches nothing.
   const [creatingCollection, setCreatingCollection] = useState(false);
   const tabsRef = useRef<HTMLElement>(null);
-  // E5 Wave G (D-133): "Download all" progress, tracked purely client-side against the archive service
-  // worker's own postMessage updates - null when no download is in flight.
-  const [archiveProgress, setArchiveProgress] = useState<ArchiveProgress | null>(null);
+  // E5.1 Wave E (D-161): "Download all" progress now lives in the SHARED job stack (web/src/lib/jobs.ts),
+  // same as upload progress - this is only a local "is one of MY archives currently in flight" flag, so
+  // the button can disable itself without this component reading the store back.
+  const [archiveInFlight, setArchiveInFlight] = useState(false);
+
+  // E5.1 Wave E (finding 4): a completed upload - root-mounted OR compact on a collection page, via the
+  // SAME signal (see jobs.ts's header comment) - refreshes whatever listing is mounted here. Skips the
+  // very first value on mount: `useReloadSignal()`'s snapshot is whatever the shared counter already
+  // happens to be (e.g. left over from an archive/upload elsewhere on the page before this instance
+  // mounted), not a fresh "something just finished" event.
+  const externalReloadSignal = useReloadSignal();
+  const isFirstReloadSignal = useRef(true);
+  useEffect(() => {
+    if (isFirstReloadSignal.current) {
+      isFirstReloadSignal.current = false;
+      return;
+    }
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `reload` is a stable closure over setState;
+    // this effect's only real dependency is the signal itself.
+  }, [externalReloadSignal]);
 
   useEffect(() => {
     let cancelled = false;
@@ -772,26 +806,89 @@ export function FileBrowser({
     setCreatingCollection(false);
   }
 
-  // E5 Wave G (D-133): archives exactly the FILE rows this page already has (never a second, separately-
-  // fetched file list - see archive.ts's header comment) under the collection's own display name (the
-  // breadcrumb's last, current-location crumb).
+  // E5.1 Wave F (finding 10, D-159): each level of the walk goes through the EXACT SAME GET /api/browse
+  // call the rest of this component already uses (browseUrl/authHeaders/currentToken) - §1.5 binds: this
+  // is not a second, wider authorization path, just the walk driving the same endpoint level by level.
+  // Only the walk's own ROOT (this page's collectionId) may carry `initialToken` (D-98's anonymous
+  // secret-collection bypass) - a deeper node is reached purely by what ITS PARENT's browse response
+  // already returned, never by riding the root's token into a collection it does not belong to.
+  async function fetchArchiveLevel(id: string, offset: number): Promise<ArchiveWalkLevel | null> {
+    if (scope === null) return null;
+    const url = browseUrl(scope, id, offset, id === collectionId ? initialToken : undefined);
+    for (let attempt = 0; attempt < ARCHIVE_WALK_MAX_ATTEMPTS; attempt++) {
+      if (attempt > 0) await delay(2 ** (attempt - 1) * 500); // exponential backoff, same shape as sw.ts's
+      const res = await fetch(url, authHeaders(currentToken()));
+      if (res.ok) {
+        const json = (await res.json()) as BrowseResponse;
+        return {
+          collections: json.collections.map((c) => ({ id: c.id, name: c.name })),
+          files: json.files.map((f) => ({ name: f.name, directUrl: f.directUrl })),
+          nextOffset: json.nextOffset,
+        };
+      }
+      if (!isRetryableBrowseStatus(res.status)) return null; // settled - §1.5: not authorized/gone, contributes nothing
+    }
+    return null; // exhausted retries - the observation belongs to E5-DELIVERY-RATE-LIMIT, not a crash here
+  }
+
+  // E5 Wave G (D-133), amended E5.1 Wave E+F (D-161/D-159): walks the full subtree from this collection
+  // down, preserving each nested collection as a real zip directory - never flattened - and publishes
+  // progress to the SHARED job stack instead of local component state, so it renders alongside upload
+  // progress in the one stack main.tsx mounts.
   async function handleDownloadAll() {
     if (data === null) return;
-    const collectionName = data.breadcrumb.at(-1)?.name ?? "archive";
-    setArchiveProgress({ completed: 0, total: data.files.length, failed: [] });
+    const archiveName = data.breadcrumb.at(-1)?.name ?? "archive";
+    const jobId = `archive-${nextArchiveId++}`;
+    setArchiveInFlight(true);
+    let lastTotal = 0;
+    let lastFailed: string[] = [];
+    upsertJob({ id: jobId, kind: "archive", name: archiveName, status: "archiving", completed: 0, total: 0, failed: [] });
     try {
-      await downloadArchive(
-        collectionName,
-        data.files.map((file) => ({ name: file.name, url: file.directUrl })),
-        setArchiveProgress,
-      );
+      // F1: the walk starts at THIS collection and paginates every level itself - it does not reuse
+      // `data.files`/`data.collections`, so a top level with more than one page is fully covered too, not
+      // just its nested children.
+      const { entries, omitted } = await collectArchiveEntries(collectionId, fetchArchiveLevel);
+      lastTotal = entries.length + omitted.length;
+      lastFailed = [...omitted];
+      // E5.1 Wave H found this by executing (not in the original hand-off): downloadArchive()'s own
+      // promise resolves as soon as the manifest is posted and the download is TRIGGERED - it does not
+      // wait for the service worker to actually finish fetching every file. Marking the job "done"
+      // immediately after that await raced a still-arriving onProgress message, which then flipped the
+      // job back to "archiving" after the premature "done" had already rendered. `finished` tracks the
+      // SW's own completion signal (completed >= total) instead, and archives with nothing to fetch at
+      // all (every entry omitted by a guard) resolve it immediately, since the worker never posts a
+      // progress message for an empty manifest (its per-file loop never runs).
+      let resolveFinished: () => void;
+      const finished = new Promise<void>((resolve) => {
+        resolveFinished = resolve;
+      });
+      const report = (completed: number, failed: string[]) => {
+        lastFailed = [...omitted, ...failed];
+        const completedTotal = omitted.length + completed;
+        upsertJob({
+          id: jobId,
+          kind: "archive",
+          name: archiveName,
+          status: "archiving",
+          completed: completedTotal,
+          total: lastTotal,
+          failed: lastFailed,
+        });
+        if (completedTotal >= lastTotal) resolveFinished();
+      };
+      report(0, []); // the walk's own guard omissions (F3/F5) are visible immediately, before any fetch starts
+      await downloadArchive(archiveName, entries, (progress) => report(progress.completed, progress.failed));
+      await finished;
+      upsertJob({ id: jobId, kind: "archive", name: archiveName, status: "done", completed: lastTotal, total: lastTotal, failed: lastFailed });
     } catch (err) {
-      setArchiveProgress(null);
+      upsertJob({ id: jobId, kind: "archive", name: archiveName, status: "error", completed: 0, total: lastTotal, failed: lastFailed });
       if (typeof window.mosni !== "undefined" && window.mosni.toast) {
         window.mosni.toast(err instanceof Error ? err.message : "Could not start the download", {
           variant: "error",
         });
       }
+    } finally {
+      setArchiveInFlight(false);
     }
   }
 
@@ -859,9 +956,11 @@ export function FileBrowser({
               client never infers upload rights from the user object (D-116's lesson: the server decides).
               D-107 originally made collection routes view-only by design; D-129 changes that deliberately
               - noted here so a future session does not "restore" the read-only rule. */}
-          {isCollectionRoute && data.canUpload && (
-            <DropZone compact fixedCollectionId={collectionId} onUploadComplete={reload} />
-          )}
+          {/* E5.1 Wave E (D-161): no `onUploadComplete` prop any more - DropZone bumps the SHARED reload
+              signal on every completed upload, and the effect above reacts to it the same way whether this
+              instance is root-mounted or, as here, a collection page's compact mount. Wiring a second,
+              component-specific callback here would just be a second path to the same refresh. */}
+          {isCollectionRoute && data.canUpload && <DropZone compact fixedCollectionId={collectionId} />}
           {/* C2/C3 (D-121): a PERMANENT root crumb (defect 8) - the old version gated the whole nav on
               breadcrumb.length > 0, so the Home control lived inside the element you needed it to escape,
               and the bar appeared/vanished as you moved, shifting the page. EVERY crumb, including the
@@ -905,30 +1004,22 @@ export function FileBrowser({
             })}
           </nav>
 
-          {/* E5 Wave G (D-133): "Download all" - only on a collection's own page, only when there is at
-              least one file to archive, and only when this browser can even run the service worker the
-              archive depends on (isArchiveSupported/G1's defensive registration). */}
-          {isCollectionRoute && data.files.length > 0 && isArchiveSupported() && (
-            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-              <button
-                type="button"
-                className="btn-ghost btn-sm"
-                style={{ justifySelf: "start", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
-                disabled={archiveProgress !== null && archiveProgress.completed < archiveProgress.total}
-                onClick={() => void handleDownloadAll()}
-              >
-                <mosni-icon name="download" size="16" /> Download all
-              </button>
-              {archiveProgress !== null && (
-                <span className="little-link">
-                  {archiveProgress.completed < archiveProgress.total
-                    ? `Archiving ${archiveProgress.completed}/${archiveProgress.total}…`
-                    : archiveProgress.failed.length > 0
-                      ? `Done - ${pluralize(archiveProgress.failed.length, "file")} could not be included`
-                      : "Archive ready"}
-                </span>
-              )}
-            </div>
+          {/* E5 Wave G (D-133), amended E5.1 Wave E+F: "Download all" - only on a collection's own page,
+              only when there is at least something to archive (a file OR a nested collection - Wave F
+              walks the whole subtree, so a collection holding only sub-collections must offer this too),
+              and only when this browser can even run the service worker the archive depends on
+              (isArchiveSupported/G1's defensive registration). Progress and the failed[] tail now live on
+              the shared job stack (D-161) - not a bare text span here any more. */}
+          {isCollectionRoute && (data.files.length > 0 || data.collections.length > 0) && isArchiveSupported() && (
+            <button
+              type="button"
+              className="btn-ghost btn-sm"
+              style={{ justifySelf: "start", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+              disabled={archiveInFlight}
+              onClick={() => void handleDownloadAll()}
+            >
+              <mosni-icon name="download" size="16" /> Download all
+            </button>
           )}
 
           {/* E4.1 Wave E/D-79: hiding .table-col-secondary columns (mosni-chrome) still left this

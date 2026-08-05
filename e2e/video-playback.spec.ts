@@ -30,7 +30,10 @@ const FIXTURE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "fi
 
 const IDP = process.env.MOCK_IDP ?? "http://mock-idp:9000";
 const FILES_HOST = "files-e2e.test";
-const FILES_ORIGIN = `http://${FILES_HOST}`;
+// E5.1 Wave H (D-162): https, not http - nginx-e2e now terminates real TLS (self-signed,
+// `ignoreHTTPSErrors: true` in playwright.config.ts), which is the whole reason these two tests below are
+// no longer test.skip()'d - see their own updated header comment.
+const FILES_ORIGIN = `https://${FILES_HOST}`;
 
 async function mintToken(request: import("@playwright/test").APIRequestContext, sub: string) {
   const res = await request.get(`${IDP}/token?sub=${encodeURIComponent(sub)}&roles=files:write`);
@@ -129,20 +132,21 @@ async function expectRealPlayback(page: import("@playwright/test").Page) {
   expect(box?.height ?? 0).toBeGreaterThan(64);
 }
 
-// SKIPPED IN THIS SANDBOX, not deleted or weakened: `directUrl` is the REAL `https://dl.mosni.dev` origin
-// (deliberately never rewritten to `-e2e.test`, same reason DL_ORIGIN stays real in app-e2e's own
-// environment block below - server.ts's CSP hardcodes the literal string "https://dl.mosni.dev"), and
-// nginx-e2e's own setup (this file's `nginx-e2e` service) DELETES every `listen 443 ssl;` block, so
-// nothing in this sandbox has a TLS listener for it - confirmed: the browser gets `ERR_CONNECTION_REFUSED`
-// on port 443, not a decode failure. This is the SAME structural gap as `E5-ARCHIVE-E2E` (service workers
-// need a secure context; this needs a reachable one) and is Wave H's scope to close (a self-signed cert +
-// `ignoreHTTPSErrors: true`, or equivalent). The FIX itself (VideoPreview.tsx's memoised `src={{src,
-// type}}`) is independently verified: a throwaway local harness (Vite dev server, real unmocked
-// `@vidstack/react`, real Playwright/Chromium, a real WebM fixture at both a with-extension and an
-// extensionless URL) reached `readyState 4`/`canplaythrough` in both shapes - see the session log for the
-// full transcript. These two tests stay in the suite, unskipped automatically the moment Wave H gives
-// nginx-e2e a working TLS listener, as the permanent regression guard that condition needs.
-test.skip("a real video, public/unlisted (plain-path directUrl, has a real extension): the player actually decodes it", async ({
+// UNSKIPPED, E5.1 Wave H (D-162): `directUrl` is the REAL `https://dl.mosni.dev` origin (deliberately
+// never rewritten to `-e2e.test`, same reason DL_ORIGIN stays real in app-e2e's own environment block
+// below - server.ts's CSP hardcodes the literal string "https://dl.mosni.dev"), and until this wave
+// nginx-e2e's own setup DELETED every `listen 443 ssl;` block, so nothing in this sandbox had a TLS
+// listener for it (confirmed at the time: the browser got `ERR_CONNECTION_REFUSED` on port 443, not a
+// decode failure) - the SAME structural gap as `E5-ARCHIVE-E2E` (service workers need a secure context;
+// this needed a reachable one). nginx-e2e now builds a self-signed cert covering both `files-e2e.test` and
+// `dl.mosni.dev` (its own SAN list) and Playwright's config trusts it project-wide
+// (`ignoreHTTPSErrors: true`), so this is now the permanent, always-running regression guard for D-167/
+// D-164 the header comment above describes. The FIX itself (VideoPreview.tsx's memoised `src={{src,
+// type}}`) was independently verified before this wave too: a throwaway local harness (Vite dev server,
+// real unmocked `@vidstack/react`, real Playwright/Chromium, a real WebM fixture at both a with-extension
+// and an extensionless URL) reached `readyState 4`/`canplaythrough` in both shapes - see session 035's log
+// for that transcript.
+test("a real video, public/unlisted (plain-path directUrl, has a real extension): the player actually decodes it", async ({
   page,
   request,
 }) => {
@@ -162,8 +166,8 @@ test.skip("a real video, public/unlisted (plain-path directUrl, has a real exten
 // `src={{src, type}}` object form (VideoPreview.tsx) is the ONLY way it can select a provider at all. This
 // is the scenario both live-testing-round-2 attempts targeted; only a real, unmocked Vidstack against a
 // real URL of this exact shape can prove which one actually works.
-// SKIPPED IN THIS SANDBOX - see the sibling test's comment above, same `dl.mosni.dev` TLS gap.
-test.skip("a real video, private (extensionless signed directUrl): the player actually decodes it (D-167)", async ({
+// UNSKIPPED, E5.1 Wave H - see the sibling test's comment above; same `dl.mosni.dev` TLS gap, now closed.
+test("a real video, private (extensionless signed directUrl): the player actually decodes it (D-167)", async ({
   page,
   request,
 }) => {

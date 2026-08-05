@@ -13,7 +13,8 @@ const IDP = process.env.MOCK_IDP ?? "http://mock-idp:9000";
 // files-e2e.test, not files.mosni.dev - see preview.spec.ts's long comment: mosni.dev is HSTS-preloaded in
 // Chromium, so a plain http:// navigation to it silently upgrades to https:// and fails in this sandbox.
 const FILES_HOST = "files-e2e.test";
-const FILES_ORIGIN = `http://${FILES_HOST}`;
+// E5.1 Wave H (D-162): https, not http - nginx-e2e now terminates real TLS for this tier.
+const FILES_ORIGIN = `https://${FILES_HOST}`;
 const STORAGE_ROOT = "/data/storage";
 
 function newId(): string {
@@ -134,7 +135,12 @@ test("a signed-in owner's \"My files\" tab shows their own collection and file",
   const collectionButton = page.getByRole("link", { name: `mine-${run}` });
   await expect(collectionButton).toBeVisible({ timeout: 10_000 });
   await collectionButton.click();
-  await expect(page.getByText("my-file.txt")).toBeVisible({ timeout: 10_000 });
+  // Scoped to a real link, not a bare getByText(): Wave A2 (D-8, session 036) made the Delete AND Move
+  // modals for this row always render their heading ("Delete/Move \"my-file.txt\"...") regardless of
+  // `open`, so an unscoped substring match against "my-file.txt" resolves to 3 elements (the row's own
+  // link plus both modal headings) and throws in strict mode. Fix the query, not the component - exactly
+  // the rule that fix's own hand-off states.
+  await expect(page.getByRole("link", { name: "my-file.txt" })).toBeVisible({ timeout: 10_000 });
 });
 
 test("the link offered for a file gated only by its collection contains no collection name (D-100)", async ({
@@ -171,7 +177,9 @@ test("the link offered for a file gated only by its collection contains no colle
   const collectionButton = page.getByRole("link", { name: `gate-${run}` });
   await expect(collectionButton).toBeVisible({ timeout: 10_000 });
   await collectionButton.click();
-  await expect(page.getByText("gated.txt")).toBeVisible({ timeout: 10_000 });
+  // Scoped to a real link, not a bare getByText() - see the sibling test above's comment (D-8/session 036,
+  // Wave A2's always-rendered Delete/Move modal headings also match "gated.txt" as a substring).
+  await expect(page.getByRole("link", { name: "gated.txt" })).toBeVisible({ timeout: 10_000 });
 
   // D-100: the owner deliberately navigated into the gating collection (its name in the breadcrumb is
   // expected - they already know where they are), but the SHARE LINK this row hands out must still be
