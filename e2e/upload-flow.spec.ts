@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
@@ -430,63 +430,10 @@ test("resumption: closing the tab mid-upload and reopening it shows Paused, and 
   void shareUrl;
 });
 
-// E6 Wave I3 (D-176): a folder chosen through the picker (E4) recreates its directory structure as
-// nested collections. The drag-drop entries path (E3, walkDroppedEntries) cannot be driven through
-// Playwright's synthetic DataTransfer - a real directory drag populates FileSystemDirectoryEntry objects
-// at the OS/browser level that JS-dispatched drag events cannot fake - so this proves the picker path
-// end-to-end instead; the walk itself (readEntries pagination, depth/entry guards) has its own thorough
-// unit coverage in web/test/unit/folderWalk.test.ts, and DropZone.test.tsx proves the component wires a
-// dropped directory into the same ingestWalkedFiles()/ensureCollectionPath() path this test exercises.
-test("folder ingest: a chosen folder recreates its directory structure as nested collections (D-176)", async ({
-  page,
-  request,
-}) => {
-  const sub = `user:e2e-${randomUUID()}`;
-  const token = await mintToken(request, sub);
-  const stamp = randomUUID().slice(0, 8);
-  const topDir = `trip-${stamp}`;
-
-  await page.route("**/sdk.js", (route) => route.abort());
-  await page.addInitScript(`
-    window.mosni = Object.assign(window.mosni ?? {}, {
-      user: () => ({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
-      token: () => ${JSON.stringify(token)},
-      onChange: (cb) => cb({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
-      login: () => {}, logout: () => {},
-      toast: (m) => { window.__toast = m; },
-    });
-  `);
-
-  await page.goto(`${FILES_ORIGIN}/`);
-
-  // A REAL directory on disk, offered by path (E6 review, session 042). A `webkitdirectory` input refuses
-  // inline buffers outright - "[webkitdirectory] input requires passing a path to a directory" - so the
-  // original inline-payload form could never have run. Chromium derives each file's webkitRelativePath
-  // from its position under the chosen directory, which is exactly what ingestWalkedFiles() groups on.
-  const folderRoot = path.join(tmpdir(), topDir);
-  await mkdir(path.join(folderRoot, "2026"), { recursive: true });
-  await writeFile(path.join(folderRoot, "root.txt"), "root level");
-  await writeFile(path.join(folderRoot, "2026", "nested.txt"), "nested level");
-
-  const fileChooserPromise = page.waitForEvent("filechooser");
-  await page.getByRole("button", { name: "or choose a folder", exact: true }).click();
-  const chooser = await fileChooserPromise;
-  await chooser.setFiles(folderRoot);
-
-  await expect(page.locator(".panel", { hasText: "root.txt" }).locator("a", { hasText: "view" })).toBeVisible({
-    timeout: 30_000,
-  });
-  await expect(page.locator(".panel", { hasText: "nested.txt" }).locator("a", { hasText: "view" })).toBeVisible({
-    timeout: 30_000,
-  });
-
-  const collections = await request.get(`${FILES_ORIGIN}/api/collections`, {
-    headers: { host: FILES_HOST, authorization: `Bearer ${token}` },
-  });
-  expect(collections.status()).toBe(200);
-  const rows = (await collections.json()) as { id: string; name: string; parentId: string }[];
-  const top = rows.find((r) => r.name === topDir);
-  expect(top, "the top-level directory must become a root collection").toBeTruthy();
-  const nested = rows.find((r) => r.name === "2026" && r.parentId === top!.id);
-  expect(nested, "the nested directory must become a collection UNDER the top-level one").toBeTruthy();
-});
+// E6 Wave I3's folder-ingest test lived here and was DELETED on 2026-08-06, when Hannah removed the
+// "or choose a folder" picker: the picker was the only folder entry point Playwright can drive. A real
+// folder DRAG populates FileSystemDirectoryEntry objects at the OS/browser level that JS-dispatched drag
+// events cannot fake, so folder ingest now has no end-to-end coverage at all - only unit coverage
+// (web/test/unit/folderWalk.test.ts for the walk and its guards, collections.test.ts for
+// ensureCollectionPath, DropZone.test.tsx for the component wiring a dropped directory into them). A real
+// folder drop is therefore a MANUAL check on the box - see agent-docs `issues.md` -> E6-FOLDER-E2E-GAP.

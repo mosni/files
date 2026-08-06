@@ -400,7 +400,10 @@ describe("DropZone", () => {
     });
   });
 
-  describe("E6 E3/E4: folder ingest", () => {
+  // E4's "or choose a folder" picker was removed on 2026-08-06 (Hannah) - a folder DROP is the only entry
+  // point now, and these cases are the closest automated coverage it has (Playwright cannot synthesise a
+  // real directory drag; see e2e/upload-flow.spec.ts's note where its picker-driven test used to be).
+  describe("E6 E3: folder ingest (drop only)", () => {
     it("dropping a directory walks it and calls startBatch per resolved destination, not the old 'not supported yet' rejection", async () => {
       installMockMosni({ sub: "user:1", roles: ["files:write"] });
       vi.stubGlobal(

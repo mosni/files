@@ -53,6 +53,19 @@ async function copyDirectLink(url: string): Promise<void> {
   }
 }
 
+// mosni-chrome's `.panel` ships `margin: 32px 90px` (measured in the live design system, session 042) -
+// between two stacked items that is 64px of margin on top of the flex gap, which is what read as "too high
+// of a margin between each other" (Hannah, 2026-08-06). Zeroed HERE only: `.panel`'s default is shared with
+// auth, mosni.dev and the docs site, and D-31 forbids changing an existing component's default appearance
+// upstream for one consumer's layout.
+const STACK_ITEM_STYLE: React.CSSProperties = {
+  margin: 0,
+  display: "grid",
+  gap: "0.5rem",
+  padding: "0.85rem 1rem",
+  position: "relative",
+};
+
 function DismissButton({ label, onDismiss }: { label: string; onDismiss: () => void }) {
   return (
     // D-111: mosni-chrome's bare `button` element selector is a filled purple primary with no opt-out -
@@ -93,7 +106,7 @@ function UploadStackItem({ upload, onDismiss }: { upload: UploadJob; onDismiss: 
   }
 
   return (
-    <div className="panel" style={{ display: "grid", gap: "0.5rem", padding: "0.85rem 1rem", position: "relative" }}>
+    <div className="panel" style={STACK_ITEM_STYLE}>
       <DismissButton label={`Dismiss ${upload.name}`} onDismiss={onDismiss} />
       <p style={{ margin: 0, paddingRight: "1.5rem", overflowWrap: "anywhere" }}>{upload.name}</p>
       {upload.state.status === "queued" && (
@@ -168,7 +181,7 @@ function UploadStackItem({ upload, onDismiss }: { upload: UploadJob; onDismiss: 
 function ArchiveStackItem({ archive, onDismiss }: { archive: ArchiveJob; onDismiss: () => void }) {
   const percent = archive.total > 0 ? Math.round((archive.completed / archive.total) * 100) : 0;
   return (
-    <div className="panel" style={{ display: "grid", gap: "0.5rem", padding: "0.85rem 1rem", position: "relative" }}>
+    <div className="panel" style={STACK_ITEM_STYLE}>
       <DismissButton label={`Dismiss ${archive.name}`} onDismiss={onDismiss} />
       <p style={{ margin: 0, paddingRight: "1.5rem", overflowWrap: "anywhere" }}>{archive.name}.zip</p>
       {archive.status === "archiving" && (
@@ -271,7 +284,7 @@ function GroupingStackItem({ batchId, onDismiss }: { batchId: string; onDismiss:
 
   if (result) {
     return (
-      <div className="panel" style={{ display: "grid", gap: "0.5rem", padding: "0.85rem 1rem", position: "relative" }}>
+      <div className="panel" style={STACK_ITEM_STYLE}>
         <DismissButton label={`Dismiss ${result.name}`} onDismiss={onDismiss} />
         <p style={{ margin: 0, paddingRight: "1.5rem", overflowWrap: "anywhere" }}>Grouped into "{result.name}"</p>
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
@@ -290,7 +303,7 @@ function GroupingStackItem({ batchId, onDismiss }: { batchId: string; onDismiss:
   }
 
   return (
-    <div className="panel" style={{ display: "grid", gap: "0.5rem", padding: "0.85rem 1rem", position: "relative" }}>
+    <div className="panel" style={STACK_ITEM_STYLE}>
       <DismissButton label="Dismiss grouping" onDismiss={onDismiss} />
       {!expanded ? (
         <button type="button" className="btn-secondary" onClick={() => setExpanded(true)}>
@@ -378,7 +391,9 @@ export function UploadStack() {
         zIndex: 900,
         display: "flex",
         flexDirection: "column",
-        gap: "0.5rem",
+        // Tight (Hannah, 2026-08-06: "too high of a margin between each other") - the items already carry
+        // their own padding and border, so they read as one stack rather than scattered cards.
+        gap: "0.25rem",
         width: "min(22rem, calc(100vw - 2rem))",
         maxHeight: "80vh",
         overflowY: "auto",

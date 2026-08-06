@@ -74,9 +74,10 @@ function containsDirectory(dataTransfer: DataTransfer): boolean {
   return Array.from(items).some((item) => item.webkitGetAsEntry?.()?.isDirectory === true);
 }
 
-// E6 (E3/E4): shared by a folder DROP (walkDroppedEntries, relativePath from the entries API) and a folder
-// PICK (input[webkitdirectory], relativePath from File.webkitRelativePath) - both land here as the same
-// WalkedFile[] shape so grouping/collection-creation happens exactly once. Groups files by their
+// E6 E3: takes a folder DROP's walked entries (walkDroppedEntries, relativePath from the entries API).
+// Hannah removed the "or choose a folder" picker on 2026-08-06 - dragging a folder in is the whole
+// feature, and a second picker button beside the primary one was clutter on the app's one product surface
+// (D-1) - so this is now reached from exactly one place. Groups files by their
 // directory (every path segment but the last), resolves or creates ONE collection per distinct directory
 // under `rootDestination` (E2), then starts one batch per directory - a loose file with no directory
 // (relativePath.length === 1) goes straight to `rootDestination`, no ensureCollectionPath call at all.
@@ -152,9 +153,6 @@ export function DropZone({
   const [user, setUser] = useState<MosniUser>(null);
   const [authReady, setAuthReady] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  // E6 E4: a SECOND, separate hidden input for "choose a folder" - `webkitdirectory` must never land on
-  // the primary input, or the primary click-to-choose would turn folder-only and break D-1's path.
-  const folderInputRef = useRef<HTMLInputElement>(null);
   const [dragDepth, setDragDepth] = useState(0); // >0 ⇒ a file drag is somewhere over the page
   // Always holds the CURRENT whole-page drop behaviour, for the mount-once window listener below to call.
   const windowDropRef = useRef<(dataTransfer: DataTransfer) => void>(() => {});
@@ -235,24 +233,6 @@ export function DropZone({
       cancelled = true;
     };
   }, []);
-
-  // E6 E4: `webkitdirectory` (and `multiple`, so every file inside the chosen folder comes back at once)
-  // are set imperatively - `webkitdirectory` is a real DOM property but not a standard JSX attribute.
-  //
-  // ⚠ A CALLBACK REF, not a mount effect (E6 review, session 042). As a `useEffect(…, [])` this never ran
-  // against the real input at all: the component returns a spinner while `authReady` is false and a
-  // login-only panel while signed out, so at first commit - the only time a `[]` effect fires - the input
-  // does not exist yet and the ref is null. The folder picker therefore shipped as an ordinary
-  // single-file picker with no `webkitdirectory` and no `multiple`; found by running the Wave I3 e2e test
-  // ("Non-multiple file input can only accept single file"), invisible to every jsdom test. A callback ref
-  // runs whenever the element actually mounts, however late that is.
-  const attachFolderInput = (element: HTMLInputElement | null) => {
-    folderInputRef.current = element;
-    if (element !== null) {
-      element.webkitdirectory = true;
-      element.multiple = true;
-    }
-  };
 
   // E6 D2: a window-level paste listener. Registered per user change (mirroring the collections-loading
   // effect below) so the gate below always reads the CURRENT sign-in state rather than a stale closure.
@@ -369,27 +349,6 @@ export function DropZone({
     const { files, rejected } = uploadableFiles(dataTransfer);
     rejected.forEach((name) => toastError(`Can't upload "${name}" — it's empty.`));
     await startUploads(files, source);
-  }
-
-  // E6 E4: the folder-picker input's change handler - webkitdirectory gives each File a real
-  // webkitRelativePath ("photos/2026/a.jpg"), so this needs no entries-API walk at all, just the same
-  // grouping ingestWalkedFiles already does for a folder DROP.
-  async function handleFolderInputFiles(fileList: FileList | null): Promise<void> {
-    if (!fileList) return;
-    const all = Array.from(fileList);
-    const walked: WalkedFile[] = [];
-    for (const file of all) {
-      if (file.size === 0) {
-        toastError(`Can't upload "${file.name}" — it's empty.`);
-        continue;
-      }
-      const relativePath = file.webkitRelativePath ? file.webkitRelativePath.split("/") : [file.name];
-      walked.push({ file, relativePath });
-    }
-    if (walked.length === 0) return;
-    const token = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
-    const rootDestination = await resolveDestination(token);
-    await ingestWalkedFiles(walked, token, rootDestination);
   }
 
   function loadCollectionsOnce() {
@@ -523,32 +482,6 @@ export function DropZone({
             onChange={(event) => {
               handleInputFiles(event.target.files);
               // Allow re-selecting the same file again later (browsers don't fire "change" otherwise).
-              event.target.value = "";
-            }}
-          />
-        </div>
-
-        {/* E6 E4: a SECOND picker, folder-only (`webkitdirectory`, set imperatively above since it is not
-            a standard JSX/DOM attribute) - deliberately never on the primary input, which would turn
-            click-to-choose folder-only and break D-1's three-action path.
-            ⚠ It sits OUTSIDE the drop target, not inside it (E6 review, session 042). Nested inside, it
-            was a real <button> inside an element with role="button" - invalid ARIA, and it appended its
-            own label to the drop zone's accessible name ("Drop files here, or click to choose or choose
-            a folder"), which made every by-role query for either control ambiguous. */}
-        <div>
-          <button
-            type="button"
-            className="btn-tertiary"
-            onClick={() => folderInputRef.current?.click()}
-          >
-            or choose a folder
-          </button>
-          <input
-            ref={attachFolderInput}
-            type="file"
-            style={{ display: "none" }}
-            onChange={(event) => {
-              void handleFolderInputFiles(event.target.files);
               event.target.value = "";
             }}
           />
