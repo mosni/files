@@ -12,7 +12,13 @@ import sharp from "sharp";
 
 const rootDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SOURCE_SVG = path.join(rootDir, "web/public/icon.svg");
-const OUT_DIR = path.join(rootDir, "web/public/icons");
+// Output dir is overridable (first argument) because the production image renders these in its RUNTIME
+// stage, straight into the already-built web/dist, rather than in the build stage - see the Dockerfile.
+// Default stays web/public/icons, which is what `prebuild` and the verify tier want (vite then copies
+// web/public/* into web/dist at build time).
+const OUT_DIR = process.argv[2]
+  ? path.resolve(process.argv[2])
+  : path.join(rootDir, "web/public/icons");
 
 const TARGETS = [
   { file: "icon-192.png", size: 192 },

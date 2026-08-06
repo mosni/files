@@ -10,11 +10,6 @@ COPY package*.json .npmrc ./
 COPY scripts ./scripts
 RUN npm ci
 COPY . .
-# E6 Wave G2 (D-179): rasterizes web/public/icon.svg into web/public/icons/*.png BEFORE `vite build` runs -
-# Vite copies web/public/* into web/dist/ verbatim at build time, so the PNGs must already exist on disk.
-# This mirrors the `prebuild` npm script (package.json), which `npx vite build` here does NOT trigger on
-# its own (npm's pre<script> lifecycle hooks only fire for `npm run <script>`, not a direct `npx` call).
-RUN node scripts/generate-icons.mjs
 RUN npx vite build
 RUN npx vite build --config vite.ssr.config.ts
 
@@ -65,6 +60,23 @@ RUN apk add --no-cache --virtual .sharp-build vips-dev build-base pkgconfig pyth
       console.log('OK: sharp', s.versions.sharp, 'on system libvips', s.versions.vips); \
     "
 COPY --from=build /repo/web/dist ./web/dist
+# E6 Wave G2 (D-179): the PWA's PNG icons, rasterized from web/public/icon.svg by sharp - HERE, in the
+# runtime stage, straight into the already-built web/dist, and NOT in the build stage where this step
+# originally lived.
+#
+# Two constraints meet at this line, and only this placement satisfies both (found 2026-08-06, after E6's
+# first three deploys all failed at the original build-stage step and silently rolled back):
+#   1. D-78: the box is an Intel Atom N2800 (ISA stops at SSSE3) and sharp's PREBUILT libvips uses SSE4.1,
+#      so loading it dies with SIGILL (exit 132). Only this stage installs the system libvips and builds
+#      sharp from source against it, so this stage is the only place sharp can run at all.
+#   2. The build stage cannot simply get the same treatment: `--omit=optional` is what keeps the prebuilt
+#      libvips out, and rolldown (Vite 8's bundler) ships its own native binding as an OPTIONAL dependency
+#      - omitting optional deps there breaks `vite build` outright with MODULE_NOT_FOUND.
+# So sharp never runs in the build stage, and this renders into web/dist after it has been copied.
+# `prebuild` and the verify tier keep writing to web/public/icons (vite copies web/public/* into web/dist);
+# only this image passes an explicit output directory.
+COPY web/public/icon.svg ./web/public/icon.svg
+RUN node scripts/generate-icons.mjs web/dist/icons
 COPY --from=build /repo/app/dist ./app/dist
 # D-83: numbered migrations are read at runtime relative to the BUILT server.js's own location
 # (import.meta.url via storage/db.ts's migrationsDir()), not their original app/src/storage/migrations
