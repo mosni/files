@@ -1,19 +1,38 @@
 // tus resumable uploads (D-19). Thin: the upload logic is in controllers/upload.ts; this file is only the
-// Fastify/tus plumbing. Mounted at /api/upload in its own encapsulated scope so the dedicated rate limit
-// never touches the global one.
+// Fastify/tus plumbing. Mounted at /api/upload in its own encapsulated scope so the catch-all
+// content-type parser below cannot leak onto any other route.
 //
 // @tus/server speaks raw node:http, not Fastify's request/reply - the bridge is reply.hijack() plus
 // handing the raw req/res to tusServer.handle(). A catch-all content-type parser bypass is required too,
 // or Fastify's default JSON parser consumes the body stream before tus can read it.
 
 import type { FastifyInstance, FastifyRequest, RouteHandlerMethod } from "fastify";
-import rateLimit from "@fastify/rate-limit";
-import type { Redis } from "ioredis";
 import type { Config } from "../config.ts";
 import { buildTusServer } from "../controllers/upload.ts";
 import { UPLOAD_CHUNK_SIZE } from "../lib/uploadConfig.ts";
 
-export async function registerUploadRoutes(app: FastifyInstance, config: Config, redis: Redis): Promise<void> {
+// Dedicated rate limit: a 5 GB upload at UPLOAD_CHUNK_SIZE (lib/uploadConfig.ts) chunks is ~1000 PATCH
+// requests, which the global 100/min limit would break. Keyed on the raw bearer header (cheap) rather
+// than the verified sub, so this hook never runs JWT verification - the tus onIncomingRequest hook is the
+// one place that happens. The `max` is budgeted against UPLOAD_CHUNK_SIZE: a smaller chunk size means more
+// PATCHes, so that constant and this number move together (preliminary-review P10).
+//
+// ⚠ Per-route `config.rateLimit`, NOT a nested `register(rateLimit, …)` scope. Until the E6 review
+// (session 042) this was a nested registration, which does NOT replace the global limiter for these
+// routes - it adds a second one, and the stricter global 100/min still won. Measured: an upload larger
+// than ~500 MB (>100 chunks in a minute) was 429'd mid-flight in production, and `onShouldRetry` treats a
+// 429 as a settled 4xx, so it hard-failed. See the long note in routes/manage.ts for the mechanism.
+const uploadRateLimit = {
+  max: 600,
+  timeWindow: "1 minute",
+  keyGenerator: (request: FastifyRequest) => {
+    const auth = request.headers.authorization;
+    return typeof auth === "string" ? auth : request.ip;
+  },
+};
+
+export async function registerUploadRoutes(app: FastifyInstance, config: Config): Promise<void> {
+  void UPLOAD_CHUNK_SIZE; // the budget above is derived from it - keep the import live as that reminder
   const tusServer = buildTusServer(config);
   // Host-constrained to the files host (D-4/D-33). This is NOT decorative: /api/upload is a *static*
   // route, and find-my-way ranks a static path above delivery's host-constrained wildcard, so an
@@ -24,26 +43,6 @@ export async function registerUploadRoutes(app: FastifyInstance, config: Config,
   const filesHost = new URL(config.appOrigin).hostname;
 
   await app.register(async (scoped) => {
-    // Dedicated rate limiter: a 5 GB upload at UPLOAD_CHUNK_SIZE (lib/uploadConfig.ts) chunks is ~1000
-    // PATCH requests, which the global 100/min limit would break. Keyed on the raw bearer header (cheap)
-    // rather than the verified sub, so this hook never runs JWT verification - the tus onIncomingRequest
-    // hook is the one place that happens. The `max` is budgeted against UPLOAD_CHUNK_SIZE: a smaller chunk
-    // size means more PATCHes, so that constant and this number move together (preliminary-review P10).
-    void UPLOAD_CHUNK_SIZE;
-    await scoped.register(rateLimit, {
-      redis,
-      global: true,
-      max: 600,
-      timeWindow: "1 minute",
-      // Distinct nameSpace so this never shares a Redis key with the global limiter (server.ts) -
-      // @fastify/rate-limit's default key is IP-only with no per-registration isolation otherwise.
-      nameSpace: "fastify-rate-limit-upload-",
-      keyGenerator: (request: FastifyRequest) => {
-        const auth = request.headers.authorization;
-        return typeof auth === "string" ? auth : request.ip;
-      },
-    });
-
     // tus needs the raw, unconsumed request body stream - bypass Fastify's default body parsers.
     scoped.addContentTypeParser("*", (_request, _payload, done) => done(null));
 
@@ -51,8 +50,8 @@ export async function registerUploadRoutes(app: FastifyInstance, config: Config,
       reply.hijack();
       await tusServer.handle(request.raw, reply.raw);
     };
-    scoped.all("/api/upload", { constraints: { host: filesHost } }, handleTus);
-    scoped.all("/api/upload/*", { constraints: { host: filesHost } }, handleTus);
+    scoped.all("/api/upload", { constraints: { host: filesHost }, config: { rateLimit: uploadRateLimit } }, handleTus);
+    scoped.all("/api/upload/*", { constraints: { host: filesHost }, config: { rateLimit: uploadRateLimit } }, handleTus);
 
     // E6 (D-174/A2): a partial upload past UPLOAD_EXPIRY_MS is already 410'd by @tus/server (A1's
     // `expirationPeriodInMilliseconds`), but the bytes and the config sidecar in STORAGE_ROOT/.tus stay on

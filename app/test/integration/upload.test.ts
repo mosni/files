@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { Redis } from "ioredis";
+import rateLimit from "@fastify/rate-limit";
 import sharp from "sharp";
 
 const execFileAsync = promisify(execFile);
@@ -20,6 +21,7 @@ vi.mock("../../src/auth/verify.ts", () => ({ verify: vi.fn() }));
 
 import { verify } from "../../src/auth/verify.ts";
 import { registerUploadRoutes } from "../../src/routes/upload.ts";
+import { UPLOAD_EXPIRY_MS } from "../../src/lib/uploadConfig.ts";
 import type { Config } from "../../src/config.ts";
 import { applyMigrations, closeDb, getPool, initDb } from "../../src/storage/db.ts";
 import { diskRelPath, initFilesStorage, resolveByNames } from "../../src/storage/files.ts";
@@ -64,7 +66,17 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     };
 
     app = Fastify({ logger: false });
-    await registerUploadRoutes(app, config, redis);
+    // The GLOBAL limiter is registered first, exactly as server.ts does it. This is load-bearing for the
+    // isolation test below: without it that test ran against a server with no global limiter at all, so
+    // it could not have failed however broken the isolation was (found by the E6 review session, 042).
+    await app.register(rateLimit, {
+      redis,
+      global: true,
+      max: 100,
+      timeWindow: "1 minute",
+      nameSpace: "fastify-rate-limit-global-",
+    });
+    await registerUploadRoutes(app, config);
     await app.listen({ port: 0, host: "127.0.0.1" });
   }, 30_000);
 
@@ -201,16 +213,50 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     });
   }
 
-  it("is not throttled by the global 100/min rate limit (D1's dedicated 600/min scope)", async () => {
+  it("is not throttled by the global 100/min rate limit (D1's dedicated 600/min budget)", async () => {
+    // A unique bearer per run so the upload namespace's own counter starts clean; the requests all come
+    // from this container's single IP, which is exactly the client the global limiter would have capped.
+    const bearer = `Bearer rl-probe-${Date.now()}`;
     const responses = await Promise.all(
       Array.from({ length: 105 }, () =>
         request(`${baseUrl()}/api/upload`, {
           method: "OPTIONS",
-          headers: { "Tus-Resumable": "1.0.0" },
+          headers: { "Tus-Resumable": "1.0.0", Authorization: bearer },
         }),
       ),
     );
     expect(responses.every((res) => res.status !== 429)).toBe(true);
+  });
+
+  // E6 A1 (D-174) / AC7: FileStore is constructed with expirationPeriodInMilliseconds, which is what makes
+  // @tus/server 410 an expired HEAD (dist/handlers/HeadHandler.js compares now against creation_date +
+  // getExpiration()). Nothing exercised that option before this test (added by the review session, 042);
+  // it is one constructor argument away from being silently absent, and the whole D-174 window rests on it.
+  // Ageing the sidecar's own creation_date is how the expiry is reached without waiting seven days or
+  // faking the clock for every other test in this file.
+  it("410s a HEAD for a partial upload older than the expiry window (D-174)", async () => {
+    verifyMock.mockResolvedValue({ sub: "user:expiry", roles: ["files:write"] } as never);
+    const created = await createUpload("t", 1024, { filename: `expired-${randomUUID().slice(0, 8)}.bin` });
+    expect(created.status).toBe(201);
+    const uploadUrl = new URL(created.headers.get("location")!, baseUrl()).toString();
+    const uploadId = uploadUrl.split("/").pop()!;
+
+    const fresh = await request(uploadUrl, {
+      method: "HEAD",
+      headers: { "Tus-Resumable": "1.0.0", Authorization: "Bearer t" },
+    });
+    expect(fresh.status, "a fresh partial upload is resumable").toBe(200);
+
+    const sidecarPath = path.join(config.tusTempDir, `${uploadId}.json`);
+    const sidecar = JSON.parse(await readFile(sidecarPath, "utf8")) as { creation_date: string };
+    sidecar.creation_date = new Date(Date.now() - UPLOAD_EXPIRY_MS - 60_000).toISOString();
+    await writeFile(sidecarPath, JSON.stringify(sidecar));
+
+    const expired = await request(uploadUrl, {
+      method: "HEAD",
+      headers: { "Tus-Resumable": "1.0.0", Authorization: "Bearer t" },
+    });
+    expect(expired.status).toBe(410);
   });
 
   it("rejects an upload with no bearer token (401)", async () => {

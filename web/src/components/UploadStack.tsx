@@ -19,7 +19,7 @@ import { humanSize } from "../../../app/src/lib/previewContext.ts";
 import { UPLOAD_EXPIRY_MS } from "../../../app/src/lib/uploadConfig.ts";
 import { pluralize } from "../lib/format.ts";
 import { toastMutationFailure } from "../lib/mutationError.ts";
-import { matchPausedJob, resumeUpload } from "../lib/uploads.ts";
+import { cancelUpload, matchPausedJob, resumeUpload } from "../lib/uploads.ts";
 import {
   batchIsComplete,
   bumpReload,
@@ -297,7 +297,10 @@ function GroupingStackItem({ batchId, onDismiss }: { batchId: string; onDismiss:
           Group these {doneJobs.length} files
         </button>
       ) : (
-        <div style={{ display: "flex", gap: "0.5rem" }}>
+        // paddingRight clears the absolutely-positioned dismiss button, which otherwise sits ON TOP of the
+        // Group button (seen in the D-79 capture, session 042) - the same clearance every other item's own
+        // text already has.
+        <div style={{ display: "flex", gap: "0.5rem", paddingRight: "1.5rem" }}>
           <input
             type="text"
             value={name}
@@ -314,6 +317,16 @@ function GroupingStackItem({ batchId, onDismiss }: { batchId: string; onDismiss:
       )}
     </div>
   );
+}
+
+// E6 review (session 042): dismissing a `paused` job has to ABANDON it, not just hide the item. A paused
+// job is republished from localStorage on every page load (B4), so a plain dismiss came straight back on
+// the next reload - and the stack floats over the file browser's right-hand column, so the row overflow
+// menus underneath it stayed unclickable for as long as the entry lived (up to D-174's seven days). Found
+// by the D-79 check, which could not click through it either. Dismiss = "I am not finishing this upload".
+function dismissJobFully(job: Job): void {
+  if (job.kind === "upload" && job.state.status === "paused") void cancelUpload(job.id);
+  dismissJob(job.id);
 }
 
 function StackItem({ job, onDismiss }: { job: Job; onDismiss: () => void }) {
@@ -373,7 +386,7 @@ export function UploadStack() {
     >
       {/* Newest at the bottom, closest to where a just-completed drop/download draws the eye. */}
       {jobs.map((job) => (
-        <StackItem key={job.id} job={job} onDismiss={() => dismissJob(job.id)} />
+        <StackItem key={job.id} job={job} onDismiss={() => dismissJobFully(job)} />
       ))}
       {/* Grouping items render after every ordinary job - "beneath that batch's items" (§C4) in the common
           case, since a batch's own items are still contiguous near the bottom when it first qualifies. */}

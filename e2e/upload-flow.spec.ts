@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import mysql from "mysql2/promise";
@@ -303,7 +304,9 @@ test("the three-action path in a real browser: drop a file, get a link", async (
   await page.goto(`${FILES_ORIGIN}/`);
 
   // Drop the file the way the UI actually takes it - through the picker input the drop zone owns.
-  await page.locator('input[type="file"]').setInputFiles({
+  // Scoped to the PRIMARY file picker: E6 added a second, folder-only input to the same panel, and it is
+  // `multiple` too, so only the absence of `webkitdirectory` distinguishes them.
+  await page.locator('[role="button"] input[type="file"]').setInputFiles({
     name: filename,
     mimeType: "text/plain",
     buffer: Buffer.from(body),
@@ -347,6 +350,14 @@ test("resumption: closing the tab mid-upload and reopening it shows Paused, and 
   const size = 22 * 1024 * 1024;
   const body = Buffer.alloc(size);
   for (let i = 0; i < body.length; i++) body[i] = i % 256;
+  // ⚠ A REAL file on disk, offered by PATH both times - not an inline Buffer (E6 review, session 042).
+  // tus's browser fingerprint includes `file.lastModified`, and Playwright synthesises a fresh
+  // lastModified for every Buffer-backed setFiles() call, so the second offer would look like a DIFFERENT
+  // file, matchPausedJob() would refuse it, and this test could never pass - which is exactly what it did
+  // before this change. A path-backed offer carries the file's real mtime, identical on both offers, so
+  // the resume path is genuinely exercised rather than skipped.
+  const fixturePath = path.join(tmpdir(), filename);
+  await writeFile(fixturePath, body);
 
   await page.route("**/sdk.js", (route) => route.abort());
   await page.addInitScript(`
@@ -364,7 +375,7 @@ test("resumption: closing the tab mid-upload and reopening it shows Paused, and 
   const fileChooserPromise = page.waitForEvent("filechooser");
   await page.locator('[role="button"]').first().click();
   const chooser = await fileChooserPromise;
-  await chooser.setFiles({ name: filename, mimeType: "application/octet-stream", buffer: body });
+  await chooser.setFiles(fixturePath);
 
   // Wait for real upload progress (at least one full chunk PATCHed) before reloading, so there is
   // something on the server to resume FROM - not just a create with nothing uploaded yet.
@@ -385,11 +396,9 @@ test("resumption: closing the tab mid-upload and reopening it shows Paused, and 
   const resumeFileChooser = page.waitForEvent("filechooser");
   await pausedItem.getByRole("button", { name: /^Resume/ }).click();
   const resumeChooser = await resumeFileChooser;
-  // Re-offering the SAME file (same name/size/lastModified) is what matchPausedJob() needs to accept it -
-  // Playwright's Buffer-backed setFiles gives every offered File a fresh lastModified, so this only
-  // proves the byte-identity path, not the exact-lastModified match; that finer point is covered by
-  // uploads.test.ts's own unit coverage instead.
-  await resumeChooser.setFiles({ name: filename, mimeType: "application/octet-stream", buffer: body });
+  // Re-offering the SAME file - same name, size AND lastModified, which is what matchPausedJob() needs
+  // to accept it as a continuation rather than a new upload (see the fixture note above).
+  await resumeChooser.setFiles(fixturePath);
 
   const viewLink = pausedItem.locator("a", { hasText: "view" });
   await expect(viewLink).toBeVisible({ timeout: 30_000 });
@@ -450,16 +459,19 @@ test("folder ingest: a chosen folder recreates its directory structure as nested
 
   await page.goto(`${FILES_ORIGIN}/`);
 
+  // A REAL directory on disk, offered by path (E6 review, session 042). A `webkitdirectory` input refuses
+  // inline buffers outright - "[webkitdirectory] input requires passing a path to a directory" - so the
+  // original inline-payload form could never have run. Chromium derives each file's webkitRelativePath
+  // from its position under the chosen directory, which is exactly what ingestWalkedFiles() groups on.
+  const folderRoot = path.join(tmpdir(), topDir);
+  await mkdir(path.join(folderRoot, "2026"), { recursive: true });
+  await writeFile(path.join(folderRoot, "root.txt"), "root level");
+  await writeFile(path.join(folderRoot, "2026", "nested.txt"), "nested level");
+
   const fileChooserPromise = page.waitForEvent("filechooser");
-  await page.getByRole("button", { name: "or choose a folder" }).click();
+  await page.getByRole("button", { name: "or choose a folder", exact: true }).click();
   const chooser = await fileChooserPromise;
-  // webkitRelativePath is what E4's handler reads to group files by directory - Chromium derives it from
-  // each file's own `name` when the picker input is `webkitdirectory`, so a name containing "/" here is
-  // what a real folder pick produces, not a Playwright-specific shortcut.
-  await chooser.setFiles([
-    { name: `${topDir}/root.txt`, mimeType: "text/plain", buffer: Buffer.from("root level") },
-    { name: `${topDir}/2026/nested.txt`, mimeType: "text/plain", buffer: Buffer.from("nested level") },
-  ]);
+  await chooser.setFiles(folderRoot);
 
   await expect(page.locator(".panel", { hasText: "root.txt" }).locator("a", { hasText: "view" })).toBeVisible({
     timeout: 30_000,

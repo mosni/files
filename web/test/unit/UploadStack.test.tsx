@@ -7,14 +7,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-const { resumeUploadMock, matchPausedJobMock } = vi.hoisted(() => ({
+const { resumeUploadMock, matchPausedJobMock, cancelUploadMock } = vi.hoisted(() => ({
   resumeUploadMock: vi.fn(),
   matchPausedJobMock: vi.fn(() => null as string | null),
+  cancelUploadMock: vi.fn(() => Promise.resolve()),
 }));
 
 vi.mock("../../src/lib/uploads.ts", () => ({
   resumeUpload: resumeUploadMock,
   matchPausedJob: matchPausedJobMock,
+  cancelUpload: cancelUploadMock,
 }));
 
 import { UploadStack } from "../../src/components/UploadStack.tsx";
@@ -44,6 +46,7 @@ describe("UploadStack (E6 Wave B8/C4)", () => {
 
   beforeEach(() => {
     resumeUploadMock.mockClear();
+    cancelUploadMock.mockClear();
     matchPausedJobMock.mockReset();
     matchPausedJobMock.mockReturnValue(null);
     __resetJobsStoreForTests();
@@ -265,6 +268,37 @@ describe("UploadStack (E6 Wave B8/C4)", () => {
 
       expect(container.textContent).not.toContain("upload-a.txt");
       expect(container.textContent).toContain("upload-b.txt");
+    });
+
+    // E6 review (session 042): a paused job is republished from localStorage on every load, so hiding the
+    // item is not enough - dismissing it must drop the stored resume URL, or the stack item (which floats
+    // over the browser's row menus) comes back on the next reload for up to seven days.
+    it("dismissing a PAUSED job abandons the upload, not just the item", () => {
+      upsertJob(
+        job({
+          id: "upload-paused",
+          batchId: "b-paused",
+          name: "paused.bin",
+          state: { status: "paused", loaded: 10, total: 100 },
+        }),
+      );
+      render();
+
+      const dismiss = container.querySelector('button[aria-label^="Dismiss"]') as HTMLButtonElement;
+      act(() => dismiss.click());
+
+      expect(cancelUploadMock).toHaveBeenCalledWith("upload-paused");
+      expect(container.textContent).not.toContain("paused.bin");
+    });
+
+    it("dismissing a DONE job does not cancel anything", () => {
+      upsertJob(doneJob("upload-done"));
+      render();
+
+      const dismiss = container.querySelector('button[aria-label^="Dismiss"]') as HTMLButtonElement;
+      act(() => dismiss.click());
+
+      expect(cancelUploadMock).not.toHaveBeenCalled();
     });
 
     function doneJob(id: string) {

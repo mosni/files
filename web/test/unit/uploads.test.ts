@@ -177,7 +177,7 @@ describe("uploads controller (E6 Wave 0/B/C)", () => {
 
     it("puts the job in a resumable error state once tus knows a resource URL", () => {
       startBatch([file("a.txt")], { destinationCollectionId: null, source: "drop" });
-      uploadInstances[0].url = "https://files.mosni.dev/api/upload/abc";
+      uploadInstances[0].url = "http://localhost:3000/api/upload/abc";
       fail(uploadInstances[0], "connection dropped");
 
       const job = getJobsSnapshot()[0];
@@ -267,7 +267,7 @@ describe("uploads controller (E6 Wave 0/B/C)", () => {
   describe("resumeUpload (Wave B3)", () => {
     it("never constructs a new upload without calling findPreviousUploads first", async () => {
       startBatch([file("a.txt")], { destinationCollectionId: null, source: "drop" });
-      uploadInstances[0].url = "https://files.mosni.dev/api/upload/abc";
+      uploadInstances[0].url = "http://localhost:3000/api/upload/abc";
       fail(uploadInstances[0]);
 
       resumeUpload("upload-0");
@@ -278,11 +278,11 @@ describe("uploads controller (E6 Wave 0/B/C)", () => {
 
     it("resumes from the matching previous-upload entry when the stored url matches", async () => {
       startBatch([file("a.txt"), file("b.txt")], { destinationCollectionId: null, source: "drop" });
-      uploadInstances[0].url = "https://files.mosni.dev/api/upload/abc";
+      uploadInstances[0].url = "http://localhost:3000/api/upload/abc";
       fail(uploadInstances[0]);
 
-      const wrongMatch = { uploadUrl: "https://files.mosni.dev/api/upload/OTHER", size: 5, metadata: {}, creationTime: "", urlStorageKey: "k1", parallelUploadUrls: null };
-      const rightMatch = { uploadUrl: "https://files.mosni.dev/api/upload/abc", size: 5, metadata: {}, creationTime: "", urlStorageKey: "k2", parallelUploadUrls: null };
+      const wrongMatch = { uploadUrl: "http://localhost:3000/api/upload/OTHER", size: 5, metadata: {}, creationTime: "", urlStorageKey: "k1", parallelUploadUrls: null };
+      const rightMatch = { uploadUrl: "http://localhost:3000/api/upload/abc", size: 5, metadata: {}, creationTime: "", urlStorageKey: "k2", parallelUploadUrls: null };
       nextPreviousUploadsRef.current = [wrongMatch, rightMatch];
 
       resumeUpload("upload-0");
@@ -296,7 +296,7 @@ describe("uploads controller (E6 Wave 0/B/C)", () => {
       startBatch([file("a.bin", 10, 1000)], { destinationCollectionId: null, source: "picker" });
       // Simulate a paused job restored from localStorage - resumeUpload is called with the file supplied
       // by hand, and this job never had `uploadUrl` set on its record.
-      const onlyMatch = { uploadUrl: "https://files.mosni.dev/api/upload/only", size: 10, metadata: {}, creationTime: "", urlStorageKey: "k", parallelUploadUrls: null };
+      const onlyMatch = { uploadUrl: "http://localhost:3000/api/upload/only", size: 10, metadata: {}, creationTime: "", urlStorageKey: "k", parallelUploadUrls: null };
       nextPreviousUploadsRef.current = [onlyMatch];
       fail(uploadInstances[0]); // url stays null on this job's record
 
@@ -306,6 +306,11 @@ describe("uploads controller (E6 Wave 0/B/C)", () => {
     });
   });
 
+  // ⚠ The stored uploadUrl fixtures below are SAME-ORIGIN (jsdom serves these tests from
+  // http://localhost:3000), because restorePausedUploads() only follows a stored URL that points at this
+  // origin's own /api/upload - it carries the viewer's bearer, so a localStorage string may not decide
+  // where that token is sent (E6 review, 042). They used to name https://files.mosni.dev, an origin the
+  // test page never has, which the guard now correctly refuses.
   describe("restorePausedUploads + matchPausedJob (Wave B4/B6/B7)", () => {
     function tusFingerprint(f: File): string {
       return ["tus-br", f.name, f.type, f.size, f.lastModified, "/api/upload"].join("-");
@@ -316,7 +321,7 @@ describe("uploads controller (E6 Wave 0/B/C)", () => {
       const fp = tusFingerprint(f);
       localStorage.setItem(
         `tus::${fp}::999`,
-        JSON.stringify({ size: 1000, metadata: { filename: "resume-me.bin" }, uploadUrl: "https://files.mosni.dev/api/upload/abc" }),
+        JSON.stringify({ size: 1000, metadata: { filename: "resume-me.bin" }, uploadUrl: "http://localhost:3000/api/upload/abc" }),
       );
       vi.stubGlobal(
         "fetch",
@@ -337,7 +342,7 @@ describe("uploads controller (E6 Wave 0/B/C)", () => {
     it("prunes the localStorage entry and publishes nothing on 404/410", async () => {
       localStorage.setItem(
         "tus::whatever::1",
-        JSON.stringify({ size: 10, metadata: { filename: "gone.bin" }, uploadUrl: "https://files.mosni.dev/api/upload/gone" }),
+        JSON.stringify({ size: 10, metadata: { filename: "gone.bin" }, uploadUrl: "http://localhost:3000/api/upload/gone" }),
       );
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 410, ok: false, headers: new Headers() }));
 
@@ -350,7 +355,7 @@ describe("uploads controller (E6 Wave 0/B/C)", () => {
     it("leaves the entry alone and publishes nothing on a network error", async () => {
       localStorage.setItem(
         "tus::whatever::1",
-        JSON.stringify({ size: 10, metadata: { filename: "flaky.bin" }, uploadUrl: "https://files.mosni.dev/api/upload/flaky" }),
+        JSON.stringify({ size: 10, metadata: { filename: "flaky.bin" }, uploadUrl: "http://localhost:3000/api/upload/flaky" }),
       );
       vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
 
@@ -358,6 +363,21 @@ describe("uploads controller (E6 Wave 0/B/C)", () => {
 
       expect(getJobsSnapshot()).toHaveLength(0);
       expect(localStorage.getItem("tus::whatever::1")).not.toBeNull();
+    });
+
+    it("refuses - and prunes - a stored resume URL pointing at another origin (the bearer never leaves)", async () => {
+      const fetchMock = vi.fn();
+      localStorage.setItem(
+        "tus::evil::1",
+        JSON.stringify({ size: 10, metadata: { filename: "x.bin" }, uploadUrl: "https://attacker.example/api/upload/x" }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      await restorePausedUploads();
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(getJobsSnapshot()).toHaveLength(0);
+      expect(localStorage.getItem("tus::evil::1")).toBeNull();
     });
 
     it("never throws on a malformed localStorage entry", async () => {
@@ -373,7 +393,7 @@ describe("uploads controller (E6 Wave 0/B/C)", () => {
       const fp = tusFingerprint(original);
       localStorage.setItem(
         `tus::${fp}::1`,
-        JSON.stringify({ size: 10, metadata: { filename: "a.bin" }, uploadUrl: "https://files.mosni.dev/api/upload/a" }),
+        JSON.stringify({ size: 10, metadata: { filename: "a.bin" }, uploadUrl: "http://localhost:3000/api/upload/a" }),
       );
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 200, ok: true, headers: new Headers({ "Upload-Offset": "5" }) }));
       await restorePausedUploads();
@@ -387,7 +407,7 @@ describe("uploads controller (E6 Wave 0/B/C)", () => {
       const fp = tusFingerprint(original);
       localStorage.setItem(
         `tus::${fp}::1`,
-        JSON.stringify({ size: 10, metadata: { filename: "a.bin" }, uploadUrl: "https://files.mosni.dev/api/upload/a" }),
+        JSON.stringify({ size: 10, metadata: { filename: "a.bin" }, uploadUrl: "http://localhost:3000/api/upload/a" }),
       );
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 200, ok: true, headers: new Headers({ "Upload-Offset": "5" }) }));
       await restorePausedUploads();
@@ -409,7 +429,7 @@ describe("uploads controller (E6 Wave 0/B/C)", () => {
   describe("online listener (Wave B2)", () => {
     it("resumes every resumable error job on `online`, and leaves queued/uploading/paused/done jobs alone", async () => {
       startBatch([file("resumable.txt"), file("dead.txt")], { destinationCollectionId: null, source: "drop" });
-      uploadInstances[0].url = "https://files.mosni.dev/api/upload/resumable";
+      uploadInstances[0].url = "http://localhost:3000/api/upload/resumable";
       fail(uploadInstances[0], "dropped");
       uploadInstances[1].url = null;
       fail(uploadInstances[1], "gave up before a url existed");

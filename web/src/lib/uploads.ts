@@ -40,6 +40,7 @@ type JobRecord = {
   fingerprint: string;
   uploadUrl: string | null; // the tus resource URL, once known - lets resumeUpload pick the right entry
   urlStorageKey: string | null; // the localStorage key backing a restored `paused` job, so it can be pruned
+  resume: boolean; // set by resumeUpload(): this job's next start must continue from the server's offset
 };
 
 const jobRecords = new Map<string, JobRecord>();
@@ -138,6 +139,13 @@ function onUploadSettledFreeSlot(): void {
 function beginUpload(jobId: string): void {
   const record = jobRecords.get(jobId);
   if (record === undefined || record.file === null) return;
+  // A resumed job holds a slot exactly like a fresh one; it just starts from the server's offset.
+  if (record.resume) {
+    record.resume = false;
+    activeCount++;
+    void resumeUploadAsync(jobId);
+    return;
+  }
   const file = record.file;
 
   publish(jobId, { status: "uploading", progress: 0, loaded: 0, total: file.size });
@@ -232,6 +240,7 @@ export function startBatch(files: File[], options: BatchOptions): string {
       fingerprint: computeFingerprint(file),
       uploadUrl: null,
       urlStorageKey: null,
+      resume: false,
     });
     publish(jobId, { status: "queued" });
     pendingQueue.push(jobId);
@@ -242,18 +251,29 @@ export function startBatch(files: File[], options: BatchOptions): string {
 }
 
 /** Continue an upload that failed or was restored as `paused`. `file` is required for a `paused` job (the
- *  page lost the File on unload) and ignored for a live `error` job - the module already holds that one. */
+ *  page lost the File on unload) and ignored for a live `error` job - the module already holds that one.
+ *
+ *  A resume takes a concurrency slot like any other upload: it goes through the SAME queue (C1), so a
+ *  20-file folder drop that all failed on one network blip does not restart 20 uploads at once the moment
+ *  the `online` event fires (B2 calls this for every resumable job). Found by the E6 review (042) - the
+ *  original resume path started immediately and never touched `activeCount`, so it was unbounded. */
 export function resumeUpload(jobId: string, file?: File): void {
-  void resumeUploadAsync(jobId, file);
-}
-
-async function resumeUploadAsync(jobId: string, file?: File): Promise<void> {
   const record = jobRecords.get(jobId);
   if (record === undefined) return;
-  const resumeFile = record.file ?? file;
-  if (resumeFile === undefined || resumeFile === null) return; // nothing to resume with yet
+  if (file !== undefined && record.file === null) record.file = file;
+  if (record.file === null) return; // nothing to resume with yet
+  if (pendingQueue.includes(jobId) || liveUploads.has(jobId)) return; // already queued or running
 
-  if (record.file === null) record.file = resumeFile;
+  record.resume = true;
+  publish(jobId, { status: "queued" });
+  pendingQueue.push(jobId);
+  runQueue();
+}
+
+async function resumeUploadAsync(jobId: string): Promise<void> {
+  const record = jobRecords.get(jobId);
+  if (record === undefined || record.file === null) return;
+  const resumeFile = record.file;
 
   publish(jobId, { status: "uploading", progress: 0, loaded: 0, total: resumeFile.size });
 
@@ -264,6 +284,7 @@ async function resumeUploadAsync(jobId: string, file?: File): Promise<void> {
     onSuccess: (payload) => {
       liveUploads.delete(jobId);
       if (record.urlStorageKey !== null) window.localStorage.removeItem(record.urlStorageKey);
+      onUploadSettledFreeSlot();
       try {
         const { previewUrl, directUrl, id: fileId } = JSON.parse(payload.lastResponse.getBody()) as {
           previewUrl: string;
@@ -284,6 +305,7 @@ async function resumeUploadAsync(jobId: string, file?: File): Promise<void> {
       liveUploads.delete(jobId);
       record.uploadUrl = upload.url ?? record.uploadUrl;
       publish(jobId, { status: "error", message: error.message, resumable: upload.url !== null });
+      onUploadSettledFreeSlot();
     },
   });
 
@@ -303,6 +325,9 @@ export async function cancelUpload(jobId: string): Promise<void> {
   if (live !== undefined) {
     await live.abort(true).catch(() => {});
     liveUploads.delete(jobId);
+    // The aborted upload was holding a concurrency slot; without this the queue loses one permanently and
+    // stalls outright after UPLOAD_MAX_CONCURRENT cancellations.
+    onUploadSettledFreeSlot();
   }
   const record = jobRecords.get(jobId);
   if (record?.urlStorageKey !== null && record?.urlStorageKey !== undefined) {
@@ -332,6 +357,16 @@ function parseStoredUpload(raw: string | null): StoredTusUpload | null {
   }
 }
 
+// A stored resume URL is only usable if it addresses THIS origin's own tus endpoint - see the call site.
+function isOwnUploadUrl(candidate: string): boolean {
+  try {
+    const url = new URL(candidate, window.location.href);
+    return url.origin === window.location.origin && url.pathname.startsWith(`${TUS_ENDPOINT}/`);
+  } catch {
+    return false;
+  }
+}
+
 function fingerprintFromKey(key: string): string {
   // "tus::<fingerprint>::<random>" - the fingerprint itself is '-'-joined (§0.5), so the LAST "::" is
   // always the separator before the trailing random id, never part of the fingerprint.
@@ -356,6 +391,14 @@ export async function restorePausedUploads(): Promise<void> {
       keys.map(async (key) => {
         const stored = parseStoredUpload(window.localStorage.getItem(key));
         if (stored === null || typeof stored.uploadUrl !== "string" || stored.uploadUrl.length === 0) return;
+        // The HEAD below carries the viewer's bearer, and this URL comes out of localStorage - so it is
+        // only ever followed when it points back at this origin's own upload endpoint. Same-origin storage
+        // means writing a hostile entry already needs XSS, but "a stored string decides where we send the
+        // token" is not a sentence a review should let stand (E6 review, 042).
+        if (!isOwnUploadUrl(stored.uploadUrl)) {
+          window.localStorage.removeItem(key);
+          return;
+        }
 
         let response: Response;
         try {
@@ -386,6 +429,7 @@ export async function restorePausedUploads(): Promise<void> {
           fingerprint: fingerprintFromKey(key),
           uploadUrl: stored.uploadUrl ?? null,
           urlStorageKey: key,
+          resume: true,
         });
         publish(jobId, { status: "paused", loaded: Number.isFinite(loaded) ? loaded : 0, total });
       }),

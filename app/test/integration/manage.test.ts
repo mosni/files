@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { Redis } from "ioredis";
 
 vi.mock("../../src/auth/verify.ts", () => ({ verify: vi.fn() }));
 
@@ -22,7 +21,6 @@ const FILES_HOST = "files.mosni.dev";
 describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () => {
   let root: string;
   let app: FastifyInstance;
-  let redis: Redis;
 
   beforeAll(async () => {
     initDb({
@@ -36,15 +34,13 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
     root = await mkdtemp(path.join(os.tmpdir(), "manage-test-"));
     initFilesStorage(root);
 
-    redis = new Redis(process.env.REDIS_URL ?? "redis://redis:6379");
     app = Fastify({ logger: false });
-    await registerManageRoutes(app, makeTestConfig({ storageRoot: root }), redis);
+    await registerManageRoutes(app, makeTestConfig({ storageRoot: root }));
     await app.ready();
   }, 30_000);
 
   afterAll(async () => {
     await app.close();
-    await redis.quit();
     await closeDb();
     await rm(root, { recursive: true, force: true });
   }, 30_000);
@@ -146,6 +142,18 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       const res = await req("POST", "/api/collections", { token: "t", body: { name: `new-${randomUUID()}` } });
       expect(res.statusCode).toBe(201);
       expect(res.json()).toMatchObject({ parentId: "", ownerSub: "user:creator" });
+    });
+
+    // E6 A5 (D-175) / the plan's own Wave A test list, added by the review session (042): grouping has no
+    // link to show without this field, and a newly-created root collection inherits `unlisted` (D-105), so
+    // the shape is the readable `/f/<name>` one - never the token shape.
+    it("returns a previewUrl for the new collection (grouping's copyable link)", async () => {
+      asUser("user:linker");
+      const name = `linked-${randomUUID()}`;
+      const res = await req("POST", "/api/collections", { token: "t", body: { name } });
+      expect(res.statusCode).toBe(201);
+      const body = res.json() as { previewUrl?: string };
+      expect(body.previewUrl).toContain(`/f/${encodeURIComponent(name)}`);
     });
 
     it("409s on a sibling name collision", async () => {

@@ -425,7 +425,7 @@ const PAGES = [
       "is expected to fail in this sandbox (no live dl. origin) - a sandbox artifact, not a defect.",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
-      await p.locator('input[type="file"]').setInputFiles({
+      await p.locator('[role="button"] input[type="file"]').setInputFiles({
         name: `vis-${run}-drop.png`,
         mimeType: "image/png",
         buffer: PNG_1PX,
@@ -476,7 +476,7 @@ const PAGES = [
         if (route.request().method() === "PATCH") await new Promise((r) => setTimeout(r, 1500));
         await route.continue();
       });
-      await p.locator('input[type="file"]').setInputFiles(
+      await p.locator('[role="button"] input[type="file"]').setInputFiles(
         Array.from({ length: 5 }, (_, i) => ({
           name: `vis-${run}-concurrency-${i}.png`,
           mimeType: "image/png",
@@ -510,7 +510,7 @@ const PAGES = [
         }
         await route.continue();
       });
-      await p.locator('input[type="file"]').setInputFiles({
+      await p.locator('[role="button"] input[type="file"]').setInputFiles({
         name: `vis-${run}-pausable.bin`,
         mimeType: "application/octet-stream",
         buffer: PAUSABLE_BYTES,
@@ -540,7 +540,7 @@ const PAGES = [
         }
         await route.continue();
       });
-      await p.locator('input[type="file"]').setInputFiles({
+      await p.locator('[role="button"] input[type="file"]').setInputFiles({
         name: `vis-${run}-resumable-error.bin`,
         mimeType: "application/octet-stream",
         buffer: PAUSABLE_BYTES,
@@ -558,7 +558,7 @@ const PAGES = [
       "this state is reached only by choosing it, never automatically.",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
-      await p.locator('input[type="file"]').setInputFiles([
+      await p.locator('[role="button"] input[type="file"]').setInputFiles([
         { name: `vis-${run}-group-a.png`, mimeType: "image/png", buffer: PNG_1PX },
         { name: `vis-${run}-group-b.png`, mimeType: "image/png", buffer: PNG_1PX },
       ]);
@@ -790,16 +790,40 @@ try {
   }
 
   for (const vp of VIEWPORTS) {
-    const context = await browser.newContext(vp.options);
     for (const page of PAGES) {
+      // ⚠ A FRESH CONTEXT PER STATE (E6 review, session 042). One shared context let each state inherit the
+      // previous one's client storage, and E6 made that load-bearing: a `paused` upload is republished from
+      // localStorage on EVERY page load, so one state's leftover paused job floated over the next state's
+      // file browser and made its row menus unclickable - the run aborted on a click that a real user in
+      // that same situation genuinely cannot make either (see UploadStack's dismiss, now pruning the entry).
+      // It also removes the sdk.js memory-cache hazard: a cached copy bypasses a later page's route handler.
+      const context = await browser.newContext(vp.options);
+      // ⚠ Pacing, and it is not optional on a full run (E6 review, session 042). Every state loads the SPA
+      // bundle, its assets and a few API calls from ONE source IP, and server.ts's global limiter is
+      // 100/min - so a full walk starves itself partway through and the run aborts on a state whose page
+      // never mounted (measured: the SPA's own main-*.js came back 429, so `landing-completed-upload` had
+      // no drop zone to interact with). That is `E5.1-E2E-RATE-LIMIT` reaching this script; D-180's
+      // namespaces deliberately did not raise the global cap. VC_PACE_MS spreads the walk out under it.
+      // Default 6s: a full desktop+mobile pass takes ~4 extra minutes and completes.
+      // ⚠ The primary picker is addressed through the drop TARGET (`[role="button"] input[type="file"]`),
+      // never a bare input selector: E6 put a second, folder-only input in the same panel AND a third,
+      // hidden one inside every `paused` job's stack item (the Resume picker), so the page can legitimately
+      // hold three file inputs at once - which is what aborted this run twice (session 042).
+      const paceMs = Number(process.env.VC_PACE_MS ?? 6000);
+      if (paceMs > 0) await new Promise((r) => setTimeout(r, paceMs));
       const p = await context.newPage();
-      if (page.init) {
-        // The real auth SDK IS reachable from this container, and its last act is
-        // `Object.assign(window.mosni ?? {}, mosni)` - which merges the live (signed-out) methods over
-        // the stub and silently defeats it. Blocking the script is what makes the stub authoritative.
-        await p.route("**/sdk.js", (route) => route.abort());
-        await p.addInitScript(page.init);
-      }
+      // The real auth SDK IS reachable from this container, and its last act is
+      // `Object.assign(window.mosni ?? {}, mosni)` - which merges the live (signed-out) methods over the
+      // stub and silently defeats it. Blocking the script is what makes the stub authoritative.
+      //
+      // ⚠ EVERY page, not just the ones with their own `init` (E6 review, session 042). Applying it only
+      // to `init` states left the anonymous states loading sdk.js for real, and once Chromium has it in
+      // this CONTEXT's memory cache a later page's route handler never sees the request at all - so the
+      // real SDK won on the signed-in states that come after them, the drop zone rendered its login panel
+      // instead, and `landing-completed-upload` aborted the whole run on a locator that could not match.
+      // States without an explicit stub get `signedOut`, which is what they were already representing.
+      await p.route("**/sdk.js", (route) => route.abort());
+      await p.addInitScript(page.init ?? signedOut);
       const target = `${ORIGIN}${page.url}`;
       let title = "(navigation failed)";
       let status = null;
@@ -877,8 +901,8 @@ try {
           `  [title: ${title}]${overflows ? "  ** HORIZONTAL OVERFLOW **" : ""}`,
       );
       await p.close();
+      await context.close();
     }
-    await context.close();
   }
 } finally {
   await browser.close();

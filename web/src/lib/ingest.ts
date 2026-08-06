@@ -29,13 +29,36 @@ export function nameForPastedBlob(blob: Blob, now: Date): string {
   return `pasted-${timestampFor(now)}.${ext}`;
 }
 
+// ⚠ Measured in real Chromium, not assumed (E6 review, session 042): pasting a SCREENSHOT populates
+// `clipboardData.files` too, with a File the browser names `image.png` - it is not confined to
+// `clipboardData.items`. So "is it in .files?" cannot tell a screenshot from a file copied in the file
+// manager, and returning `.files` untouched (as this did) meant every pasted image uploaded as
+// `image.png`, never D-177's `pasted-<timestamp>.png` - with a second paste colliding into `image(2).png`.
+// The unit tests missed it because their synthetic DataTransfer left `.files` empty, which is not what a
+// browser produces (verification-concept.md's H5 lesson: a fixture that is not a real one proves nothing).
+//
+// What DOES distinguish them is the name: a clipboard bitmap carries no filename, so the browser
+// synthesises a fixed placeholder (`image.png` in Chromium and Firefox), while a copied file carries its
+// own real name. Anything matching that placeholder shape is treated as a pasted bitmap and timestamped.
+// The cost of a wrong guess is small and one-directional: a genuine file that happens to be named
+// `image.png` gets the timestamped name D-177 asks for anyway.
+const PLACEHOLDER_IMAGE_NAME = /^image\.(png|jpe?g|webp|gif)$/i;
+
+function isPastedBitmap(file: File): boolean {
+  return file.type.startsWith("image/") && (file.name === "" || PLACEHOLDER_IMAGE_NAME.test(file.name));
+}
+
 /** Extract uploadable files from a paste event's DataTransfer: a real file copied from the filesystem
  *  wins first (kept under its own name), then an image blob (renamed via nameForPastedBlob), then plain
  *  text - and ONLY plain text, only when the clipboard carried neither a file nor an image, as
  *  `pasted-<timestamp>.txt`. Whitespace-only text produces nothing. */
 export function filesFromClipboard(data: DataTransfer, now: Date): File[] {
   const realFiles = Array.from(data.files);
-  if (realFiles.length > 0) return realFiles;
+  if (realFiles.length > 0) {
+    return realFiles.map((file) =>
+      isPastedBitmap(file) ? new File([file], nameForPastedBlob(file, now), { type: file.type }) : file,
+    );
+  }
 
   const items = Array.from(data.items ?? []);
   const imageItem = items.find((item) => item.kind === "file" && item.type.startsWith("image/"));

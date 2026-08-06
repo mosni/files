@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import { Redis } from "ioredis";
 
 vi.mock("../../src/auth/verify.ts", () => ({ verify: vi.fn() }));
 
@@ -25,7 +24,6 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
   let root: string;
   let app: FastifyInstance;
   let config: Config;
-  let redis: Redis;
 
   beforeAll(async () => {
     initDb({
@@ -40,15 +38,13 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
     initFilesStorage(root);
 
     config = makeTestConfig({ storageRoot: root, deliverySigningSecret: "delivery-test-secret" });
-    redis = new Redis(process.env.REDIS_URL ?? "redis://redis:6379");
     app = Fastify({ logger: false });
-    await registerDeliveryRoutes(app, config, redis);
+    await registerDeliveryRoutes(app, config);
     await app.ready();
   }, 30_000);
 
   afterAll(async () => {
     await app.close();
-    await redis.quit();
     await closeDb();
     await rm(root, { recursive: true, force: true });
   }, 30_000);

@@ -156,6 +156,8 @@ export function DropZone({
   // the primary input, or the primary click-to-choose would turn folder-only and break D-1's path.
   const folderInputRef = useRef<HTMLInputElement>(null);
   const [dragDepth, setDragDepth] = useState(0); // >0 ⇒ a file drag is somewhere over the page
+  // Always holds the CURRENT whole-page drop behaviour, for the mount-once window listener below to call.
+  const windowDropRef = useRef<(dataTransfer: DataTransfer) => void>(() => {});
   const [zoneHover, setZoneHover] = useState(false); // a file drag is over the drop zone itself
 
   // G1/G2 (D-42, D-86): the destination picker. Collapsed by default and never fetched until opened -
@@ -188,7 +190,12 @@ export function DropZone({
       setDragDepth(0);
       if (!hasFiles(e) || !e.dataTransfer) return;
       e.preventDefault();
-      void ingestDropped(e.dataTransfer, "drop");
+      // Through a ref, not the closure: this effect is mounted once (`[]`), so calling ingestDropped
+      // directly would freeze BOTH the sign-in gate and the destination picker's values at their
+      // first-render state - a whole-page drop would ingest while signed out and always ignore a chosen
+      // destination. Found by the E6 review (042); the zone's own onDrop never had this problem because
+      // it is re-created on every render.
+      windowDropRef.current(e.dataTransfer);
     };
     window.addEventListener("dragenter", onEnter);
     window.addEventListener("dragleave", onLeave);
@@ -201,6 +208,16 @@ export function DropZone({
       window.removeEventListener("drop", onWindowDrop);
     };
   }, []);
+
+  // Refreshed on every render, so the window-level drop listener always sees the live sign-in state and
+  // the live destination picker. The eligibility gate mirrors the paste listener's (D2) - a drop from a
+  // visitor who cannot upload must do nothing, not start an upload that 401s into the job stack.
+  useEffect(() => {
+    windowDropRef.current = (dataTransfer: DataTransfer) => {
+      if (user === null || !can(user, "files:write")) return;
+      void ingestDropped(dataTransfer, "drop");
+    };
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -221,12 +238,21 @@ export function DropZone({
 
   // E6 E4: `webkitdirectory` (and `multiple`, so every file inside the chosen folder comes back at once)
   // are set imperatively - `webkitdirectory` is a real DOM property but not a standard JSX attribute.
-  useEffect(() => {
-    if (folderInputRef.current) {
-      folderInputRef.current.webkitdirectory = true;
-      folderInputRef.current.multiple = true;
+  //
+  // ⚠ A CALLBACK REF, not a mount effect (E6 review, session 042). As a `useEffect(…, [])` this never ran
+  // against the real input at all: the component returns a spinner while `authReady` is false and a
+  // login-only panel while signed out, so at first commit - the only time a `[]` effect fires - the input
+  // does not exist yet and the ref is null. The folder picker therefore shipped as an ordinary
+  // single-file picker with no `webkitdirectory` and no `multiple`; found by running the Wave I3 e2e test
+  // ("Non-multiple file input can only accept single file"), invisible to every jsdom test. A callback ref
+  // runs whenever the element actually mounts, however late that is.
+  const attachFolderInput = (element: HTMLInputElement | null) => {
+    folderInputRef.current = element;
+    if (element !== null) {
+      element.webkitdirectory = true;
+      element.multiple = true;
     }
-  }, []);
+  };
 
   // E6 D2: a window-level paste listener. Registered per user change (mirroring the collections-loading
   // effect below) so the gate below always reads the CURRENT sign-in state rather than a stale closure.
@@ -500,31 +526,32 @@ export function DropZone({
               event.target.value = "";
             }}
           />
-          {/* E6 E4: a SECOND picker, folder-only (`webkitdirectory`, set imperatively below since it is
-              not a standard JSX/DOM attribute) - deliberately never on the primary input above, which
-              would turn click-to-choose folder-only and break D-1's three-action path. */}
-          <div style={{ marginTop: "0.5rem" }}>
-            <button
-              type="button"
-              className="btn-tertiary"
-              onClick={(event) => {
-                event.stopPropagation();
-                folderInputRef.current?.click();
-              }}
-            >
-              or choose a folder
-            </button>
-            <input
-              ref={folderInputRef}
-              type="file"
-              style={{ display: "none" }}
-              onClick={(event) => event.stopPropagation()}
-              onChange={(event) => {
-                void handleFolderInputFiles(event.target.files);
-                event.target.value = "";
-              }}
-            />
-          </div>
+        </div>
+
+        {/* E6 E4: a SECOND picker, folder-only (`webkitdirectory`, set imperatively above since it is not
+            a standard JSX/DOM attribute) - deliberately never on the primary input, which would turn
+            click-to-choose folder-only and break D-1's three-action path.
+            ⚠ It sits OUTSIDE the drop target, not inside it (E6 review, session 042). Nested inside, it
+            was a real <button> inside an element with role="button" - invalid ARIA, and it appended its
+            own label to the drop zone's accessible name ("Drop files here, or click to choose or choose
+            a folder"), which made every by-role query for either control ambiguous. */}
+        <div>
+          <button
+            type="button"
+            className="btn-tertiary"
+            onClick={() => folderInputRef.current?.click()}
+          >
+            or choose a folder
+          </button>
+          <input
+            ref={attachFolderInput}
+            type="file"
+            style={{ display: "none" }}
+            onChange={(event) => {
+              void handleFolderInputFiles(event.target.files);
+              event.target.value = "";
+            }}
+          />
         </div>
 
         {/* G1 (D-42/D-86, amended by D-114): expanded rather than behind a disclosure - D3's check is

@@ -48,6 +48,30 @@ describe("filesFromClipboard", () => {
     expect(result[0].name).toBe("report.pdf");
   });
 
+  // ⚠ The fixture that matters, added by the E6 review session (042) after measuring a real Chromium
+  // paste: a pasted SCREENSHOT arrives in `clipboardData.files` too, as a File the browser names
+  // `image.png`. Every case above leaves `files` empty, which is not what a browser produces - so the
+  // suite was green while every pasted image uploaded as `image.png` instead of D-177's timestamped name,
+  // and a second paste collided into `image(2).png`. See ingest.ts's own note.
+  it("a pasted screenshot arriving in .files (the real Chromium shape) still gets the D-177 name", () => {
+    const pasted = new File(["png bytes"], "image.png", { type: "image/png" });
+    const data = dataTransfer({ files: [pasted] as unknown as FileList });
+
+    const result = filesFromClipboard(data, FIXED_NOW);
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBe("pasted-2026-08-05-143052.png");
+    expect(result[0].type).toBe("image/png");
+  });
+
+  it("a real image file copied from the filesystem keeps its own name, screenshot rule notwithstanding", () => {
+    const photo = new File(["jpg bytes"], "holiday.jpg", { type: "image/jpeg" });
+    const data = dataTransfer({ files: [photo] as unknown as FileList });
+
+    const result = filesFromClipboard(data, FIXED_NOW);
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBe("holiday.jpg");
+  });
+
   it("an image blob wins over plain text when there is no real file", () => {
     const blob = new File(["img"], "whatever.png", { type: "image/png" });
     const item = { kind: "file", type: "image/png", getAsFile: () => blob } as unknown as DataTransferItem;
