@@ -402,7 +402,9 @@ describe("share-target handoff (E6 Wave G5)", () => {
     expect(response.status).toBe(303);
   });
 
-  it("sweeps an entry older than 5 minutes, triggered as a side effect of the next POST", async () => {
+  // 30 minutes since 2026-08-06: a shared file now waits for the viewer to be signed in, and on a cold
+  // PWA start that can include a full sign-in round-trip, which a 5-minute sweep outlived. See sw.ts.
+  it("sweeps an entry older than the TTL, triggered as a side effect of the next POST", async () => {
     vi.useFakeTimers();
     try {
       const firstRespond = dispatchSharePost([{ name: "old.txt", type: "text/plain", content: "x" }]);
@@ -410,7 +412,7 @@ describe("share-target handoff (E6 Wave G5)", () => {
       const firstResponse = await firstRespond.mock.calls[0][0];
       const oldId = new URL(firstResponse.headers.get("Location")!).searchParams.get("share-target")!;
 
-      await vi.advanceTimersByTimeAsync(6 * 60 * 1000); // 6 minutes later - past the 5-minute TTL
+      await vi.advanceTimersByTimeAsync(31 * 60 * 1000); // past SHARE_TARGET_TTL_MS
 
       const secondRespond = dispatchSharePost([{ name: "new.txt", type: "text/plain", content: "y" }]);
       await vi.advanceTimersByTimeAsync(0); // lets both the redirect AND the fire-and-forget sweep settle

@@ -4,7 +4,8 @@ import { DropZone } from "./components/DropZone.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { UploadStack } from "./components/UploadStack.tsx";
 import { PreviewPage } from "./pages/Preview.tsx";
-import { restorePausedUploads, startBatch } from "./lib/uploads.ts";
+import { restorePausedUploads } from "./lib/uploads.ts";
+import { initShareTarget } from "./lib/shareTarget.ts";
 
 // Moved out of index.html (round 4, live-testing: Hannah found dev-rationale comments shipping verbatim
 // in the served page source - a .html entry file's comments survive `vite build` untouched, unlike a
@@ -55,29 +56,11 @@ if ("serviceWorker" in navigator) {
 // the function itself (§0.5's "never throw into main.tsx's render path").
 void restorePausedUploads();
 
-// E6 Wave G6: the Android share-target handoff. The worker's own fetch handler (sw.ts) redirects a shared
-// file's POST to "/?share-target=<id>" - claim the files it stashed in IndexedDB, start uploading them,
-// then drop the query parameter so a reload of this exact URL does not re-claim (the worker deletes the
-// entry on read, so a second claim would get nothing anyway, but the stale query string would still be a
-// lie about what just happened).
-const shareTargetId = new URLSearchParams(location.search).get("share-target");
-if (shareTargetId !== null) {
-  if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
-    const controller = navigator.serviceWorker.controller;
-    const onShareTargetMessage = (event: MessageEvent) => {
-      const data = event.data as { type?: unknown; id?: unknown; files?: unknown } | null;
-      if (data === null || data.type !== "share-target-files" || data.id !== shareTargetId) return;
-      navigator.serviceWorker.removeEventListener("message", onShareTargetMessage);
-      const files = Array.isArray(data.files) ? data.files.filter((f): f is File => f instanceof File) : [];
-      if (files.length > 0) {
-        startBatch(files, { destinationCollectionId: null, source: "share-target" });
-      }
-    };
-    navigator.serviceWorker.addEventListener("message", onShareTargetMessage);
-    controller.postMessage({ type: "share-target-claim", id: shareTargetId });
-  }
-  history.replaceState(null, "", location.pathname + location.hash);
-}
+// E6 Wave G6 (D-178): the Android share-target handoff. All of it lives in web/src/lib/shareTarget.ts -
+// it has to WAIT for the auth SDK to settle before claiming anything, and that is too much logic (and too
+// easy to get wrong, as the first version proved) to sit inline here. Returns immediately unless this load
+// carries a `?share-target=<id>`.
+initShareTarget();
 
 // F1-F5: the drop zone was the whole landing page (D-64); E4 adds the browser BELOW it (D-1, D-93) - the
 // order here is load-bearing, never swap it, and nothing may render between the two.

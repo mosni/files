@@ -77,7 +77,11 @@ function isShareTargetClaimMessage(data: unknown): data is { type: "share-target
 
 const SHARE_TARGET_DB = "files-share-target";
 const SHARE_TARGET_STORE = "pending";
-const SHARE_TARGET_TTL_MS = 5 * 60 * 1000;
+// 30 minutes, not the 5 the plan first specified (raised 2026-08-06). A shared file now waits in here
+// until someone who can upload is present - and on a cold PWA start that can mean a full sign-in
+// round-trip (a top-level redirect to auth.mosni.dev and back), which a 5-minute sweep can easily outlive.
+// Still a transient hand-off, still deleted on read: D-133's "minimal and additive" is untouched.
+const SHARE_TARGET_TTL_MS = 30 * 60 * 1000;
 
 type ShareTargetEntry = { id: string; files: File[]; storedAt: number };
 
