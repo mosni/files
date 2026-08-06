@@ -61,6 +61,13 @@ describe("languageFor() (E5 Wave E2)", () => {
     expect(languageFor("notes.unknownext")).toBeNull();
   });
 
+  // Live-testing addition (2026-08-06): .md joined INLINE_ALLOWLIST directly (mime.ts), so a plain
+  // "README.md" now reaches this function's direct-extension branch on its own - the `readme.md.txt`
+  // double-extension case above still works too, but is no longer the only way to get highlighting.
+  it("a plain .md file resolves directly, with no .txt suffix needed", () => {
+    expect(languageFor("README.md")).toBe("markdown");
+  });
+
   it("adversarial names never throw and fail to null", () => {
     expect(() => languageFor("")).not.toThrow();
     expect(languageFor("")).toBeNull();

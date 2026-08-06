@@ -45,6 +45,18 @@ export async function registerDeliveryRoutes(app: FastifyInstance, config: Confi
   const dlHost = new URL(config.dlOrigin).hostname;
   const routeOpts = { constraints: { host: dlHost }, config: { rateLimit: deliveryRateLimit } };
 
+  // Live-testing addition (2026-08-06): dl.'s "/" has no file to resolve (deliverByPath("") 404s, since
+  // safeSegments("") never names a row) - a visitor who lands here directly (a bookmark, a stray click,
+  // curiosity about the bare domain) got a bare 404 with nothing on it. A static exact-path route ranks
+  // above the `/*` wildcard below regardless of registration order (find-my-way's own precedence, already
+  // relied on by /s/:id and /t/:token per this file's header comment), so this only ever matches the exact
+  // root - it can never shadow a real file whose display name happens to be empty (not a legal name;
+  // safeSegment() rejects it). No file/token surface is added to dl. by this (D-4/D-33 still hold) - it is
+  // a redirect to the other origin, nothing served from here.
+  app.get("/", routeOpts, async (_request, reply) => {
+    reply.redirect(config.appOrigin, 302);
+  });
+
   app.get("/s/:id", routeOpts, async (request, reply) => {
     const { id } = request.params as { id: string };
     await deliverSigned(request, reply, config, id, request.query as { exp?: string; sig?: string });

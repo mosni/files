@@ -20,6 +20,13 @@ export const INLINE_ALLOWLIST = [
   "webp",
   "pdf",
   "txt",
+  // Live-testing addition (2026-08-06): ".md files do not render as a text field" - `languageFor()`
+  // (textPreview.ts) already had a `md: "markdown"` Prism mapping sitting dead, reachable only via the
+  // `<name>.md.txt` double-extension trick that same file's own comment documents. Served as literal
+  // `text/plain` below, exactly like `.txt` - this is NOT markdown rendering (no HTML is ever generated
+  // from it), so it carries none of security invariant 3's markup-execution risk; `nosniff` plus a
+  // `text/plain` Content-Type means a browser displays the raw source, never interprets it.
+  "md",
 ] as const;
 
 // The final extension only, matching Node's own path.extname() convention: a purely leading-dot name
@@ -59,6 +66,8 @@ const MIME_TYPES: Record<string, string> = {
   webp: "image/webp",
   pdf: "application/pdf",
   txt: "text/plain",
+  // Deliberately `text/plain`, never `text/markdown` - see the INLINE_ALLOWLIST entry above for why.
+  md: "text/plain",
 };
 
 export function mimeTypeFor(filename: string): string {
