@@ -117,6 +117,16 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
   const get = (url: string, headers: Record<string, string> = {}) =>
     app.inject({ method: "GET", url, headers: { host: DL_HOST, ...headers } });
 
+  // Live-testing addition (2026-08-06): dl.'s bare "/" used to 404 (deliverByPath("") never resolves a
+  // row) - a visitor landing there directly got a dead end instead of somewhere useful.
+  describe("root (\"/\") - redirects to the app, never delivers or 404s", () => {
+    it("302s to files.mosni.dev", async () => {
+      const res = await get("/");
+      expect(res.statusCode).toBe(302);
+      expect(res.headers.location).toBe(config.appOrigin);
+    });
+  });
+
   describe("plain-path delivery (/<collection>/.../<name>)", () => {
     it("serves public and unlisted via X-Accel-Redirect with an empty body and the security headers", async () => {
       for (const protection of ["public", "unlisted"] as const) {
@@ -133,14 +143,15 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
     it("D-90: sets Content-Type from the DISPLAY name, not the on-disk name", async () => {
       const { collectionName } = await seed({ name: "report.txt", protection: "public" });
       // Rename only the DB row (a pure UPDATE, D-82) - the disk name still ends in the OLD extension.
+      // .bin is deliberately NOT on the inline allowlist (unlike .md, which joined it 2026-08-06) - it
+      // downloads, but Content-Type must still reflect the CURRENT (renamed) display name, not the
+      // pinned-forever disk name's original .txt extension.
       const renamed = await getPool().query("SELECT id FROM files WHERE name = ?", ["report.txt"]);
       const fileId = (renamed[0] as { id: string }[])[0]!.id;
-      await getPool().query("UPDATE files SET name = ? WHERE id = ?", ["report.md", fileId]);
+      await getPool().query("UPDATE files SET name = ? WHERE id = ?", ["report.bin", fileId]);
 
-      const res = await get(`/${collectionName}/report.md`);
+      const res = await get(`/${collectionName}/report.bin`);
       expect(res.statusCode).toBe(200);
-      // .md is not on the inline allowlist, so it downloads - but Content-Type must still reflect the
-      // CURRENT (renamed) display name, not the pinned-forever disk name's original .txt extension.
       expect(res.headers["content-type"]).not.toContain("text/plain");
     });
 

@@ -236,6 +236,27 @@ describe("stripInPlace() (D-60/D-143)", () => {
     await expect(stat(tempPath)).rejects.toThrow();
   });
 
+  it("leaves an audio-only file untouched - out of scope, not a video (D-60's corrected scope)", async () => {
+    // Found live (2026-08-06): a bare `hasMediaStream` check treated ANY audio stream as "video", and an
+    // mp3's ID3 tags trip hasVideoMetadata() almost every time - so this file hit stripVideo(), found no
+    // muxer for the "mp3" family (muxerForProbedFormat only knows mp4/mov and matroska/webm), and the
+    // WHOLE UPLOAD was rejected with a 422, on a file this invariant was never scoped to cover.
+    const mp3Path = path.join(dir, "song.mp3");
+    await execFileAsync("ffmpeg", [
+      "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+      "-metadata", "title=secret-not-actually-a-gap", "-c:a", "libmp3lame", mp3Path,
+    ]);
+    const probeBefore = await ffprobe(mp3Path);
+    expect(probeBefore.format.tags.title).toBe("secret-not-actually-a-gap"); // has metadata a video WOULD strip
+    const originalBytes = await readFile(mp3Path);
+
+    const result = await stripInPlace(mp3Path);
+    expect(result).toBe(false); // out of scope, not "detected but unstrippable" - never rejects
+
+    const after = await readFile(mp3Path);
+    expect(after).toEqual(originalBytes);
+  });
+
   it("returns false without touching disk for a non-media file (pdf, txt) - out of scope, not a gap (D-143)", async () => {
     const txtPath = path.join(dir, "notes.txt");
     await writeFile(txtPath, "hello");

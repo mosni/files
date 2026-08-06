@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { contentDisposition, INLINE_ALLOWLIST, isInlineAllowed, mimeTypeFor } from "../../src/lib/mime.ts";
 
 describe("INLINE_ALLOWLIST", () => {
-  it("is exactly the twelve documented types (D-144 widened it with mov/m4v/mkv)", () => {
+  it("is exactly the thirteen documented types (D-144 widened it with mov/m4v/mkv; live-testing added md)", () => {
     expect([...INLINE_ALLOWLIST].sort()).toEqual(
-      ["gif", "jpeg", "jpg", "m4v", "mkv", "mov", "mp4", "pdf", "png", "txt", "webm", "webp"].sort(),
+      ["gif", "jpeg", "jpg", "m4v", "md", "mkv", "mov", "mp4", "pdf", "png", "txt", "webm", "webp"].sort(),
     );
   });
 });
@@ -66,6 +66,7 @@ describe("mimeTypeFor() (D-74)", () => {
     ["webp", "image/webp"],
     ["pdf", "application/pdf"],
     ["txt", "text/plain"],
+    ["md", "text/plain"],
   ])("maps .%s to %s", (ext, mime) => {
     expect(mimeTypeFor(`file.${ext}`)).toBe(mime);
   });

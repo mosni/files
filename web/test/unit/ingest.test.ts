@@ -102,6 +102,24 @@ describe("filesFromClipboard", () => {
     expect(filesFromClipboard(data, FIXED_NOW)).toEqual([]);
   });
 
+  // Live-testing addition (2026-08-06): "I copied 5 files from windows explorer and it only uploaded one
+  // when I hit ctrl+v". This pure function already maps over the WHOLE of `data.files`, not just its
+  // first entry - proven here so this module is ruled out as the cause. Not reproducible from this sandbox
+  // (there is no way to drive a real OS multi-file clipboard paste here); the two remaining live
+  // candidates are the browser/OS layer itself (Chromium's `clipboardData.files` for a multi-file OS copy
+  // is not something this sandbox can exercise) and UPLOAD_MAX_CONCURRENT capping active uploads to 3
+  // (uploadConfig.ts) - the other files land as `queued` jobs in the stack rather than starting
+  // immediately, which could read as "only one uploaded" without watching the stack. Filed for a real
+  // Windows+Chromium repro rather than guessed at further.
+  it("a multi-file OS paste (5 files copied in Windows Explorer) returns all five, not just the first", () => {
+    const files = Array.from({ length: 5 }, (_, i) => new File([`bytes-${i}`], `photo-${i}.jpg`, { type: "image/jpeg" }));
+    const data = dataTransfer({ files: files as unknown as FileList });
+
+    const result = filesFromClipboard(data, FIXED_NOW);
+    expect(result).toHaveLength(5);
+    expect(result.map((f) => f.name)).toEqual(["photo-0.jpg", "photo-1.jpg", "photo-2.jpg", "photo-3.jpg", "photo-4.jpg"]);
+  });
+
   it("an unreadable image item (getAsFile returns null) produces nothing rather than throwing", () => {
     const item = { kind: "file", type: "image/png", getAsFile: () => null } as unknown as DataTransferItem;
     const data = dataTransfer({ items: [item] as unknown as DataTransferItemList });

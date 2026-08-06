@@ -12,6 +12,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import sharp from "sharp";
 import { mediaKindByExtension } from "../lib/media.ts";
+import { mimeTypeFor } from "../lib/mime.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -28,15 +29,6 @@ const EMPTY_PROBE: MediaProbe = {
   durationSeconds: null,
   textPreview: null,
 };
-
-// Mirrors mime.ts's/media.ts's private finalExtension() exactly - the final extension only, matching
-// Node's own path.extname() convention.
-function finalExtension(filename: string): string | null {
-  const base = filename.replace(/^\.+/, "");
-  const lastDot = base.lastIndexOf(".");
-  if (lastDot < 0) return null;
-  return base.slice(lastDot + 1).toLowerCase();
-}
 
 async function probeImage(absolutePath: string): Promise<MediaProbe> {
   // animated: true is mandatory on read (same reason as strip.ts): without it, sharp reports `height` as
@@ -110,7 +102,11 @@ export async function probeMedia(absolutePath: string): Promise<MediaProbe> {
     const kind = mediaKindByExtension(filename);
     if (kind === "image") return await probeImage(absolutePath);
     if (kind === "video") return await probeVideo(absolutePath);
-    if (finalExtension(filename) === "txt") return await probeText(absolutePath);
+    // Single source of truth with mime.ts/previewContext.ts's own "text" gate (live-testing addition,
+    // 2026-08-06) - a plain-text-mapped extension gets an ingest snippet regardless of which one it is,
+    // rather than a second hardcoded list that ".md" (or any future addition) would need remembering to
+    // update here too.
+    if (mimeTypeFor(filename) === "text/plain") return await probeText(absolutePath);
     return { ...EMPTY_PROBE };
   } catch {
     // Corrupt file, sharp refusing the format, ffprobe absent, etc. - a probe failure must never fail an

@@ -79,10 +79,17 @@ async function classify(absolutePath: string): Promise<Classification> {
   }
   try {
     const probe = await runFfprobe(absolutePath);
-    const hasMediaStream = (probe.streams ?? []).some(
-      (stream) => stream.codec_type === "video" || stream.codec_type === "audio",
-    );
-    if (hasMediaStream) return { kind: "video", probe };
+    // D-60's corrected scope (session 031, Hannah): "specifically exif data of photos and videos" - an
+    // audio-only file (mp3/wav/flac/ogg/m4a...) is neither, so it must classify as "unknown" (out of
+    // scope, same bucket as pdf/docx), never "video". Before this fix a lone AUDIO stream was enough to
+    // call it "video" - and since none of those containers is in muxerForProbedFormat()'s mp4/mov or
+    // matroska/webm families below, EVERY audio upload that ffprobe could identify at all (virtually all
+    // of them, and virtually all carry ID3/Vorbis comment tags that trip hasVideoMetadata()) hit the
+    // fail-closed "no known muxer" branch and rejected the whole upload with a 422 - on a file that was
+    // never in scope for this invariant to begin with (found live: "tus: ... 422 ... could not verify the
+    // upload is safe to store" on an ordinary audio-file upload).
+    const hasVideoStream = (probe.streams ?? []).some((stream) => stream.codec_type === "video");
+    if (hasVideoStream) return { kind: "video", probe };
   } catch {
     // Not a container ffprobe can identify at all.
   }

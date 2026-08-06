@@ -50,12 +50,11 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   sql: "sql",
 };
 
-// Only `.txt` ever reaches PreviewCard's `kind === "text"` branch (mime.ts's INLINE_ALLOWLIST has no other
-// text extension, and Wave E does not widen it - unlike Wave F0's deliberate video-container widening).
-// So a code file shared through this app is named `<name>.<real-extension>.txt` (renamed to clear the
-// inline allowlist while keeping the original extension visible) - the INNER extension is what carries
-// language information; "txt" itself never does. A plain "notes.txt" has no inner extension and correctly
-// returns null - Prism renders it unhighlighted, which IS correct for actual plain text.
+// `.txt` and `.md` reach PreviewCard's `kind === "text"` branch directly (mime.ts's INLINE_ALLOWLIST -
+// live-testing added `.md` 2026-08-06; before that this was `.txt` only). Anything else still needs the
+// `<name>.<real-extension>.txt` rename trick to clear the inline allowlist while keeping the original
+// extension visible for the INNER-extension branch below. A plain "notes.txt" has no inner extension and
+// correctly returns null - Prism renders it unhighlighted, which IS correct for actual plain text.
 export function languageFor(filename: string): string | null {
   const ext = finalExtension(filename);
   if (ext === null) return null;

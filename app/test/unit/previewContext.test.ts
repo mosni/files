@@ -76,6 +76,7 @@ describe("previewKindFor()", () => {
     ["clip.webm", "video"],
     ["doc.pdf", "pdf"],
     ["notes.txt", "text"],
+    ["README.md", "text"],
     ["archive.zip", "other"],
     ["README", "other"],
   ] as const)("classifies %s as %s", (filename, kind) => {

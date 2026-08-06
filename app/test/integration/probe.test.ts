@@ -77,6 +77,22 @@ describe("probeMedia() (D-74)", () => {
     });
   });
 
+  // Live-testing addition (2026-08-06): .md joined mime.ts's text/plain mapping, and probeMedia() now
+  // asks mimeTypeFor() rather than hardcoding "txt" - this proves the .md path actually gets a snippet
+  // too, not just that the mapping compiles.
+  it("reads a cleaned text preview from a .md file (live-testing addition)", async () => {
+    const mdPath = path.join(dir, "README.md");
+    await writeFile(mdPath, "# Title\n\nSome  body   text.");
+
+    const probe = await probeMedia(mdPath);
+    expect(probe).toEqual({
+      width: null,
+      height: null,
+      durationSeconds: null,
+      textPreview: "# Title Some body text.",
+    });
+  });
+
   it("truncates a long text preview to 400 characters", async () => {
     const txtPath = path.join(dir, "long.txt");
     await writeFile(txtPath, "x".repeat(1000));
