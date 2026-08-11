@@ -216,24 +216,58 @@ describe("stripInPlace() (D-60/D-143)", () => {
   it("on failure, cleans up the temp file, leaves the original untouched, and rejects", async () => {
     // A real container ffprobe correctly detects as VIDEO (it has a genuine video stream - classify()
     // must not reject this file as "unknown"), but whose probed format this module has no muxer mapping
-    // for (A6.2's deliberately small, explicit map only covers mp4/mov-family/webm/matroska - the two
-    // formats this epic actually cares about, D-143). This is a real, detectable-but-unstrippable file,
-    // exactly the case A6.4 requires to fail closed - not a fabricated corrupt-bytes case, which (correctly,
-    // under content-based classification) is no longer distinguishable from "not a photo or video at all".
-    const aviPath = path.join(dir, "legacy.avi");
+    // for. This is a real, detectable-but-unstrippable file, exactly the case A6.4 requires to fail closed
+    // - not a fabricated corrupt-bytes case, which (correctly, under content-based classification) is no
+    // longer distinguishable from "not a photo or video at all".
+    //
+    // This fixture used to be a `.avi`, which is no longer unstrippable: "avi" joined
+    // muxerForProbedFormat()'s map on 2026-08-06, precisely because rejecting an ordinary video file
+    // outright was a live defect (see the .avi test below). NUT is ffmpeg's own container, muxable in this
+    // build and reporting `format_name: "nut"` (measured), and is deliberately NOT in that map - so the
+    // fail-closed path still has a real fixture rather than being quietly untested.
+    const nutPath = path.join(dir, "legacy.nut");
     await execFileAsync("ffmpeg", [
-      "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=32x32:rate=5",
-      "-c:v", "mpeg4", "-f", "avi", aviPath,
+      "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=32x32:rate=25",
+      "-c:v", "mpeg4", "-metadata", "comment=secret", "-f", "nut", nutPath,
     ]);
-    const originalBytes = await readFile(aviPath);
+    const originalBytes = await readFile(nutPath);
 
-    await expect(stripInPlace(aviPath)).rejects.toThrow();
+    await expect(stripInPlace(nutPath)).rejects.toThrow();
 
-    const stillThere = await readFile(aviPath);
+    const stillThere = await readFile(nutPath);
     expect(stillThere).toEqual(originalBytes);
 
-    const tempPath = path.join(dir, ".legacy.avi.stripping");
+    const tempPath = path.join(dir, ".legacy.nut.stripping");
     await expect(stat(tempPath)).rejects.toThrow();
+  });
+
+  // Found live 2026-08-06: the muxer map knew only mp4/mov and matroska/webm, so an ordinary video in any
+  // other container was a "detectable video that cannot be stripped" and A6.4 fail-closed the ENTIRE
+  // upload with a 422. Five containers ffmpeg strips perfectly well were being rejected outright.
+  it.each([
+    ["avi", "mpeg4"],
+    ["asf", "msmpeg4v3"], // .wmv - ffprobe reports the container as "asf"
+    ["flv", "flv1"],
+    ["mpegts", "libx264"], // .ts
+    ["ogg", "libtheora"], // .ogv
+  ])("strips a real video in a .%s container instead of rejecting the upload", async (muxer, codec) => {
+    const videoPath = path.join(dir, `clip-${muxer}.bin`);
+    await execFileAsync("ffmpeg", [
+      "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=176x144:rate=25",
+      "-c:v", codec, "-metadata", "comment=secret-gps-location", "-f", muxer, videoPath,
+    ]);
+
+    // Not every container surfaces a comment tag the same way, and some carry it on a stream rather than
+    // the format - what matters is that stripInPlace SUCCEEDS rather than throwing, and that whatever
+    // metadata was there is gone afterwards.
+    const result = await stripInPlace(videoPath);
+    expect(typeof result).toBe("boolean"); // the assertion that matters: it did not throw
+
+    const probeAfter = await ffprobe(videoPath);
+    const tags = { ...(probeAfter.format.tags ?? {}) };
+    for (const key of Object.keys(tags)) {
+      expect(String(tags[key])).not.toContain("secret-gps-location");
+    }
   });
 
   it("leaves an audio-only file untouched - out of scope, not a video (D-60's corrected scope)", async () => {
@@ -255,6 +289,40 @@ describe("stripInPlace() (D-60/D-143)", () => {
 
     const after = await readFile(mp3Path);
     expect(after).toEqual(originalBytes);
+  });
+
+  // ⚠ THE case the live 422 report actually describes, and the one the first attempt at this fix MISSED.
+  // Requiring a `video` codec_type is not enough: ffprobe reports embedded COVER ART as a video stream
+  // (mjpeg, disposition.attached_pic=1), and most real music files have album art - so a "requires a video
+  // stream" check still classified them as video, still found no muxer for "mp3", and still 422'd the
+  // upload. Measured against real ffprobe, then reproduced end to end through stripInPlace() before the
+  // isRealVideoStream() fix. This test fails against that intermediate version, not just the original.
+  it("leaves an audio file WITH EMBEDDED COVER ART untouched - attached_pic is not a video", async () => {
+    const coverPath = path.join(dir, "cover-art.png");
+    await execFileAsync("ffmpeg", [
+      "-y", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=1", "-frames:v", "1", coverPath,
+    ]);
+    const bareMp3 = path.join(dir, "bare-for-art.mp3");
+    await execFileAsync("ffmpeg", [
+      "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:a", "libmp3lame", bareMp3,
+    ]);
+    const artMp3 = path.join(dir, "with-art.mp3");
+    await execFileAsync("ffmpeg", [
+      "-y", "-i", bareMp3, "-i", coverPath,
+      "-map", "0:a", "-map", "1:v", "-c:a", "copy", "-c:v", "copy",
+      "-disposition:v", "attached_pic", "-metadata", "title=secret", artMp3,
+    ]);
+
+    // The fixture really is the trap: ffprobe reports a video stream, and it really is only cover art.
+    const probeBefore = await ffprobe(artMp3);
+    const videoStream = probeBefore.streams.find((s) => s.codec_type === "video");
+    expect(videoStream).toBeDefined();
+    expect(videoStream!.disposition!.attached_pic).toBe(1);
+
+    const originalBytes = await readFile(artMp3);
+    const result = await stripInPlace(artMp3);
+    expect(result).toBe(false); // out of scope - must NOT throw, which is what produced the live 422
+    expect(await readFile(artMp3)).toEqual(originalBytes);
   });
 
   it("returns false without touching disk for a non-media file (pdf, txt) - out of scope, not a gap (D-143)", async () => {
@@ -288,7 +356,12 @@ describe("stripInPlace() (D-60/D-143)", () => {
 
 interface FfprobeOutput {
   format: { tags: Record<string, string> };
-  streams: { codec_name: string; bit_rate: string }[];
+  streams: {
+    codec_name: string;
+    codec_type?: string;
+    bit_rate: string;
+    disposition?: { attached_pic?: number };
+  }[];
 }
 
 async function ffprobe(filePath: string): Promise<FfprobeOutput> {

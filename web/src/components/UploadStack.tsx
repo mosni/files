@@ -250,23 +250,37 @@ function GroupingStackItem({ batchId, onDismiss }: { batchId: string; onDismiss:
       }
       const collection = (await collectionRes.json()) as { id: string; name: string; previewUrl?: string };
 
-      // §"Grouping must never lose a file" - a partial failure below leaves every successful move in
-      // place and reports how many moved; nothing here rolls a prior success back.
-      let moved = 0;
-      for (const job of doneJobs) {
-        if (job.state.status !== "done") continue;
-        const moveRes = await fetch(`/api/files/${encodeURIComponent(job.state.fileId)}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json", ...authHeaders(token) },
-          body: JSON.stringify({ collectionId: collection.id }),
-        });
-        if (moveRes.ok) {
-          moved++;
-          dismissJob(job.id);
-        } else {
-          await toastMutationFailure(moveRes);
-        }
+      // ONE batch request, not one PATCH per file (live-testing fix, 2026-08-06). The old per-file loop
+      // was indistinguishable from N unrelated moves on the server, so it produced N audit notifications
+      // and N simultaneous bot-core POSTs for what the user experienced as a single "Group" click - which
+      // is what Hannah reported as bulk operations not notifying properly. It also spent 1+N requests
+      // against the write rate limiter for one action.
+      //
+      // §"Grouping must never lose a file" is unchanged and now enforced server-side: the endpoint moves
+      // what it can, rolls nothing back, and returns exactly which ids moved so the right stack items are
+      // dismissed - a file that failed keeps its item, rather than the old loop's positional guesswork.
+      const groupable = doneJobs.filter((job) => job.state.status === "done");
+      const idsToJob = new Map(
+        groupable.map((job) => [(job.state as { fileId: string }).fileId, job.id]),
+      );
+      const moveRes = await fetch("/api/files", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders(token) },
+        body: JSON.stringify({ ids: [...idsToJob.keys()], collectionId: collection.id }),
+      });
+      if (!moveRes.ok) {
+        await toastMutationFailure(moveRes);
+        return;
       }
+      const { moved: movedIds } = (await moveRes.json()) as {
+        moved: string[];
+        failed: { id: string; error: string }[];
+      };
+      for (const fileId of movedIds) {
+        const jobId = idsToJob.get(fileId);
+        if (jobId !== undefined) dismissJob(jobId);
+      }
+      const moved = movedIds.length;
 
       if (moved > 0) {
         setResult({ name: collection.name, previewUrl: collection.previewUrl ?? "" });

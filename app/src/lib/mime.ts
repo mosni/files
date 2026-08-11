@@ -74,3 +74,45 @@ export function mimeTypeFor(filename: string): string {
   const ext = finalExtension(filename);
   return (ext !== null && MIME_TYPES[ext]) || "application/octet-stream";
 }
+
+// --- content-based text delivery (live-testing, 2026-08-06) --------------------------------------------
+//
+// Hannah: "this should not be determined by file ending but by whether it's human readable characters or
+// random bytes instead, syntax highlighting should be derived by ending after." `isText` is decided at
+// ingest from the file's BYTES (lib/textDetect.ts, stored by migration 007); these two functions are where
+// that answer replaces the filename for the two decisions that actually matter on the wire.
+//
+// ⚠⚠ SECURITY INVARIANT 3, AMENDED DELIBERATELY - read before changing either function.
+//
+// The allowlist above stays exactly as it was, and `.html`/`.svg` stay off it. What is added is: a file
+// whose BYTES are text is delivered inline **as `text/plain` and nothing else**. That is what makes this
+// safe, and it is the whole argument:
+//   - `text/plain` + the `nosniff` already set on delivery means a browser DISPLAYS the source and never
+//     parses it as markup - so an uploaded `.html` or `.svg` detected as text renders as its own source
+//     code, which is precisely the "render as a text field" behaviour being asked for;
+//   - the bytes are served from the `dl.` containment origin, which carries no cookie and never loads the
+//     auth SDK (D-33), so even a hypothetical execution would have nothing to reach;
+//   - the extension can no longer WIDEN anything - it is consulted only to pick a Prism language for
+//     highlighting (web/src/lib -> lib/textPreview.ts's languageFor), which touches no header.
+//
+// The one thing that must never happen here is an is-text file being given a renderable Content-Type.
+// contentTypeForRecord() therefore checks `isText` FIRST and returns text/plain unconditionally - it does
+// not consult MIME_TYPES at all on that branch. Do not "optimise" that into a lookup with a text/plain
+// fallback: that would let a future MIME_TYPES entry for html/svg silently turn every such upload into a
+// stored XSS. The mime.test.ts case named "never returns a renderable type for a text-detected file" is
+// the guard on this paragraph.
+export type DeliverableFile = { name: string; isText: boolean };
+
+export function isInlineAllowedFor(record: DeliverableFile): boolean {
+  return record.isText || isInlineAllowed(record.name);
+}
+
+export function contentDispositionFor(record: DeliverableFile): "inline" | "attachment" {
+  return isInlineAllowedFor(record) ? "inline" : "attachment";
+}
+
+export function contentTypeForRecord(record: DeliverableFile): string {
+  // FIRST, and unconditionally - see the warning above.
+  if (record.isText) return "text/plain; charset=utf-8";
+  return mimeTypeFor(record.name);
+}

@@ -193,7 +193,11 @@ describe("UploadStack (E6 Wave B8/C4)", () => {
       expect(container.textContent).not.toContain("Group these");
     });
 
-    it("confirming issues exactly one POST and one PATCH per done file, then shows the result and removes the individual items", async () => {
+    // Live-testing change (2026-08-06): grouping now issues ONE batch PATCH /api/files instead of one
+    // PATCH /api/files/:id per file. That is the whole point - N separate requests were N separate actions
+    // as far as the server could tell, so a grouped upload produced N audit notifications for what the user
+    // experienced as one click (Hannah: bulk operations should notify once).
+    it("confirming issues exactly one POST and ONE batch PATCH, then shows the result and removes the individual items", async () => {
       upsertJob(doneJob("upload-a", "file-a"));
       upsertJob(doneJob("upload-b", "file-b"));
       const fetchMock = vi.fn((url: string, init?: RequestInit) => {
@@ -203,7 +207,11 @@ describe("UploadStack (E6 Wave B8/C4)", () => {
             json: () => Promise.resolve({ id: "coll-1", name: "Drop today", previewUrl: "https://files.mosni.dev/f/drop-today" }),
           });
         }
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+        // The batch endpoint reports WHICH ids moved, so the right stack items are dismissed.
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ moved: ["file-a", "file-b"], failed: [] }),
+        });
       });
       vi.stubGlobal("fetch", fetchMock);
 
@@ -221,8 +229,12 @@ describe("UploadStack (E6 Wave B8/C4)", () => {
       const postCalls = fetchMock.mock.calls.filter(([url, init]) => url === "/api/collections" && (init as RequestInit)?.method === "POST");
       const patchCalls = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit)?.method === "PATCH");
       expect(postCalls).toHaveLength(1);
-      expect(patchCalls).toHaveLength(2);
-      expect(patchCalls.map(([url]) => url).sort()).toEqual(["/api/files/file-a", "/api/files/file-b"].sort());
+      expect(patchCalls).toHaveLength(1); // ONE request for the whole batch, not one per file
+      expect(patchCalls[0]![0]).toBe("/api/files");
+      expect(JSON.parse((patchCalls[0]![1] as RequestInit).body as string)).toEqual({
+        ids: ["file-a", "file-b"],
+        collectionId: "coll-1",
+      });
 
       expect(container.textContent).toContain('Grouped into "Drop today"');
       expect(container.textContent).not.toContain("upload-a.txt");
@@ -253,6 +265,47 @@ describe("UploadStack (E6 Wave B8/C4)", () => {
       expect(container.textContent).not.toContain("Grouped into");
       const mosni = (window as unknown as { mosni: { toast: ReturnType<typeof vi.fn> } }).mosni;
       expect(mosni.toast).toHaveBeenCalledWith(expect.stringContaining("already used"), { variant: "error" });
+    });
+
+    // "Grouping must never lose a file" now depends on the batch endpoint's own `moved` list rather than
+    // on the client guessing from a per-file loop's statuses - so a partial success must dismiss ONLY the
+    // items that really moved, and leave the rest visible and re-groupable.
+    it("a partial batch dismisses only the files that actually moved, and says so", async () => {
+      upsertJob(doneJob("upload-a", "file-a"));
+      upsertJob(doneJob("upload-b", "file-b"));
+      const fetchMock = vi.fn((url: string) => {
+        if (url === "/api/collections") {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ id: "coll-1", name: "Drop today", previewUrl: "https://x/f/d" }),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({ moved: ["file-a"], failed: [{ id: "file-b", error: "name_taken" }] }),
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      (window as unknown as { mosni: unknown }).mosni = { toast: vi.fn(), token: () => "test-token" };
+
+      render();
+      await flush();
+
+      const groupButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Group these 2 files")!;
+      act(() => groupButton.click());
+      const confirmButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Group")!;
+      await act(async () => {
+        confirmButton.click();
+        await flush();
+      });
+
+      // The one that moved is gone; the one that did not is still on screen, not silently lost.
+      expect(container.textContent).not.toContain("upload-a.txt");
+      expect(container.textContent).toContain("upload-b.txt");
+      expect(container.textContent).toContain('Grouped into "Drop today"');
+      const mosni = (window as unknown as { mosni: { toast: ReturnType<typeof vi.fn> } }).mosni;
+      expect(mosni.toast).toHaveBeenCalledWith(expect.stringContaining("1 of 2"), { variant: "error" });
     });
   });
 

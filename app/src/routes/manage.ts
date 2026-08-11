@@ -10,6 +10,7 @@ import {
   deleteCollectionHandler,
   deleteFileHandler,
   listCollections,
+  moveFilesHandler,
   updateCollectionHandler,
   updateFileHandler,
 } from "../controllers/manage.ts";
@@ -39,6 +40,28 @@ const updateCollectionSchema = {
       // removeAdditional: true, so a field missing from `properties` is silently STRIPPED before the
       // handler ever sees it (not rejected) - "" (the root) must be an allowed value, so no minLength.
       parentId: { type: "string" },
+    },
+    additionalProperties: false,
+  },
+};
+
+// Live-testing addition (2026-08-06): the batch move behind grouped-upload notifications. `collectionId`
+// has no minLength - "" is the root and must be an allowed value, same note as updateCollectionSchema's
+// parentId. maxItems bounds the work one request can ask for; it is comfortably above D-176's own
+// 20,000-entry folder-walk ceiling being split across batches by the client rather than a limit a real
+// grouped upload can hit.
+const moveFilesSchema = {
+  body: {
+    type: "object",
+    required: ["ids", "collectionId"],
+    properties: {
+      ids: {
+        type: "array",
+        items: { type: "string", minLength: 1 },
+        minItems: 1,
+        maxItems: 1000,
+      },
+      collectionId: { type: "string" },
     },
     additionalProperties: false,
   },
@@ -110,6 +133,17 @@ export async function registerManageRoutes(app: FastifyInstance, config: Config)
     { constraints: { host: filesHost }, config: { rateLimit: writeRateLimit } },
     async (request, reply) => {
       await deleteCollectionHandler(request, reply, config);
+    },
+  );
+
+  // Registered before the parametric `/api/files/:id` for readability only - find-my-way ranks a static
+  // path above a parametric one regardless of registration order, so `/api/files` can never be swallowed
+  // by `:id` (the same precedence this repo already relies on for `/t/:token` vs `/*` in routes/delivery).
+  app.patch(
+    "/api/files",
+    { constraints: { host: filesHost }, schema: moveFilesSchema, config: { rateLimit: writeRateLimit } },
+    async (request, reply) => {
+      await moveFilesHandler(request, reply, config);
     },
   );
 

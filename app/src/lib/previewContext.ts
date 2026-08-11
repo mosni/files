@@ -4,7 +4,7 @@
 
 import type { ResolvedFile } from "../storage/files.ts";
 import type { Protection } from "./protection.ts";
-import { isInlineAllowed, mimeTypeFor } from "./mime.ts";
+import { contentTypeForRecord, isInlineAllowed, isInlineAllowedFor, mimeTypeFor } from "./mime.ts";
 import { mediaKindByExtension } from "./media.ts";
 
 export type PreviewKind = "image" | "video" | "pdf" | "text" | "other";
@@ -62,10 +62,17 @@ export function humanSize(bytes: number): string {
 // mediaKindByExtension already tells image/video apart (media.ts, display-only guess - D-143); pdf/text
 // are read off the MIME type (mime.ts), which is itself keyed on the same "final extension" rule - reusing
 // it here avoids a third copy of that parsing logic.
-export function previewKindFor(filename: string): PreviewKind {
+// Live-testing 2026-08-06 (Hannah): textness comes from the BYTES, so this takes the detected flag
+// alongside the name rather than deriving everything from the filename. Image/video/pdf stay
+// name-derived (media.ts's display-only guess, D-143) - only the text answer changed, which is what was
+// actually asked for. `isText` is checked AFTER image/video so a real photo is never demoted to a code
+// block by a stray detection, and BEFORE the extension's own text mapping so it can never be narrowed
+// back down to an allowlist.
+export function previewKindFor(filename: string, isText = false): PreviewKind {
   const kind = mediaKindByExtension(filename);
   if (kind === "image") return "image";
   if (kind === "video") return "video";
+  if (isText) return "text";
   const mime = mimeTypeFor(filename);
   if (mime === "application/pdf") return "pdf";
   if (mime === "text/plain") return "text";
@@ -96,9 +103,11 @@ export function buildPreviewContext(
     previewUrl: urls.previewUrl,
     directUrl: urls.directUrl,
     thumbUrl: urls.thumbUrl,
-    kind: previewKindFor(record.name),
-    mimeType: mimeTypeFor(record.name),
-    inline: isInlineAllowed(record.name),
+    kind: previewKindFor(record.name, record.isText),
+    // Both from the same record-aware helpers delivery uses, so the page's own idea of the file can never
+    // disagree with the headers its bytes actually arrive under (live-testing 2026-08-06).
+    mimeType: contentTypeForRecord(record),
+    inline: isInlineAllowedFor(record),
     width: record.width,
     height: record.height,
     durationSeconds: record.durationSeconds,

@@ -48,6 +48,23 @@ function isPastedBitmap(file: File): boolean {
   return file.type.startsWith("image/") && (file.name === "" || PLACEHOLDER_IMAGE_NAME.test(file.name));
 }
 
+// Live-testing report (2026-08-06, Hannah): "I copied 5 files from the windows explorer and it only
+// uploaded one when I hit ctrl+v". This module was verified NOT to be the cause - it maps over the whole
+// of `data.files`, and uploads.ts's startBatch queues every file it is handed (both proven by test).
+//
+// A union of `.files` and `.items` was tried here as defensive hardening and DELIBERATELY REJECTED, which
+// is worth recording so it is not "fixed" that way later: a clipboard can legitimately carry the same
+// image as BOTH a real file (CF_HDROP) and a bitmap rendition (CF_DIB), and Windows Explorer does exactly
+// that when copying an image file. Unioning the two sources uploads that image twice - so the hardening
+// trades a hypothetical loss for a guaranteed duplicate, and breaks the deliberate precedence below
+// ("a real file wins over an image blob"). The precedence is the correct behaviour; the union is not.
+//
+// The leading real candidate is no longer in this file at all: until 2026-08-06 the server rejected an
+// entire upload with a 422 for any audio file (storage/strip.ts misread embedded cover art as video) and
+// for any video in a .avi/.wmv/.flv/.ts/.ogv container. A five-file paste containing music or such a video
+// would land exactly one success and four errors - "only uploaded one". That is fixed; if it recurs after
+// the fix deploys, the one-step check is `event.clipboardData.files.length` in a real Windows Chromium.
+
 /** Extract uploadable files from a paste event's DataTransfer: a real file copied from the filesystem
  *  wins first (kept under its own name), then an image blob (renamed via nameForPastedBlob), then plain
  *  text - and ONLY plain text, only when the clipboard carried neither a file nor an image, as

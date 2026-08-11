@@ -330,11 +330,21 @@ export async function deleteCollectionHandler(
   }
 
   const { deletedFileIds } = await deleteCollectionRecursive(id);
-  // D-46/C4: one audit line per deleted file, plus one for the collection itself.
-  for (const fileId of deletedFileIds) {
-    emitAuditEvent({ action: "delete", actor: actorLabel(claims), target: fileId });
-  }
-  emitAuditEvent({ action: "delete", actor: actorLabel(claims), target: collection.name });
+  // Live-testing fix (2026-08-06, Hannah: bulk operations should notify once, not per action). This used
+  // to emit one line PER deleted file - each naming a raw file id, since the rows are gone by the time
+  // this runs and only the ids come back - plus one for the collection. A recursive delete is ONE action
+  // by ONE person, so it gets ONE line naming the collection and how many files went with it.
+  //
+  // This also removes the only unbounded audit burst in the app: deleting a large subtree used to fire a
+  // request per file at bot-core simultaneously, which is the most likely reason Hannah saw notifications
+  // go missing (a burst-rate-limited relay silently dropping the overflow, invisible here because the
+  // emitter is fire-and-forget by design).
+  emitAuditEvent({
+    action: "delete",
+    actor: actorLabel(claims),
+    target: collection.name,
+    count: deletedFileIds.length,
+  });
 
   reply.code(204).send();
 }
@@ -451,6 +461,89 @@ export async function updateFileHandler(
   // link_token).
   const updated = await resolveById(id);
   reply.send(await ownerContextFor(config, updated!));
+}
+
+// Live-testing addition (2026-08-06, Hannah: "moving a grouped set of uploads" should notify once).
+// Moves many files into one destination in a SINGLE request, so it is one action server-side and emits
+// exactly one audit line. Before this, E6's upload grouping issued one `PATCH /api/files/:id` per file -
+// each a legitimately separate action as far as the server could tell, so it produced N audit lines and N
+// simultaneous bot-core POSTs. No amount of server-side cleverness could group those; the requests had to
+// stop being separate.
+//
+// Partial failure is REPORTED, never rolled back - the hand-off rule this flow already had ("grouping must
+// never lose a file") means a file that could not move stays exactly where it was, and the caller is told
+// which ones those are. A file the caller may not touch is skipped as `not_found`, matching the single
+// handler's rule that this app never becomes an existence oracle - it never fails the whole batch.
+export async function moveFilesHandler(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  config: Config,
+): Promise<void> {
+  const claims = await requireClaims(request, reply, config);
+  if (claims === null) return;
+
+  const body = request.body as { ids: string[]; collectionId: string };
+  const destinationId = body.collectionId;
+
+  // Resolved ONCE for the whole batch, not per file: the destination is the same for every id, and
+  // re-walking the ancestor chain per file is the exact per-row re-walk review session 022 removed from
+  // the browse API for the same reason.
+  let destinationChain: Protection[];
+  let destinationLabel = "/";
+  if (destinationId === "") {
+    destinationChain = [];
+  } else {
+    const destination = await resolveCollectionById(destinationId);
+    if (destination === null || !(await canUploadTo(destination, claims))) {
+      reply.code(404).send();
+      return;
+    }
+    destinationChain = await protectionChain(destinationId);
+    destinationLabel = destination.name;
+  }
+
+  const moved: string[] = [];
+  const failed: { id: string; error: string }[] = [];
+
+  for (const id of body.ids) {
+    const record = await authorizeFileOwner(claims, id);
+    if (record === null) {
+      failed.push({ id, error: "not_found" });
+      continue;
+    }
+    // Same D-97 floor the single move applies, per file - a batch is not a way around it.
+    if (!meetsParentFloor(record.protection, destinationChain)) {
+      failed.push({ id, error: "below_parent_protection" });
+      continue;
+    }
+    if (destinationId === "" && isReservedRootName(record.name)) {
+      failed.push({ id, error: "invalid_name" });
+      continue;
+    }
+    try {
+      await moveFile(id, destinationId);
+      moved.push(id);
+    } catch (err) {
+      if (isDuplicateNameError(err, "uniq_name_in_collection")) {
+        failed.push({ id, error: "name_taken" });
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  // ONE line for the whole batch (the entire point of this endpoint). Suppressed when nothing moved -
+  // a batch that failed outright is not a write worth announcing.
+  if (moved.length > 0) {
+    emitAuditEvent({
+      action: "move",
+      actor: actorLabel(claims),
+      target: destinationLabel,
+      count: moved.length,
+    });
+  }
+
+  reply.send({ moved, failed });
 }
 
 export async function deleteFileHandler(

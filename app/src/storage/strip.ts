@@ -40,6 +40,11 @@ interface FfprobeStream {
   codec_type?: string;
   codec_name?: string;
   tags?: FfprobeTags;
+  // ffprobe marks embedded cover art as a VIDEO stream carrying disposition.attached_pic = 1 (measured,
+  // not assumed - an mp3 muxed with a PNG cover reports codec_type "video" / codec_name "mjpeg" alongside
+  // its audio stream). isRealVideoStream() below is the only thing standing between that and an audio
+  // file being treated as a video.
+  disposition?: { attached_pic?: number };
 }
 interface FfprobeOutput {
   format?: { tags?: FfprobeTags; format_name?: string };
@@ -58,9 +63,7 @@ async function runFfprobe(absolutePath: string): Promise<FfprobeOutput> {
 }
 
 // D-143/A6.1: classify from the BYTES, never the name. Try sharp first - it succeeds for any image format
-// it supports, whatever the file is called. If that fails, try ffprobe and accept the file as "video" only
-// if it reports at least one video OR audio stream (ffprobe will happily "identify" some non-media files
-// with no such stream, e.g. some plain-text or binary formats, so a bare non-error is not enough evidence).
+// it supports, whatever the file is called. If that fails, try ffprobe.
 // Anything neither tool can positively identify is "unknown" - out of scope for this invariant (A6.3):
 // non-media formats (pdf, docx, zip, txt...) are not a gap, and this is deliberately NOT a place to "try
 // harder" - an undecodable file is, by definition, not a detectable photo or video.
@@ -68,6 +71,25 @@ type Classification =
   | { kind: "image"; metadata: sharp.Metadata }
   | { kind: "video"; probe: FfprobeOutput }
   | { kind: "unknown" };
+
+// A stream is a real video only if it is NOT embedded cover art. Both halves of this were measured
+// against real ffprobe (2026-08-06), not reasoned about:
+//   - an mp3 with an embedded cover image reports TWO streams - audio, plus a `video`/`mjpeg` stream with
+//     `disposition.attached_pic = 1` - and `format_name: "mp3"`;
+//   - a bare mp3 reports one audio stream, `attached_pic: 0`.
+// Treating any `video` stream as a video therefore misclassified the overwhelmingly COMMON case (a music
+// file with album art) as a video, and since "mp3" is in none of muxerForProbedFormat()'s families it hit
+// the fail-closed "no known muxer" branch and rejected the ENTIRE UPLOAD with a 422 - reproduced end to
+// end. D-60's corrected scope (session 031, Hannah: "specifically exif data of photos and videos") puts
+// audio out of scope entirely, cover art included: an audio file is neither a photo nor a video.
+//
+// ⚠ Known, deliberately-accepted narrow gap: cover art is itself an image and could in principle carry
+// its own EXIF. It is never served as an image by this app, never previewed, and only reachable by
+// downloading the audio file and extracting it - and stripping it would mean re-muxing audio, which the
+// scope decision above explicitly excludes. Flagged for Hannah rather than silently decided.
+function isRealVideoStream(stream: FfprobeStream): boolean {
+  return stream.codec_type === "video" && stream.disposition?.attached_pic !== 1;
+}
 
 async function classify(absolutePath: string): Promise<Classification> {
   try {
@@ -79,17 +101,7 @@ async function classify(absolutePath: string): Promise<Classification> {
   }
   try {
     const probe = await runFfprobe(absolutePath);
-    // D-60's corrected scope (session 031, Hannah): "specifically exif data of photos and videos" - an
-    // audio-only file (mp3/wav/flac/ogg/m4a...) is neither, so it must classify as "unknown" (out of
-    // scope, same bucket as pdf/docx), never "video". Before this fix a lone AUDIO stream was enough to
-    // call it "video" - and since none of those containers is in muxerForProbedFormat()'s mp4/mov or
-    // matroska/webm families below, EVERY audio upload that ffprobe could identify at all (virtually all
-    // of them, and virtually all carry ID3/Vorbis comment tags that trip hasVideoMetadata()) hit the
-    // fail-closed "no known muxer" branch and rejected the whole upload with a 422 - on a file that was
-    // never in scope for this invariant to begin with (found live: "tus: ... 422 ... could not verify the
-    // upload is safe to store" on an ordinary audio-file upload).
-    const hasVideoStream = (probe.streams ?? []).some((stream) => stream.codec_type === "video");
-    if (hasVideoStream) return { kind: "video", probe };
+    if ((probe.streams ?? []).some(isRealVideoStream)) return { kind: "video", probe };
   } catch {
     // Not a container ffprobe can identify at all.
   }
@@ -164,7 +176,26 @@ function muxerForProbedFormat(probe: FfprobeOutput): string | null {
   // (the common case), and a genuine .mov/.m4v source still remuxes into a valid, playable ISO-BMFF
   // container even though its brand tag changes - never derived from the extension either way.
   if (families.includes("mp4") || families.includes("mov")) return "mp4";
-  return null;
+
+  // Single-name families whose ffprobe demuxer name IS a valid ffmpeg muxer name, so the file remuxes
+  // back into its own container. Each pairing was measured (2026-08-06), not assumed - a real fixture was
+  // built per row and its reported `format_name` read back:
+  //   .avi -> "avi"   .wmv -> "asf"   .flv -> "flv"   .ts -> "mpegts"   .ogv -> "ogg"
+  // These are here because their ABSENCE was a live defect, not for completeness: a real video in any of
+  // them is a "detectable video carrying metadata" that A6.4 then fail-closes on, so the app REJECTED the
+  // whole upload with a 422 ("could not verify the upload is safe to store") rather than storing a
+  // perfectly ordinary video file. That is the correct behaviour for a format we genuinely cannot strip,
+  // and the wrong behaviour for five formats ffmpeg strips fine - the map was simply too small.
+  //
+  // Adding a row here is safe in the direction that matters: if a chosen muxer cannot actually carry the
+  // file's codecs, ffmpeg exits non-zero, stripVideo() throws, and the upload fail-closes exactly as it
+  // does today. A wrong entry can therefore only ever produce the CURRENT behaviour, never an unstripped
+  // file - which is why this list may grow without reopening the invariant. What must never happen is the
+  // reverse: mapping a format to a muxer that silently drops the metadata check, which is why nothing here
+  // touches the -map_metadata -1 stream copy below.
+  const SINGLE_NAME_MUXERS = ["avi", "asf", "flv", "mpegts", "ogg"];
+  const direct = families.find((family) => SINGLE_NAME_MUXERS.includes(family));
+  return direct ?? null;
 }
 
 async function stripVideo(absolutePath: string, temp: string, probe: FfprobeOutput): Promise<void> {

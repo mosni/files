@@ -67,6 +67,7 @@ function makeFile(overrides: Partial<BrowseFile> = {}): BrowseFile {
     previewUrl: "https://files.mosni.dev/f/photo.png",
     directUrl: "https://dl.mosni.dev/photo.png",
     thumbUrl: null,
+    kind: "other" as const,
     width: 800,
     height: 600,
     durationSeconds: null,

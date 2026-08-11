@@ -6,7 +6,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
 import { isSuperuser } from "../lib/roles.ts";
-import { contentDisposition, mimeTypeFor } from "../lib/mime.ts";
+import { contentDispositionFor, contentTypeForRecord } from "../lib/mime.ts";
 import { safeSegments } from "../lib/paths.ts";
 import { readablePathResolves } from "../lib/protection.ts";
 import { verifyDelivery } from "../lib/deliverySignature.ts";
@@ -27,8 +27,11 @@ function encodeRelPath(relPath: string): string {
   return relPath.split("/").map(encodeURIComponent).join("/");
 }
 
-function contentDispositionHeader(name: string): string {
-  const disposition = contentDisposition(name);
+function contentDispositionHeader(record: FileRecord): string {
+  const name = record.name;
+  // Live-testing 2026-08-06: inline-vs-attachment now reads the file's DETECTED TEXTNESS as well as its
+  // name (lib/mime.ts's contentDispositionFor) - a text file previews inline whatever it is called.
+  const disposition = contentDispositionFor(record);
   // RFC 6266: an ASCII-safe fallback for older clients, plus filename* for real UTF-8 support. Quotes in
   // the fallback are neutralised (never allowed to terminate the quoted string early).
   const asciiFallback = name.replace(/[^\x20-\x7E]/g, "_").replace(/"/g, "'");
@@ -69,8 +72,11 @@ function sendBytes(reply: FastifyReply, record: FileRecord): void {
   // already reads the same name) - nginx's on-disk extension inference is no longer load-bearing, and
   // under D-82 the disk name is the ORIGINAL filename, pinned forever, so it can permanently disagree
   // with a renamed display name.
-  reply.header("Content-Type", mimeTypeFor(record.name));
-  reply.header("Content-Disposition", contentDispositionHeader(record.name));
+  // Live-testing 2026-08-06: a file whose BYTES are text is served `text/plain` unconditionally - see
+  // lib/mime.ts's contentTypeForRecord and the security note above it. That, plus the `nosniff` below, is
+  // what lets a text-detected .html/.svg render as SOURCE rather than as markup.
+  reply.header("Content-Type", contentTypeForRecord(record));
+  reply.header("Content-Disposition", contentDispositionHeader(record));
   reply.header("X-Content-Type-Options", "nosniff");
   reply.header("Referrer-Policy", "no-referrer");
   // Never streamed by Node (security invariant 2/D-5): nginx's `internal;` location aliases STORAGE_ROOT

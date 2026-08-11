@@ -538,25 +538,29 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     mockAuthorizedAs(uploaderSub);
 
     // D-143: classification is content-based, so this must be a file ffprobe genuinely detects as a video
-    // (a real video stream) but whose probed container has no entry in strip.ts's deliberately small
-    // muxer map (mp4/mov-family/webm/matroska only - the formats this epic actually cares about) - a real
+    // (a real video stream) but whose probed container has no entry in strip.ts's muxer map - a real
     // detected-but-unstrippable file, not garbage bytes wearing a misleading extension (which is no longer
     // distinguishable from "not a photo or video at all" - see the test below).
-    const aviDir = await mkdtemp(path.join(os.tmpdir(), "upload-avi-fixture-"));
-    const aviPath = path.join(aviDir, "legacy.avi");
+    //
+    // This used to be a `.avi`. That stopped being unstrippable on 2026-08-06: rejecting an ordinary video
+    // outright was a live defect, so avi/asf/flv/mpegts/ogg joined the muxer map and now strip fine. NUT is
+    // ffmpeg's own container, muxable here and deliberately NOT mapped, so the fail-closed path still has a
+    // real fixture. (That this test FAILED on .avi when the map changed is the fix working end to end.)
+    const fixtureDir = await mkdtemp(path.join(os.tmpdir(), "upload-nut-fixture-"));
+    const nutPath = path.join(fixtureDir, "legacy.nut");
     await execFileAsync("ffmpeg", [
-      "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=32x32:rate=5",
-      "-c:v", "mpeg4", "-f", "avi", aviPath,
+      "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=32x32:rate=25",
+      "-c:v", "mpeg4", "-metadata", "comment=secret", "-f", "nut", nutPath,
     ]);
-    const aviBytes = await readFile(aviPath);
-    await rm(aviDir, { recursive: true, force: true });
+    const nutBytes = await readFile(nutPath);
+    await rm(fixtureDir, { recursive: true, force: true });
 
-    const createRes = await createUpload(uploaderSub, aviBytes.length, { filename: "legacy.avi" });
+    const createRes = await createUpload(uploaderSub, nutBytes.length, { filename: "legacy.nut" });
     const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
-    const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, aviBytes);
+    const patchRes = await patchUpload(uploadUrl, uploaderSub, 0, nutBytes);
     expect(patchRes.status).toBe(422);
 
-    expect(await resolveByNames(["legacy.avi"])).toBeNull();
+    expect(await resolveByNames(["legacy.nut"])).toBeNull();
     const [rows] = await getPool().query(
       "SELECT COUNT(*) AS n FROM files WHERE collection_id = '' AND owner_sub = ?",
       [uploaderSub],

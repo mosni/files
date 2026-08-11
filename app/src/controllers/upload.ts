@@ -227,6 +227,9 @@ export function buildTusServer(config: Config): TusServer {
           durationSeconds: probe.durationSeconds,
           textPreview: probe.textPreview,
           thumbName,
+          // Live-testing 2026-08-06: from the file's BYTES (storage/probe.ts -> lib/textDetect.ts), never
+          // its extension - this is what makes a text file preview as text whatever it is called.
+          isText: probe.isText,
         });
 
         const collectionSegments = await collectionPath(destination.id);

@@ -4,6 +4,7 @@
 // (technical-baseline.md §2) - resolution stays in storage/controllers/browse.ts.
 
 import type { Protection, VisibilityReason } from "./protection.ts";
+import type { FileKind } from "./fileKind.ts";
 
 // D-116/E4.1 Wave E findings: collapsed from three scopes to two. "public" and "all" are DELETED, not
 // deprecated - "visible" replaces both with one server-decided contract ("everything this viewer can
@@ -30,6 +31,10 @@ export type BrowseFile = {
   directUrl: string;
   thumbUrl: string | null; // D-137: same gating/null-semantics as PreviewContext.thumbUrl. Null for
   // non-images/video, a generation failure, or a pre-E5 row (D-138 - never backfilled).
+  // Live-testing addition (2026-08-06, Hannah): the display kind the row's icon is picked from, for every
+  // file that has no thumbnail to show instead. A SEMANTIC kind, not a lucide icon name - the API must not
+  // hardcode design-system vocabulary, so web/src/components/FileBrowser.tsx owns the kind -> icon map.
+  kind: FileKind;
   width: number | null;
   height: number | null;
   durationSeconds: number | null;

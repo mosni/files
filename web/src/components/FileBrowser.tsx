@@ -33,6 +33,7 @@ import { useNavigate } from "react-router";
 import { can, isSuperuser, type Claims } from "../../../app/src/lib/roles.ts";
 import type { Protection, VisibilityReason } from "../../../app/src/lib/protection.ts";
 import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../../../app/src/lib/browseContext.ts";
+import type { FileKind } from "../../../app/src/lib/fileKind.ts";
 import { formatUploadDate, humanSize } from "../../../app/src/lib/previewContext.ts";
 import { toastMutationFailure } from "../lib/mutationError.ts";
 import { fetchCollections, type CollectionOption } from "../lib/collections.ts";
@@ -262,6 +263,34 @@ function RowActions({
   );
 }
 
+// Live-testing addition (2026-08-06, Hannah): "for files that we preview, let's show a different lucide
+// icon in the file browser list - for example, an audio file without cover art gets a music note symbol,
+// a code text file gets code-text icon, etc."
+//
+// The kind -> icon map lives HERE, not on the server: `BrowseFile.kind` is a semantic kind, so the API
+// never hardcodes design-system vocabulary and a future icon-set change stays a client-only edit.
+//
+// ⚠ Every name below was verified to exist in lucide 1.23 (the version mosni-chrome pins), because
+// <mosni-icon> renders NOTHING at all for a name lucide does not know - icons-all/index.ts's create()
+// returns null and the element paints empty. A typo here is therefore an invisible blank cell, not an
+// error, which is exactly the kind of failure this project keeps getting bitten by.
+const ICON_BY_KIND: Record<FileKind, string> = {
+  image: "file-image",
+  video: "file-video",
+  audio: "file-music", // Hannah's "music note symbol"
+  pdf: "file-text",
+  code: "file-code", // her "code-text icon"
+  text: "file-text",
+  archive: "file-archive",
+  other: "file", // the previous behaviour for everything, now only the genuine fallback
+};
+
+function iconForKind(kind: FileKind | undefined): string {
+  // `kind` is undefined for a response from a server predating this field - fall back to what every row
+  // used to show rather than rendering an empty cell.
+  return kind === undefined ? "file" : (ICON_BY_KIND[kind] ?? "file");
+}
+
 function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; onReload: () => void }) {
   const [panel, setPanel] = useState<RowPanel>(null);
   const [renameValue, setRenameValue] = useState(row.name);
@@ -363,7 +392,7 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
               style={{ objectFit: "cover", borderRadius: 2 }}
             />
           ) : (
-            <mosni-icon name="file" size="18" />
+            <mosni-icon name={iconForKind(row.kind)} size="18" />
           )}
         </td>
         <td>

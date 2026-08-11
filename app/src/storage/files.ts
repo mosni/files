@@ -30,7 +30,12 @@ export type FileRecord = {
   width: number | null; // image or video pixel width, captured at ingest
   height: number | null;
   durationSeconds: number | null; // video only
-  textPreview: string | null; // .txt only
+  textPreview: string | null; // first 400 chars of any file detected as text (live-testing 2026-08-06)
+  // Live-testing addition (2026-08-06): whether the BYTES read as human-readable text, decided once at
+  // ingest by lib/textDetect.ts. Drives both inline delivery and which preview component renders - the
+  // filename decides neither any more (it still picks syntax highlighting, which is all Hannah asked it
+  // to do). False on every row predating migration 007; never backfilled (D-138).
+  isText: boolean;
   uploaderName: string | null; // display name from claims.name at upload (D-136). See previewContext.ts's
   // buildPreviewContext for the D-168 sub fallback when this is null - provider-based, not stored here.
   thumbName: string | null; // bare filename within diskDir, or null (non-image / generation failed / pre-E5, D-137)
@@ -89,10 +94,11 @@ interface FileRow extends RowDataPacket {
   text_preview: string | null;
   uploader_name: string | null;
   thumb_name: string | null;
+  is_text: number; // TINYINT(1) - mysql2 returns 0/1
 }
 
 const SELECT_COLUMNS =
-  "id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, uploader_sub, created_at, width, height, duration_seconds, text_preview, uploader_name, thumb_name";
+  "id, collection_id, name, disk_dir, disk_name, bytes, protection, link_token, state, owner_sub, uploader_sub, created_at, width, height, duration_seconds, text_preview, uploader_name, thumb_name, is_text";
 
 function rowToRecord(row: FileRow, bytes: number): FileRecord {
   return {
@@ -113,6 +119,7 @@ function rowToRecord(row: FileRow, bytes: number): FileRecord {
     textPreview: row.text_preview,
     uploaderName: row.uploader_name,
     thumbName: row.thumb_name,
+    isText: row.is_text === 1,
   };
 }
 
@@ -369,6 +376,9 @@ export async function claimFileRow(params: {
         textPreview: null,
         uploaderName: params.uploaderName,
         thumbName: null,
+        // A claimed row has no bytes on disk yet, so nothing has been detected - commitFileRow sets the
+        // real value once probeMedia has actually looked at the file.
+        isText: false,
       };
     } catch (err) {
       if (isDuplicateOf(err, /link_token|uniq_link_token/)) continue; // regenerate the token and retry
@@ -395,12 +405,13 @@ export async function commitFileRow(
     durationSeconds: number | null;
     textPreview: string | null;
     thumbName: string | null; // D-137: null for a non-image, a generation failure, or a pre-E5 file
+    isText: boolean; // live-testing 2026-08-06: from the bytes (lib/textDetect.ts), never the filename
   },
 ): Promise<FileRecord> {
   await getPool().query(
-    `UPDATE files SET bytes = ?, width = ?, height = ?, duration_seconds = ?, text_preview = ?, thumb_name = ?, state = 'committed'
+    `UPDATE files SET bytes = ?, width = ?, height = ?, duration_seconds = ?, text_preview = ?, thumb_name = ?, is_text = ?, state = 'committed'
      WHERE id = ?`,
-    [params.bytes, params.width, params.height, params.durationSeconds, params.textPreview, params.thumbName, id],
+    [params.bytes, params.width, params.height, params.durationSeconds, params.textPreview, params.thumbName, params.isText ? 1 : 0, id],
   );
   const [rows] = await getPool().query<FileRow[]>(`SELECT ${SELECT_COLUMNS} FROM files WHERE id = ?`, [id]);
   const row = rows[0];

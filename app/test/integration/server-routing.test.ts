@@ -57,7 +57,7 @@ describe("server routing - static vs delivery precedence across hosts", () => {
     const abs = path.join(root, diskRelPath(claimed));
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, "bytes");
-    await commitFileRow(claimed.id, { bytes: 5, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null });
+    await commitFileRow(claimed.id, { bytes: 5, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null, isText: false });
     return { collectionName: collection.name };
   }
 

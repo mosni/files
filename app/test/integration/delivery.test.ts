@@ -103,6 +103,7 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
       durationSeconds: null,
       textPreview: null,
       thumbName,
+      isText: false,
     });
     return {
       collectionId: collection.id,
@@ -159,6 +160,50 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
       const { collectionName } = await seed({ name: "notes.txt", protection: "public" });
       const res = await get(`/${collectionName}/notes.txt`);
       expect(res.headers["content-type"]).toContain("text/plain");
+    });
+
+    // Live-testing addition (2026-08-06): content-based text delivery, asserted on the REAL response
+    // headers rather than only on lib/mime.ts's pure functions. The .html case is the security-critical
+    // one - see verification-concept.md's amended invariant-3 bullet.
+    describe("text detected from the BYTES (Hannah, 2026-08-06)", () => {
+      async function seedTextFile(name: string) {
+        const seeded = await seed({ name, protection: "public" });
+        // What ingest would have stored for a file whose bytes read as text.
+        await getPool().query("UPDATE files SET is_text = 1 WHERE id = ?", [seeded.fileId]);
+        return seeded;
+      }
+
+      it("serves a text file inline as text/plain even with an extension nothing allowlists", async () => {
+        const { collectionName, name } = await seedTextFile("script.py");
+        const res = await get(`/${collectionName}/${name}`);
+        expect(res.statusCode).toBe(200);
+        expect(res.headers["content-type"]).toBe("text/plain; charset=utf-8");
+        expect(res.headers["content-disposition"]).toContain("inline");
+      });
+
+      it("serves an uploaded .html as text/plain + nosniff - source, never markup the browser runs", async () => {
+        const { collectionName, name } = await seedTextFile("page.html");
+        const res = await get(`/${collectionName}/${name}`);
+        expect(res.statusCode).toBe(200);
+        // The three headers that, together, are the entire safety argument for widening inline delivery.
+        expect(res.headers["content-type"]).toBe("text/plain; charset=utf-8");
+        expect(res.headers["content-type"]).not.toContain("html");
+        expect(res.headers["x-content-type-options"]).toBe("nosniff");
+      });
+
+      it("an uploaded .svg detected as text is text/plain too, not image/svg+xml", async () => {
+        const { collectionName, name } = await seedTextFile("icon.svg");
+        const res = await get(`/${collectionName}/${name}`);
+        expect(res.headers["content-type"]).toBe("text/plain; charset=utf-8");
+        expect(res.headers["content-type"]).not.toContain("svg");
+      });
+
+      it("a NON-text .html is still an attachment - the allowlist is unchanged for binary files", async () => {
+        const { collectionName, name } = await seed({ name: "binary.html", protection: "public" });
+        const res = await get(`/${collectionName}/${name}`);
+        expect(res.headers["content-disposition"]).toContain("attachment");
+        expect(res.headers["content-type"]).toBe("application/octet-stream");
+      });
     });
 
     it("returns 404 (not 403) for a secret file at its readable path (D-59 mandatory)", async () => {

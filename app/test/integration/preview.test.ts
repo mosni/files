@@ -109,6 +109,7 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       durationSeconds: null,
       textPreview: null,
       thumbName: null,
+      isText: false,
     });
     return {
       collectionId: collection.id,

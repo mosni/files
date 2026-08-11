@@ -116,7 +116,7 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
     const abs = path.join(root, ...diskRelPath(claimed).split("/"));
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, "content");
-    await commitFileRow(claimed.id, { bytes: 7, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null });
+    await commitFileRow(claimed.id, { bytes: 7, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null, isText: false });
     return claimed;
   }
 
@@ -368,7 +368,7 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
         const abs = path.join(root, ...diskRelPath(claimed).split("/"));
         await mkdir(path.dirname(abs), { recursive: true });
         await writeFile(abs, "x");
-        await commitFileRow(claimed.id, { bytes: 1, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null });
+        await commitFileRow(claimed.id, { bytes: 1, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null, isText: false });
 
         asUser("user:floor6");
         const raise = await req("PATCH", `/api/collections/${collection.id}`, {
@@ -759,6 +759,102 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
         });
         expect(res.statusCode).toBe(409);
       });
+    });
+  });
+
+  // Live-testing addition (2026-08-06): the batch move that makes a grouped upload ONE server-side
+  // action, so it produces one audit notification instead of N.
+  describe("PATCH /api/files (batch move)", () => {
+    it("401s with no bearer", async () => {
+      const res = await req("PATCH", "/api/files", { body: { ids: ["x"], collectionId: "" } });
+      expect(res.statusCode).toBe(401);
+    });
+
+    it("moves every file in one request and reports which ids moved", async () => {
+      const source = await seedCollection("user:owner");
+      const destination = await seedCollection("user:owner");
+      const files = [
+        await seedFile({ collectionId: source.id, ownerSub: "user:owner" }),
+        await seedFile({ collectionId: source.id, ownerSub: "user:owner" }),
+        await seedFile({ collectionId: source.id, ownerSub: "user:owner" }),
+      ];
+      asUser("user:owner");
+
+      const res = await req("PATCH", "/api/files", {
+        token: "t",
+        body: { ids: files.map((f) => f.id), collectionId: destination.id },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { moved: string[]; failed: unknown[] };
+      expect(body.moved.sort()).toEqual(files.map((f) => f.id).sort());
+      expect(body.failed).toEqual([]);
+      for (const file of files) {
+        expect((await resolveById(file.id))!.collectionId).toBe(destination.id);
+      }
+    });
+
+    it("skips a file the caller does not own without failing the whole batch (never an existence oracle)", async () => {
+      const source = await seedCollection("user:owner");
+      const destination = await seedCollection("user:owner");
+      const mine = await seedFile({ collectionId: source.id, ownerSub: "user:owner" });
+      const theirs = await seedFile({ collectionId: source.id, ownerSub: "user:someone-else" });
+      asUser("user:owner");
+
+      const res = await req("PATCH", "/api/files", {
+        token: "t",
+        body: { ids: [mine.id, theirs.id], collectionId: destination.id },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { moved: string[]; failed: { id: string; error: string }[] };
+      expect(body.moved).toEqual([mine.id]);
+      expect(body.failed).toEqual([{ id: theirs.id, error: "not_found" }]);
+      // "Grouping must never lose a file": the one that could not move stayed exactly where it was.
+      expect((await resolveById(theirs.id))!.collectionId).toBe(source.id);
+    });
+
+    it("404s the whole batch when the DESTINATION does not resolve - nothing moves", async () => {
+      const source = await seedCollection("user:owner");
+      const file = await seedFile({ collectionId: source.id, ownerSub: "user:owner" });
+      asUser("user:owner");
+
+      const res = await req("PATCH", "/api/files", {
+        token: "t",
+        body: { ids: [file.id], collectionId: "no-such-collection" },
+      });
+
+      expect(res.statusCode).toBe(404);
+      expect((await resolveById(file.id))!.collectionId).toBe(source.id);
+    });
+
+    it("enforces D-97's floor per file - a batch is not a way around it", async () => {
+      const source = await seedCollection("user:owner");
+      const destination = await seedCollection("user:owner");
+      await getPool().query("UPDATE collections SET protection = ? WHERE id = ?", ["secret", destination.id]);
+      const publicFile = await seedFile({
+        collectionId: source.id,
+        ownerSub: "user:owner",
+        protection: "public",
+      });
+      asUser("user:owner");
+
+      const res = await req("PATCH", "/api/files", {
+        token: "t",
+        body: { ids: [publicFile.id], collectionId: destination.id },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { moved: string[]; failed: { id: string; error: string }[] };
+      expect(body.moved).toEqual([]);
+      expect(body.failed).toEqual([{ id: publicFile.id, error: "below_parent_protection" }]);
+      expect((await resolveById(publicFile.id))!.collectionId).toBe(source.id);
+    });
+
+    it("rejects an empty id list at the schema, rather than emitting a pointless audit line", async () => {
+      asUser("user:owner");
+      const res = await req("PATCH", "/api/files", { token: "t", body: { ids: [], collectionId: "" } });
+      expect(res.statusCode).toBe(400);
     });
   });
 

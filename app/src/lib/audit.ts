@@ -24,6 +24,17 @@ export type AuditEvent = {
   protection?: Protection;
   bytes?: number;
   collection?: string;
+  // Live-testing addition (2026-08-06, Hannah): "bulk operations like deleting a folder, moving a grouped
+  // set of uploads, etc may not send a notification for each action." A bulk action is ONE action and gets
+  // ONE line carrying how many files it touched - not N lines, which is what a recursive delete used to
+  // emit (one per file, each naming a raw file id rather than a name) and what the client's grouped move
+  // used to produce by issuing N separate requests.
+  //
+  // Grouping is the fix, not throttling: an earlier attempt at this spaced the N sends out instead, which
+  // left the feed just as noisy, made a large delete take minutes to finish reporting, and grew an
+  // unbounded in-memory queue. `count` is deliberately part of the EVENT rather than anything in
+  // storage/audit.ts, so the emitter stays a dumb one-shot POST.
+  count?: number;
 };
 
 const VERBS: Record<WriteAction, string> = {
@@ -60,6 +71,8 @@ export function formatAuditLine(event: AuditEvent): string {
   const line = `${event.actor} ${VERBS[event.action]} "${event.target}"`;
 
   const details: string[] = [];
+  // First in the list on purpose: for a bulk action the count is the most important thing in the line.
+  if (event.count !== undefined) details.push(`${event.count} ${event.count === 1 ? "file" : "files"}`);
   if (event.protection !== undefined) details.push(event.protection);
   if (event.bytes !== undefined) details.push(formatBytes(event.bytes));
   if (event.collection !== undefined) details.push(`in ${event.collection}`);

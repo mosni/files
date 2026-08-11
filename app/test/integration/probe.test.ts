@@ -29,7 +29,7 @@ describe("probeMedia() (D-74)", () => {
       .toFile(pngPath);
 
     const probe = await probeMedia(pngPath);
-    expect(probe).toEqual({ width: 32, height: 24, durationSeconds: null, textPreview: null });
+    expect(probe).toEqual({ width: 32, height: 24, durationSeconds: null, textPreview: null, isText: false });
   });
 
   it("an animated GIF's height is one frame's height, not every frame stacked (the pageHeight trap)", async () => {
@@ -74,6 +74,7 @@ describe("probeMedia() (D-74)", () => {
       height: null,
       durationSeconds: null,
       textPreview: "Hello, world! Second line.",
+      isText: true,
     });
   });
 
@@ -90,6 +91,7 @@ describe("probeMedia() (D-74)", () => {
       height: null,
       durationSeconds: null,
       textPreview: "# Title Some body text.",
+      isText: true,
     });
   });
 
@@ -101,15 +103,21 @@ describe("probeMedia() (D-74)", () => {
     expect(probe.textPreview).toHaveLength(400);
   });
 
-  it("returns all-null for a .zip without touching disk I/O for media", async () => {
+  it("returns all-null for a .zip - real binary bytes are not text", async () => {
     const zipPath = path.join(dir, "archive.zip");
-    await writeFile(zipPath, Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    await writeFile(zipPath, Buffer.from([0x50, 0x4b, 0x03, 0x04])); // "PK\x03\x04" - control bytes
 
     const probe = await probeMedia(zipPath);
-    expect(probe).toEqual({ width: null, height: null, durationSeconds: null, textPreview: null });
+    expect(probe).toEqual({ width: null, height: null, durationSeconds: null, textPreview: null, isText: false });
   });
 
-  it("never throws for a corrupt file claiming an image extension - resolves all-null", async () => {
+  // Behaviour CHANGED deliberately here (live-testing, 2026-08-06). These two files claim an image/video
+  // extension, fail that probe - and then fall through to text detection, which is new. Their contents
+  // ("not a real jpeg") genuinely ARE human-readable text, so under Hannah's rule they are text files with
+  // a misleading name, and previewing them as text is the correct answer rather than a regression. The
+  // guarantee these tests were written for is unchanged and still asserted: probeMedia never THROWS, and
+  // never reports bogus dimensions.
+  it("falls through to text detection for a text file claiming an image extension", async () => {
     const corruptPath = path.join(dir, "corrupt.jpg");
     await writeFile(corruptPath, Buffer.from("not a real jpeg"));
 
@@ -117,11 +125,12 @@ describe("probeMedia() (D-74)", () => {
       width: null,
       height: null,
       durationSeconds: null,
-      textPreview: null,
+      textPreview: "not a real jpeg",
+      isText: true,
     });
   });
 
-  it("never throws for a corrupt file claiming a video extension - resolves all-null", async () => {
+  it("falls through to text detection for a text file claiming a video extension", async () => {
     const corruptPath = path.join(dir, "corrupt.mp4");
     await writeFile(corruptPath, Buffer.from("not a real mp4"));
 
@@ -129,7 +138,21 @@ describe("probeMedia() (D-74)", () => {
       width: null,
       height: null,
       durationSeconds: null,
+      textPreview: "not a real mp4",
+      isText: true,
+    });
+  });
+
+  it("a GENUINELY binary file with a lying image extension stays binary, and still never throws", async () => {
+    const binaryPath = path.join(dir, "actually-binary.jpg");
+    await writeFile(binaryPath, Buffer.from([0x00, 0xff, 0xfe, 0x01, 0x02, 0x00, 0x03]));
+
+    await expect(probeMedia(binaryPath)).resolves.toEqual({
+      width: null,
+      height: null,
+      durationSeconds: null,
       textPreview: null,
+      isText: false,
     });
   });
 });

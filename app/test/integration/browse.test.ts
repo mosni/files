@@ -148,7 +148,7 @@ describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scop
     if (thumbName !== null) {
       await writeFile(path.join(path.dirname(abs), thumbName), "fake-thumbnail-bytes");
     }
-    await commitFileRow(claimed.id, { bytes: 7, width: null, height: null, durationSeconds: null, textPreview: null, thumbName });
+    await commitFileRow(claimed.id, { bytes: 7, width: null, height: null, durationSeconds: null, textPreview: null, thumbName, isText: false });
     return claimed;
   }
 
