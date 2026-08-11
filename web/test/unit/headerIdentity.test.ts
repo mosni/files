@@ -117,4 +117,24 @@ describe("initHeaderIdentity (live-testing addition, 2026-08-06)", () => {
     document.body.innerHTML = "";
     expect(() => initHeaderIdentity()).not.toThrow();
   });
+
+  // ⚠ The regression this exists for: an earlier version resolved the slot with ONE querySelector and
+  // returned when it was null, so a header that upgraded even slightly late meant this silently did
+  // nothing forever, with no error to find. `vite build` hoists this module's <script> into <head> in the
+  // SHIPPED page (verified against the deployed index.html), which is exactly the ordering that makes a
+  // late upgrade reachable. Fails against the one-shot version.
+  it("waits for the header to upgrade instead of giving up when the slot is not there yet", async () => {
+    document.body.innerHTML = ""; // no <mosni-header> at all when init runs
+    const sdk = installSdk();
+    initHeaderIdentity();
+    await flush();
+
+    // ...the design system upgrades the element a beat later, as a deferred script ordering can produce.
+    document.body.innerHTML = '<mosni-header><div class="little-link"></div></mosni-header>';
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    sdk.signIn({ name: "Hannah" });
+    await flush();
+
+    expect(document.querySelector(".little-link")!.textContent).toBe("Logged in as Hannah");
+  });
 });

@@ -62,20 +62,31 @@ function renderIdentity(target: HTMLElement, user: VerifiedClaims | null): void 
  *  render path (mirrors initShareTarget/restorePausedUploads) - a missing header, or an auth SDK that never
  *  loads, just leaves the slot exactly as it already was. */
 export function initHeaderIdentity(): void {
-  const slot = document.querySelector<HTMLElement>("mosni-header .little-link");
-  if (slot === null) return;
-  const target: HTMLElement = slot; // re-bound so the closure below sees a non-null type, not just a non-null value
+  // ⚠ BOTH dependencies are polled, and the second one is not optional pedantry. An earlier version
+  // resolved the slot with a single `querySelector` and returned when it was null - so if the header had
+  // not upgraded yet, this silently did nothing FOREVER, with no error anywhere. That asymmetry (polling
+  // for the auth SDK but not for the element) is a guaranteed-invisible failure, and the built page makes
+  // it reachable: `vite build` HOISTS this module's <script> from the end of <body> into <head>, so the
+  // shipped document loads it alongside mosnicat.js rather than after the header markup. A module script
+  // is still deferred, so the element is normally upgraded in time - but "normally" is doing real work in
+  // that sentence, and the cost of being wrong was a blank header with nothing to debug.
+  //
+  // Bounded rather than infinite: if the design system genuinely never loads, the page has much larger
+  // problems (nothing is styled at all) and this must not poll for the lifetime of the tab.
+  const RETRY_MS = 50;
+  const MAX_WAIT_MS = 10_000;
+  let waited = 0;
 
-  // mosni/auth's SDK keeps listeners in an ARRAY and pushes (client/sdk.ts: `listeners.push(cb)`), so
-  // subscribing here does not displace DropZone's or Preview's own onChange - checked by reading the SDK,
-  // because a single-callback implementation would have made this module silently break sign-in handling
-  // elsewhere on the page. It also defers the first callback until its initial session check settles, so
-  // this never flashes "logged out" on a fresh tab.
-  function subscribe(): void {
-    // The auth SDK's <script> tag loads independently of this module - never assume window.mosni exists
-    // yet (same poll-until-present shape DropZone.tsx and Preview.tsx already use).
-    if (typeof window.mosni === "undefined") {
-      setTimeout(subscribe, 50);
+  function start(): void {
+    const target = document.querySelector<HTMLElement>("mosni-header .little-link");
+    // mosni/auth's SDK keeps listeners in an ARRAY and pushes (client/sdk.ts: `listeners.push(cb)`), so
+    // subscribing here does not displace DropZone's or Preview's own onChange - checked by reading the
+    // SDK, because a single-callback implementation would have made this module silently break sign-in
+    // handling elsewhere on the page. It also defers the first callback until its initial session check
+    // settles, so this never flashes "logged out" on a fresh tab.
+    if (target === null || typeof window.mosni === "undefined") {
+      waited += RETRY_MS;
+      if (waited <= MAX_WAIT_MS) setTimeout(start, RETRY_MS);
       return;
     }
     window.mosni.onChange((user) => {
@@ -83,5 +94,5 @@ export function initHeaderIdentity(): void {
     });
   }
 
-  subscribe();
+  start();
 }
