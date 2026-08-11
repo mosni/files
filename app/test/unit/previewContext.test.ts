@@ -34,6 +34,7 @@ function makeRecord(overrides: Partial<ResolvedFile> = {}): ResolvedFile {
     textPreview: null,
     uploaderName: null,
     thumbName: null,
+    isText: false,
     ...overrides,
   };
 }

@@ -106,6 +106,7 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
       durationSeconds: null,
       textPreview: null,
       thumbName: null,
+      isText: false,
     });
 
     return { id: claimed.id, diskDir, diskName: claimed.diskName, linkToken: claimed.linkToken };
@@ -209,6 +210,7 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
       durationSeconds: 12.5,
       textPreview: null,
       thumbName: null,
+      isText: false,
     });
     expect(committed.uploaderSub).toBe("user:owner");
     expect(committed.linkToken).toMatch(/^[A-Za-z0-9]{5}$/);

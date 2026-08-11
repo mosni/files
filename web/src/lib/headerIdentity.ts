@@ -16,7 +16,7 @@
 // risk D-8's mosni-tab workaround already carries elsewhere in this app; a real mosni-chrome API (D-31) is
 // the cleaner long-term fix if this grows past one line of text and an avatar.
 
-import type { Claims } from "../../../app/src/lib/roles.ts";
+import type { VerifiedClaims } from "../../../app/src/lib/roles.ts";
 
 const AUTH_ORIGIN = "https://auth.mosni.dev"; // matches lib/csp.ts's imgSrc entry and D-169's direct avatar link
 
@@ -26,12 +26,15 @@ function avatarUrlFor(sub: string): string {
 
 // D-168: name if captured, else the sub, unconditionally - the same fallback rule PreviewCard's uploader
 // line and lib/audit.ts's actorLabel() already use, so identity display reads consistently everywhere.
-function displayNameFor(user: Claims): string {
-  const name = (user as { name?: unknown }).name;
+// VerifiedClaims (not Claims) is the type that actually models the optional `name` claim, so this needs no
+// cast: mosni/auth's SDK returns the whole decoded JWT payload from user() (client/sdk.ts's currentUser ->
+// decodeClaims), and its /token route does mint `name` - both verified by reading that repo, not assumed.
+function displayNameFor(user: VerifiedClaims): string {
+  const name = user.name;
   return typeof name === "string" && name.trim().length > 0 ? name : user.sub;
 }
 
-function renderIdentity(target: HTMLElement, user: Claims | null): void {
+function renderIdentity(target: HTMLElement, user: VerifiedClaims | null): void {
   target.replaceChildren();
   if (user === null) return; // signed out: leave the slot exactly as empty as it already was
 
@@ -63,8 +66,11 @@ export function initHeaderIdentity(): void {
   if (slot === null) return;
   const target: HTMLElement = slot; // re-bound so the closure below sees a non-null type, not just a non-null value
 
-  let cancelled = false;
-
+  // mosni/auth's SDK keeps listeners in an ARRAY and pushes (client/sdk.ts: `listeners.push(cb)`), so
+  // subscribing here does not displace DropZone's or Preview's own onChange - checked by reading the SDK,
+  // because a single-callback implementation would have made this module silently break sign-in handling
+  // elsewhere on the page. It also defers the first callback until its initial session check settles, so
+  // this never flashes "logged out" on a fresh tab.
   function subscribe(): void {
     // The auth SDK's <script> tag loads independently of this module - never assume window.mosni exists
     // yet (same poll-until-present shape DropZone.tsx and Preview.tsx already use).
@@ -73,17 +79,9 @@ export function initHeaderIdentity(): void {
       return;
     }
     window.mosni.onChange((user) => {
-      if (cancelled) return;
-      renderIdentity(target, user as Claims | null);
+      renderIdentity(target, user as VerifiedClaims | null);
     });
   }
 
   subscribe();
-
-  // No cleanup path is exposed - this runs once for the page's whole lifetime, same as
-  // initShareTarget()/restorePausedUploads(), so there is nothing to cancel from outside. `cancelled` only
-  // guards against a callback landing after a hot-reload in dev.
-  window.addEventListener("beforeunload", () => {
-    cancelled = true;
-  });
 }

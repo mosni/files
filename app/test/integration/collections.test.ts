@@ -310,7 +310,7 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
       const abs = path.join(root, ...diskRelPath(claimed).split("/"));
       await mkdir(path.dirname(abs), { recursive: true });
       await writeFile(abs, "bytes");
-      await commitFileRow(claimed.id, { bytes: 5, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null });
+      await commitFileRow(claimed.id, { bytes: 5, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null, isText: false });
 
       const { deletedFileIds } = await deleteCollectionRecursive(top.id);
       expect(deletedFileIds).toEqual([claimed.id]);
@@ -355,7 +355,7 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
       const abs = path.join(root, ...diskRelPath(claimed).split("/"));
       await mkdir(path.dirname(abs), { recursive: true });
       await writeFile(abs, "bytes");
-      await commitFileRow(claimed.id, { bytes: 5, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null });
+      await commitFileRow(claimed.id, { bytes: 5, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null, isText: false });
 
       const counts = await countDescendants(top.id);
       expect(counts).toEqual({ collectionCount: 2, fileCount: 1 });

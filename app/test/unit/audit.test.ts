@@ -57,6 +57,34 @@ describe("formatAuditLine()", () => {
     const line = formatAuditLine(base({ action: "delete" }));
     expect(line).toBe('hannah deleted "photo.png"');
   });
+
+  // Live-testing addition (2026-08-06): a bulk action is ONE line carrying how many files it touched.
+  describe("count - the bulk-action grouping (Hannah, 2026-08-06)", () => {
+    it("renders a recursive collection delete as one line naming the collection and the file count", () => {
+      const line = formatAuditLine(base({ action: "delete", target: "Holiday", count: 12 }));
+      expect(line).toBe('hannah deleted "Holiday" (12 files)');
+    });
+
+    it("renders a grouped move as one line naming the destination", () => {
+      const line = formatAuditLine(base({ action: "move", target: "Drop Aug 6, 2026", count: 5 }));
+      expect(line).toBe('hannah moved "Drop Aug 6, 2026" (5 files)');
+    });
+
+    it("singularises a one-file bulk action rather than saying '1 files'", () => {
+      expect(formatAuditLine(base({ action: "delete", target: "Holiday", count: 1 }))).toContain("(1 file)");
+    });
+
+    it("puts the count first when combined with other details - it is the headline of a bulk line", () => {
+      const line = formatAuditLine(base({ action: "delete", target: "Holiday", count: 3, protection: "public" }));
+      expect(line).toBe('hannah deleted "Holiday" (3 files, public)');
+    });
+
+    it("an empty collection delete still reports honestly rather than omitting the count", () => {
+      expect(formatAuditLine(base({ action: "delete", target: "Empty", count: 0 }))).toBe(
+        'hannah deleted "Empty" (0 files)',
+      );
+    });
+  });
 });
 
 describe("actorLabel()", () => {

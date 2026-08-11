@@ -12,7 +12,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import sharp from "sharp";
 import { mediaKindByExtension } from "../lib/media.ts";
-import { mimeTypeFor } from "../lib/mime.ts";
+import { looksLikeText, TEXT_DETECT_SAMPLE_BYTES } from "../lib/textDetect.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -21,6 +21,8 @@ export type MediaProbe = {
   height: number | null;
   durationSeconds: number | null;
   textPreview: string | null;
+  // Live-testing addition (2026-08-06): decided from the BYTES by lib/textDetect.ts, never the filename.
+  isText: boolean;
 };
 
 const EMPTY_PROBE: MediaProbe = {
@@ -28,6 +30,7 @@ const EMPTY_PROBE: MediaProbe = {
   height: null,
   durationSeconds: null,
   textPreview: null,
+  isText: false,
 };
 
 async function probeImage(absolutePath: string): Promise<MediaProbe> {
@@ -84,33 +87,44 @@ function cleanTextPreview(raw: string): string | null {
   return cleaned.length > 0 ? cleaned : null;
 }
 
+// Live-testing rewrite (2026-08-06, Hannah): whether a file is text is decided by its BYTES, not its
+// extension. Reads one bounded sample and answers both questions from it - is this text at all, and what
+// is its snippet - so there is exactly one read and one source of truth.
 async function probeText(absolutePath: string): Promise<MediaProbe> {
   const handle = await open(absolutePath, "r");
   try {
-    const buffer = Buffer.alloc(4096);
+    const buffer = Buffer.alloc(TEXT_DETECT_SAMPLE_BYTES);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    const text = buffer.subarray(0, bytesRead).toString("utf8");
-    return { ...EMPTY_PROBE, textPreview: cleanTextPreview(text) };
+    const sample = buffer.subarray(0, bytesRead);
+    if (!looksLikeText(sample)) return { ...EMPTY_PROBE };
+    return { ...EMPTY_PROBE, isText: true, textPreview: cleanTextPreview(sample.toString("utf8")) };
   } finally {
     await handle.close();
   }
 }
 
 export async function probeMedia(absolutePath: string): Promise<MediaProbe> {
+  const filename = path.basename(absolutePath);
+  const kind = mediaKindByExtension(filename);
+
+  // Image/video stay extension-routed: these are the probes that extract dimensions, and running sharp or
+  // ffprobe over every upload on this box (an Atom N2800, D-78) to find out whether it might be an image
+  // is exactly the cost D-20 rules out. A LYING extension is handled by falling through below rather than
+  // by giving up - the old version returned an all-null probe for a text file named ".mp4".
+  if (kind === "image" || kind === "video") {
+    try {
+      return kind === "image" ? await probeImage(absolutePath) : await probeVideo(absolutePath);
+    } catch {
+      // Not actually the media its name claims (or a corrupt one) - fall through to text detection rather
+      // than giving up, so a text file with a misleading extension still previews correctly.
+    }
+  }
+
   try {
-    const filename = path.basename(absolutePath);
-    const kind = mediaKindByExtension(filename);
-    if (kind === "image") return await probeImage(absolutePath);
-    if (kind === "video") return await probeVideo(absolutePath);
-    // Single source of truth with mime.ts/previewContext.ts's own "text" gate (live-testing addition,
-    // 2026-08-06) - a plain-text-mapped extension gets an ingest snippet regardless of which one it is,
-    // rather than a second hardcoded list that ".md" (or any future addition) would need remembering to
-    // update here too.
-    if (mimeTypeFor(filename) === "text/plain") return await probeText(absolutePath);
-    return { ...EMPTY_PROBE };
+    return await probeText(absolutePath);
   } catch {
-    // Corrupt file, sharp refusing the format, ffprobe absent, etc. - a probe failure must never fail an
-    // upload; the file is already committed by the time this runs.
+    // Unreadable file, etc. - a probe failure must never fail an upload; the file is already committed by
+    // the time this runs.
     return { ...EMPTY_PROBE };
   }
 }

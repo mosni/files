@@ -108,6 +108,7 @@ describe("routes/embed.ts + controllers/embed.ts (E5 Wave H, D-140)", () => {
       durationSeconds: 10,
       textPreview: null,
       thumbName: null,
+      isText: false,
     });
     return { collectionName: collection.name };
   }

@@ -28,6 +28,7 @@ import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
 import { can, isFilesAdmin, isSuperuser, type Claims } from "../lib/roles.ts";
 import { buildCollectionPreviewUrl, buildFileUrls, buildThumbUrl } from "../lib/fileUrls.ts";
+import { fileKindFor } from "../lib/fileKind.ts";
 import { isListedFor, mostRestrictive, type Protection, type VisibilityReason } from "../lib/protection.ts";
 import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../lib/browseContext.ts";
 import {
@@ -202,6 +203,9 @@ async function shapeFile(
     previewUrl: urls.previewUrl,
     directUrl: urls.directUrl,
     thumbUrl,
+    // Live-testing addition (2026-08-06): the display kind behind the row's icon. Derived server-side
+    // because it needs `isText`, which lives on the record and is deliberately never exposed raw.
+    kind: fileKindFor(record.name, record.isText),
     width: record.width,
     height: record.height,
     durationSeconds: record.durationSeconds,
