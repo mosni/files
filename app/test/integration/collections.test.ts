@@ -494,6 +494,27 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
       expect(await hasCollectionAclGrant(collection.id, sub)).toBe(true);
       expect(await listCollectionGrants(collection.id)).toEqual([{ sub, canUpload: true }]);
     });
+
+    // Review session 045: the negative half of invariant 6, on the chain walk as well as the direct read -
+    // hasAclGrantOnChain and canUploadTo compare the request's sub in SQL too, so a collation that folds
+    // case/accents/trailing space would hand a nested collection's whole subtree to the wrong account.
+    // See migration 008.
+    it.each([
+      ["differing only in case", "user:byte-exact", "USER:BYTE-EXACT"],
+      ["differing only by a trailing space", "user:byte-exact", "user:byte-exact "],
+      ["differing only by an accent", "user:byte-exact", "user:byté-exact"],
+      ["a prefix of the granted sub", "user:byte-exact", "user:byte"],
+    ] as const)("a sub %s does NOT match the granted row, directly or up the chain", async (_label, granted, probe) => {
+      const parent = await createCollection({ parentId: "", name: `bytes-${randomUUID()}`, ownerSub: "user:a" });
+      const child = await createCollection({ parentId: parent.id, name: `child-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(parent.id, child.id);
+      await grantCollectionAcl(parent.id, granted, true);
+
+      expect(await hasCollectionAclGrant(parent.id, probe)).toBe(false);
+      expect(await hasAclGrantOnChain(child.id, probe)).toBe(false);
+      // ...and the real grant still works, so this is strictness, not a broken read path.
+      expect(await hasAclGrantOnChain(child.id, granted)).toBe(true);
+    });
   });
 
   // A1/A2/A7 (E4.1 live-testing findings, Wave A): the root sentinel must resolve as an empty chain

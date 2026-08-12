@@ -55,8 +55,20 @@ export async function listAccounts(): Promise<InternalResult<DirectoryAccount[]>
   if (!res.ok) {
     return { ok: false, error: "auth_error", status: res.status };
   }
-  const value = (await res.json()) as DirectoryAccount[];
-  return { ok: true, value };
+  // "It never throws" has to survive a 2xx too: a proxy or error page answering 200 with HTML would
+  // otherwise reject here and 500 the share dialog - and on grant/revoke it would 500 AFTER the ACL row
+  // was already written, so the owner sees a failure for a change that actually happened. The shape check
+  // is part of the same rule: a non-array body must not reach callers that .map() over it.
+  let value: unknown;
+  try {
+    value = await res.json();
+  } catch {
+    return { ok: false, error: "auth_error", status: res.status };
+  }
+  if (!Array.isArray(value)) {
+    return { ok: false, error: "auth_error", status: res.status };
+  }
+  return { ok: true, value: value as DirectoryAccount[] };
 }
 
 // §A7.8: grant/revoke ONE of this app's own roles on an existing account. E7 only ever calls this with

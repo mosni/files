@@ -297,7 +297,10 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
     });
   });
 
-  it("D-187: a recipient holding a grant may not grant, revoke or invite on the same object (403)", async () => {
+  // 404, not 403: resolveShareTarget returns null for "not found OR not yours" so the API never confirms
+  // an object exists to someone who may not share it. §1.4's table says 403 and §B1 says 404; review
+  // session 045 confirmed B1 as the intended reading (it matches controllers/manage.ts's existing rule).
+  it("D-187: a recipient holding a grant may not grant, revoke or invite on the same object (404)", async () => {
     const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
     await getPool().query("INSERT INTO file_acl (file_id, sub) VALUES (?, ?)", [file.id, "user:grantee"]);
     asUser("user:grantee");

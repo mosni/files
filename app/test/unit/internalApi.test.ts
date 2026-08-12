@@ -29,6 +29,19 @@ describe("auth/internalApi.ts", () => {
       const result = await listAccounts();
       expect(result).toEqual({ ok: false, error: "auth_unreachable", status: 0 });
     });
+
+    // Review session 045: "it never throws" is the module's load-bearing rule, and a 200 is exactly where
+    // it was still breakable - a proxy or error page answering 200 with HTML made res.json() reject, which
+    // 500s GET /api/shares and (worse) 500s POST /api/shares AFTER the ACL row is already written.
+    it("a 2xx with a non-JSON body becomes ok:false rather than throwing", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("<html>gateway</html>", { status: 200 })));
+      await expect(listAccounts()).resolves.toEqual({ ok: false, error: "auth_error", status: 200 });
+    });
+
+    it("a 2xx whose JSON is not an array becomes ok:false rather than handing back a non-list", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: "nope" }), { status: 200 })));
+      await expect(listAccounts()).resolves.toEqual({ ok: false, error: "auth_error", status: 200 });
+    });
   });
 
   describe("setAccountRole()", () => {

@@ -425,6 +425,30 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
       expect(await hasAclGrant(id, sub)).toBe(true);
       expect(await listFileGrants(id)).toEqual([sub]);
     });
+
+    // Review session 045: the round trips above only prove a sub matches ITSELF - which passed even while
+    // the column collated case/accent/space-insensitively (migration 008). The load-bearing half of
+    // invariant 6 is the NEGATIVE: a sub that is not byte-identical must not match. `hasAclGrant` is what
+    // authorizePrivate calls, so a fold here is an authorization decision, not a cosmetic one.
+    it.each([
+      ["differing only in case", "user:byte-exact", "USER:BYTE-EXACT"],
+      ["differing only by a trailing space", "user:byte-exact", "user:byte-exact "],
+      ["differing only by an accent", "user:byte-exact", "user:byté-exact"],
+      ["a prefix of the granted sub", "user:byte-exact", "user:byte"],
+    ] as const)("a sub %s does NOT match the granted row", async (_label, granted, probe) => {
+      const { id } = await seedCommittedFile({ protection: "private" });
+      await grantFileAcl(id, granted);
+      expect(await hasAclGrant(id, probe)).toBe(false);
+    });
+
+    it("two subs differing only in case are two distinct grants, not one", async () => {
+      const { id } = await seedCommittedFile({ protection: "private" });
+      await grantFileAcl(id, "user:Case");
+      await grantFileAcl(id, "user:case");
+      expect((await listFileGrants(id)).sort()).toEqual(["user:Case", "user:case"].sort());
+      await revokeFileAcl(id, "user:case");
+      expect(await hasAclGrant(id, "user:Case")).toBe(true);
+    });
   });
 
   // Review session 017 - acceptance criterion 11: "Two CONCURRENT same-named uploads into one collection
