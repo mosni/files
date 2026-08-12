@@ -19,6 +19,12 @@ export type Config = {
   // signing every URL with the empty string.
   deliverySigningSecret: string;
   deliveryUrlTtlSeconds: number;
+  // E7/D-191: how long a minted invite link lives. Optional, defaulted the same way
+  // deliveryUrlTtlSeconds is - never added to REQUIRED. 86400 is auth's own APP_LINK_TTL_MAX default, so
+  // the default request is the maximum auth will accept; if the box ever lowers APP_LINK_TTL_MAX, every
+  // mint 400s with ttl_too_long until this is lowered to match (controllers/share.ts surfaces auth's code
+  // so that failure names itself).
+  inviteTtlSeconds: number;
 };
 
 const REQUIRED = [
@@ -38,6 +44,7 @@ const REQUIRED = [
 ] as const;
 
 const DEFAULT_DELIVERY_URL_TTL_SECONDS = 300;
+const DEFAULT_INVITE_TTL_SECONDS = 86400;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const missing = REQUIRED.filter((key) => !env[key]);
@@ -71,5 +78,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     deliveryUrlTtlSeconds: env.DELIVERY_URL_TTL_SECONDS
       ? Number(env.DELIVERY_URL_TTL_SECONDS)
       : DEFAULT_DELIVERY_URL_TTL_SECONDS,
+    inviteTtlSeconds: env.INVITE_TTL_SECONDS ? Number(env.INVITE_TTL_SECONDS) : DEFAULT_INVITE_TTL_SECONDS,
   };
 }

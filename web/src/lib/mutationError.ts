@@ -11,10 +11,25 @@ const MESSAGES: Record<string, string> = {
   invalid_name: "That name can't be used — no slashes, and no leading or trailing spaces.",
   name_taken: "That name is already used here — choose another.",
   invalid_destination: "A collection can't be moved into itself.",
+  // E7 (D-128's whole point extended to the share dialog): a rejected share/invite says why too.
+  not_private: "Only private files can be shared with specific people.",
+  unknown_account: "That account hasn't signed in yet — send them an invite instead.",
+  link_account_not_grantable: "That's an invite account; it already has access through its link.",
+  cannot_share_with_self: "You already have access to your own file.",
 };
 
 export async function toastMutationFailure(res: Response): Promise<void> {
-  if (res.status !== 400 && res.status !== 409) return;
+  // E7 widens this from {400, 409} to also cover 403 (a stale dialog state re-submitted after access
+  // changed) and 502 (auth unreachable) - the share API is the first caller whose failures span that
+  // range; every existing caller (rename/protection/move/delete) never produces those codes, so this is
+  // additive, not a behaviour change for them.
+  if (res.status === 502) {
+    if (typeof window.mosni !== "undefined" && window.mosni.toast) {
+      window.mosni.toast("Can't reach the account directory right now.", { variant: "error" });
+    }
+    return;
+  }
+  if (res.status !== 400 && res.status !== 403 && res.status !== 409) return;
 
   let code: string | undefined;
   try {

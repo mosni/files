@@ -27,7 +27,7 @@ export function mostRestrictive(levels: readonly Protection[]): Protection {
   return levels.reduce((worst, level) => (PROTECTION_ORDER[level] > PROTECTION_ORDER[worst] ? level : worst));
 }
 
-export type VisibilityReason = "own" | "admin" | "granted" | "public";
+export type VisibilityReason = "own" | "hosted" | "granted" | "admin" | "public";
 
 /**
  * Is this row included in a listing for this viewer, and if so, why (D-103's "why can I see this")?
@@ -35,16 +35,23 @@ export type VisibilityReason = "own" | "admin" | "granted" | "public";
  * `protection` MUST be the row's EFFECTIVE level (D-96) - resolved in storage from the ancestor chain,
  * never the stored column read directly. `granted` is an ACL grant on the row or any ancestor collection
  * (D-99); like the protection chain, that is DB I/O, so it is resolved by the caller and handed in as a
- * value - this function stays pure. Precedence (D-103): own, then granted, then admin, then public - an
- * owner who also happens to hold a grant reads as "own", not "granted".
+ * value - this function stays pure. `hostedInOwnCollection` (D-189, E7) is likewise resolved by the
+ * caller - see controllers/browse.ts's PageGrants - never a new query issued from here.
+ *
+ * Precedence (D-103, extended by D-189): own, then hosted, then granted, then admin, then public. `hosted`
+ * sits directly after `own` because both are statements about what the VIEWER owns - an owner who also
+ * happens to hold a grant reads as "own", not "granted", and that same rule extends naturally to a file
+ * hosted in a collection the viewer owns.
  */
 export function isListedFor(
   protection: Protection,
   viewer: { sub: string | null; isAdmin: boolean },
   ownerSub: string | null,
   granted: boolean,
+  hostedInOwnCollection: boolean,
 ): VisibilityReason | null {
   if (viewer.sub !== null && ownerSub !== null && viewer.sub === ownerSub) return "own";
+  if (hostedInOwnCollection) return "hosted";
   if (granted) return "granted";
   if (viewer.isAdmin) return "admin";
   if (protection === "public") return "public";

@@ -474,6 +474,31 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(values).not.toContain("protection");
   });
 
+  // E7/D-190: a collection's owner may delete a file another account uploaded into it, and NOTHING else -
+  // `canManage` is deliberately unchanged, so the hosted row gets Delete and no Rename/Protection/Move/Share.
+  it("a 'hosted' row shows Delete only - no Rename, Protection, Move or Share (D-190)", async () => {
+    (window as unknown as { mosni: unknown }).mosni = {
+      user: () => ({ sub: "user:host", roles: [] }),
+      token: () => "tok",
+      onChange: (cb: (u: unknown) => void) => cb({ sub: "user:host", roles: [] }),
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(makeResponse({ files: [makeFile({ id: "hosted-file", name: "guest.png", reason: "hosted" })] })),
+      ),
+    );
+
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser initialScope="visible" /></MemoryRouter>);
+    });
+    await flush();
+
+    const row = container.querySelector('[data-row-id="hosted-file"]')!;
+    const values = Array.from(row.querySelectorAll("mosni-dropdown-item")).map((item) => item.getAttribute("value")!);
+    expect(values).toEqual(["copy", "delete"]);
+  });
+
   // C7: every row's icon-only trigger, regardless of glyph, still opens the right menu - verifies the
   // dropdown wiring survived the icon-only switch (mosnicat.js itself, and its rendered glyph, are Wave
   // 0's job and covered there / by the D-79 visual check).

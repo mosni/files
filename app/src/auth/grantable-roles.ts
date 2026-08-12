@@ -5,12 +5,15 @@
 //
 // files:admin was dropped in session 007 (preliminary-review, Hannah's call): an admin is a user assigned
 // both lower roles directly in auth, so there is no third role to register.
-const GRANTABLE_ROLES = ["files:write", "files:delete"] as const;
+//
+// `files:read` is registered ONLY so an invite link has a role to carry - auth rejects `roles: []`
+// (`400 not_grantable`). **It gates nothing.** No authorization path in this app may ever call
+// `can(claims, "files:read")`; a share is the ACL row alone (D-182/D-183, Hannah 2026-08-12). Wiring it
+// into a read path would silently reverse that decision.
 
-// Fixed convention, not a per-deploy setting: auth's internal-only listener, reachable via the `auth`
-// network alias at its documented default INTERNAL_PORT (../auth/README.md - "compose never publishes
-// this to the host and nginx never proxies it").
-const AUTH_INTERNAL_API = "http://auth:3001";
+import { AUTH_INTERNAL_API } from "./internalApi.ts";
+
+const GRANTABLE_ROLES = ["files:write", "files:delete", "files:read"] as const;
 
 // Never throws. A dead or unreachable auth must never prevent this app's boot (D-32) - each role is
 // registered independently and a failure is logged, not raised.

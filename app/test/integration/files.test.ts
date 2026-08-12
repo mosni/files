@@ -10,8 +10,11 @@ import {
   commitFileRow,
   deleteFile,
   diskRelPath,
+  grantFileAcl,
   hasAclGrant,
   initFilesStorage,
+  listFileGrants,
+  revokeFileAcl,
   renameFile,
   resolveById,
   resolveByNames,
@@ -369,6 +372,58 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
     it("returns false when no grant exists", async () => {
       const { id } = await seedCommittedFile({ protection: "private" });
       expect(await hasAclGrant(id, `user:${randomUUID()}`)).toBe(false);
+    });
+  });
+
+  // E7 Wave A1: the write half of file_acl (grantFileAcl/revokeFileAcl/listFileGrants).
+  // controllers/share.ts is the only authorization-aware caller; this suite only proves the plain SQL
+  // semantics, including the invariant-6 adversarial round trips.
+  describe("grantFileAcl / revokeFileAcl / listFileGrants (E7)", () => {
+    it("grant makes hasAclGrant true; revoke makes it false again", async () => {
+      const { id } = await seedCommittedFile({ protection: "private" });
+      const sub = `user:${randomUUID()}`;
+
+      expect(await hasAclGrant(id, sub)).toBe(false);
+      await grantFileAcl(id, sub);
+      expect(await hasAclGrant(id, sub)).toBe(true);
+      await revokeFileAcl(id, sub);
+      expect(await hasAclGrant(id, sub)).toBe(false);
+    });
+
+    it("granting the same sub twice is idempotent - still exactly one row, never throws", async () => {
+      const { id } = await seedCommittedFile({ protection: "private" });
+      const sub = `user:${randomUUID()}`;
+
+      await grantFileAcl(id, sub);
+      await expect(grantFileAcl(id, sub)).resolves.toBeUndefined();
+      expect(await listFileGrants(id)).toEqual([sub]);
+    });
+
+    it("listFileGrants returns every granted sub, sorted", async () => {
+      const { id } = await seedCommittedFile({ protection: "private" });
+      const subB = "user:bbbb";
+      const subA = "user:aaaa";
+      await grantFileAcl(id, subB);
+      await grantFileAcl(id, subA);
+      expect(await listFileGrants(id)).toEqual([subA, subB]);
+    });
+
+    it("revoking a sub that was never granted is a no-op, never throws", async () => {
+      const { id } = await seedCommittedFile({ protection: "private" });
+      await expect(revokeFileAcl(id, `user:${randomUUID()}`)).resolves.toBeUndefined();
+    });
+
+    // Invariant 6 is about never PARSING a sub (no LIKE, no SUBSTRING, no split) - these are adversarial
+    // shapes for that, stored and read back exactly as given.
+    it.each([
+      ["a sub containing a colon (D-191's link:<id> shape)", `link:${randomUUID()}`],
+      ["a sub with a trailing space", "user:trailing-space "],
+      ["a 255-char sub", `user:${"x".repeat(250)}`],
+    ] as const)("round-trips %s byte-for-byte", async (_label, sub) => {
+      const { id } = await seedCommittedFile({ protection: "private" });
+      await grantFileAcl(id, sub);
+      expect(await hasAclGrant(id, sub)).toBe(true);
+      expect(await listFileGrants(id)).toEqual([sub]);
     });
   });
 

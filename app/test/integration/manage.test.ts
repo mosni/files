@@ -893,5 +893,52 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       const res = await req("DELETE", "/api/files/doesnotexist0000", { token: "t" });
       expect(res.statusCode).toBe(404);
     });
+
+    // E7/D-190: a collection's owner may delete a file another account uploaded into it, and NOTHING
+    // else - a strictly wider DELETE gate, never a separate authorization path. updateFileHandler
+    // (rename/protection/move) is untouched, so those keep this file's existing "404, never 403" rule for
+    // anyone but the file's own owner or a superuser.
+    describe("D-190: the containing collection's owner may delete a hosted file, and only delete", () => {
+      it("the host may delete a file they do not own", async () => {
+        const collection = await seedCollection("user:host");
+        const file = await seedFile({ collectionId: collection.id, ownerSub: "user:guest" });
+        asUser("user:host");
+        expect((await req("DELETE", `/api/files/${file.id}`, { token: "t" })).statusCode).toBe(204);
+        expect(await resolveById(file.id)).toBeNull();
+      });
+
+      it("the host may NOT rename a file they do not own", async () => {
+        const collection = await seedCollection("user:host2");
+        const file = await seedFile({ collectionId: collection.id, ownerSub: "user:guest2" });
+        asUser("user:host2");
+        const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { name: "renamed.txt" } });
+        expect(res.statusCode).toBe(404);
+      });
+
+      it("the host may NOT change the protection of a file they do not own", async () => {
+        const collection = await seedCollection("user:host3");
+        const file = await seedFile({ collectionId: collection.id, ownerSub: "user:guest3", protection: "unlisted" });
+        asUser("user:host3");
+        const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { protection: "public" } });
+        expect(res.statusCode).toBe(404);
+      });
+
+      it("a root-level file (collectionId '') has no host - a stranger still gets 404 on delete", async () => {
+        // Root files have no owning collection (collection_id === ''), so viewerOwnsContainingCollection
+        // must be false there, not throw on a lookup against the sentinel.
+        const claimed = await seedFile({ collectionId: "", ownerSub: "user:root-file-owner" });
+        createdRootFileIds.push(claimed.id);
+        asUser("user:not-the-owner");
+        const res = await req("DELETE", `/api/files/${claimed.id}`, { token: "t" });
+        expect(res.statusCode).toBe(404);
+      });
+
+      it("a third party who neither owns the file, hosts its collection, nor holds files:delete gets 404 on delete too", async () => {
+        const collection = await seedCollection("user:host4");
+        const file = await seedFile({ collectionId: collection.id, ownerSub: "user:guest4" });
+        asUser("user:third-party");
+        expect((await req("DELETE", `/api/files/${file.id}`, { token: "t" })).statusCode).toBe(404);
+      });
+    });
   });
 });

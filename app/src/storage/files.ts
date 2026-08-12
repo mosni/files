@@ -293,6 +293,28 @@ export async function hasAclGrant(fileId: string, sub: string): Promise<boolean>
   return rows.length > 0;
 }
 
+// E7 Wave A1: the write half of file_acl - controllers/share.ts is the only caller, and it alone owns
+// authorization (D-187). Every sub below is bound as an opaque query parameter - no LIKE, no SUBSTRING, no
+// prefix comparison anywhere (security invariant 6).
+
+export async function listFileGrants(fileId: string): Promise<string[]> {
+  const [rows] = await getPool().query<RowDataPacket[]>(
+    "SELECT sub FROM file_acl WHERE file_id = ? ORDER BY sub",
+    [fileId],
+  );
+  return (rows as { sub: string }[]).map((row) => row.sub);
+}
+
+// Idempotent: re-granting an existing sub is a no-op, never an error - INSERT IGNORE against the
+// (file_id, sub) primary key.
+export async function grantFileAcl(fileId: string, sub: string): Promise<void> {
+  await getPool().query("INSERT IGNORE INTO file_acl (file_id, sub) VALUES (?, ?)", [fileId, sub]);
+}
+
+export async function revokeFileAcl(fileId: string, sub: string): Promise<void> {
+  await getPool().query("DELETE FROM file_acl WHERE file_id = ? AND sub = ?", [fileId, sub]);
+}
+
 function isDuplicateOf(err: unknown, pattern: RegExp): boolean {
   return (
     typeof err === "object" &&

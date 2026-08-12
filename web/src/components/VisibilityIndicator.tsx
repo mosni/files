@@ -7,15 +7,18 @@ import type { VisibilityReason } from "../../../app/src/lib/protection.ts";
 
 const LABEL: Record<VisibilityReason, string> = {
   own: "Yours",
+  hosted: "In your collection",
   granted: "Shared with you",
   admin: "Admin view",
   public: "Public",
 };
 
-// Any Lucide name is valid (mosni-icon takes them by name): a person for your own things, two people for
-// a shared grant, a shield for the admin view, a globe for public - matching how each case reads.
+// Any Lucide name is valid (mosni-icon takes them by name): a person for your own things, an open folder
+// for a file hosted in your own collection (D-189), two people for a shared grant, a shield for the admin
+// view, a globe for public - matching how each case reads.
 const ICON: Record<VisibilityReason, string> = {
   own: "user",
+  hosted: "folder-open",
   granted: "users",
   admin: "shield",
   public: "globe",

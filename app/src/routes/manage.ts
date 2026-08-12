@@ -95,7 +95,7 @@ const updateFileSchema = {
 // exactly like server.ts). A route that carries its own `config.rateLimit` is the one shape the plugin
 // treats as an override: the root's onRoute sees it and attaches that limiter INSTEAD of the global one,
 // with its own Redis key (`<nameSpace><METHOD><url>-`), so the budgets are genuinely separate.
-const writeRateLimit = {
+export const writeRateLimit = {
   max: 300,
   timeWindow: "1 minute",
   keyGenerator: (request: FastifyRequest) => request.headers.authorization ?? request.ip,

@@ -382,6 +382,34 @@ export async function hasCollectionAclGrant(collectionId: string, sub: string): 
   return rows.length > 0;
 }
 
+// E7 Wave A2: the write half of collection_acl - controllers/share.ts is the only caller, and it alone
+// owns authorization (D-187). Every sub below is bound as an opaque query parameter - security invariant 6.
+
+export async function listCollectionGrants(collectionId: string): Promise<{ sub: string; canUpload: boolean }[]> {
+  const [rows] = await getPool().query<RowDataPacket[]>(
+    "SELECT sub, can_upload FROM collection_acl WHERE collection_id = ? ORDER BY sub",
+    [collectionId],
+  );
+  return (rows as { sub: string; can_upload: number }[]).map((row) => ({
+    sub: row.sub,
+    canUpload: row.can_upload === 1,
+  }));
+}
+
+// Re-granting the same person with a DIFFERENT upload flag UPDATES it rather than failing on the
+// (collection_id, sub) primary key - a share dialog toggling "can upload" for someone it already granted
+// must not have to revoke-then-regrant.
+export async function grantCollectionAcl(collectionId: string, sub: string, canUpload: boolean): Promise<void> {
+  await getPool().query(
+    "INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE can_upload = VALUES(can_upload)",
+    [collectionId, sub, canUpload ? 1 : 0],
+  );
+}
+
+export async function revokeCollectionAcl(collectionId: string, sub: string): Promise<void> {
+  await getPool().query("DELETE FROM collection_acl WHERE collection_id = ? AND sub = ?", [collectionId, sub]);
+}
+
 // D-99: authorized identity for a restrictive collection's contents includes an ACL grant on ANY
 // ancestor collection, not only the one immediately holding the object - a grant on a top-level
 // collection must pierce down to everything nested beneath it. Walks the same chain protectionChain

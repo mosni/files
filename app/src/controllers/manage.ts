@@ -561,7 +561,13 @@ export async function deleteFileHandler(
     return;
   }
   const isOwner = record.ownerSub !== null && record.ownerSub === claims.sub;
-  const allowed = isOwner || isSuperuser(claims) || can(claims, "files:delete");
+  // D-190 (E7): a collection's owner may DELETE a file another account uploaded into it, and nothing
+  // else - false at the root (collection_id === ""), which has no owner to match. This is strictly wider
+  // than the existing gate, never a separate path; rename/protection/move (updateFileHandler) are
+  // deliberately untouched - D-190 is one right, not a general host authority.
+  const viewerOwnsContainingCollection =
+    record.collectionId !== "" && (await resolveCollectionById(record.collectionId))?.ownerSub === claims.sub;
+  const allowed = isOwner || isSuperuser(claims) || can(claims, "files:delete") || viewerOwnsContainingCollection;
   if (!allowed) {
     reply.code(404).send();
     return;

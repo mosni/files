@@ -11,10 +11,14 @@ import {
   countDescendants,
   createCollection,
   deleteCollectionRecursive,
+  grantCollectionAcl,
   hasAclGrantOnChain,
+  hasCollectionAclGrant,
   isDescendantOf,
+  listCollectionGrants,
   listCollectionsFor,
   moveCollection,
+  revokeCollectionAcl,
   protectionChain,
   renameCollection,
   resolveCollectionById,
@@ -409,6 +413,86 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
 
     it("the root ('') is not a dangling parent - it is an empty chain, no ACL rows", async () => {
       expect(await hasAclGrantOnChain("", "user:anybody")).toBe(false);
+    });
+  });
+
+  // E7 Wave A2: the write half of collection_acl. controllers/share.ts owns authorization; this suite
+  // proves the plain SQL semantics, including D-184's view-vs-upload split.
+  describe("grantCollectionAcl / revokeCollectionAcl / listCollectionGrants (E7)", () => {
+    it("grant makes hasCollectionAclGrant true; revoke makes it false again", async () => {
+      const collection = await createCollection({ parentId: "", name: `share-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      const sub = "user:grantee";
+
+      expect(await hasCollectionAclGrant(collection.id, sub)).toBe(false);
+      await grantCollectionAcl(collection.id, sub, false);
+      expect(await hasCollectionAclGrant(collection.id, sub)).toBe(true);
+      await revokeCollectionAcl(collection.id, sub);
+      expect(await hasCollectionAclGrant(collection.id, sub)).toBe(false);
+    });
+
+    // D-184: hasAclGrantOnChain (read) ignores can_upload entirely, while canUploadTo (write) requires it -
+    // a view-only grant must be visible to the former and NOT to the latter.
+    it("a view-only grant (canUpload: false) reads via hasAclGrantOnChain but does NOT let canUploadTo pass", async () => {
+      const collection = await createCollection({ parentId: "", name: `view-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      const sub = "user:viewer";
+
+      await grantCollectionAcl(collection.id, sub, false);
+      expect(await hasAclGrantOnChain(collection.id, sub)).toBe(true);
+      expect(await canUploadTo(collection, { sub })).toBe(false);
+    });
+
+    it("re-granting the same sub with canUpload: true UPDATES the row rather than throwing", async () => {
+      const collection = await createCollection({ parentId: "", name: `upgrade-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      const sub = "user:upgraded";
+
+      await grantCollectionAcl(collection.id, sub, false);
+      expect(await canUploadTo(collection, { sub })).toBe(false);
+
+      await expect(grantCollectionAcl(collection.id, sub, true)).resolves.toBeUndefined();
+      expect(await canUploadTo(collection, { sub })).toBe(true);
+      expect(await listCollectionGrants(collection.id)).toEqual([{ sub, canUpload: true }]);
+    });
+
+    it("a grant on a parent collection reaches a file three levels down via hasAclGrantOnChain", async () => {
+      const top = await createCollection({ parentId: "", name: `deep-grant-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(top.id);
+      const mid = await createCollection({ parentId: top.id, name: "mid", ownerSub: "user:a" });
+      createdCollectionIds.push(mid.id);
+      const deep = await createCollection({ parentId: mid.id, name: "deep", ownerSub: "user:a" });
+      createdCollectionIds.push(deep.id);
+
+      await grantCollectionAcl(top.id, "user:deep-grantee", true);
+      expect(await hasAclGrantOnChain(deep.id, "user:deep-grantee")).toBe(true);
+    });
+
+    it("listCollectionGrants returns every granted sub with its canUpload flag, sorted", async () => {
+      const collection = await createCollection({ parentId: "", name: `list-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      await grantCollectionAcl(collection.id, "user:bbbb", true);
+      await grantCollectionAcl(collection.id, "user:aaaa", false);
+      expect(await listCollectionGrants(collection.id)).toEqual([
+        { sub: "user:aaaa", canUpload: false },
+        { sub: "user:bbbb", canUpload: true },
+      ]);
+    });
+
+    it("revoking a sub that was never granted is a no-op, never throws", async () => {
+      const collection = await createCollection({ parentId: "", name: `noop-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      await expect(revokeCollectionAcl(collection.id, "user:nobody")).resolves.toBeUndefined();
+    });
+
+    // Security invariant 6: matched byte-for-byte, never a prefix.
+    it("round-trips a sub containing a colon (D-191's link:<id> shape) byte-for-byte", async () => {
+      const collection = await createCollection({ parentId: "", name: `link-sub-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      const sub = `link:${randomUUID()}`;
+      await grantCollectionAcl(collection.id, sub, true);
+      expect(await hasCollectionAclGrant(collection.id, sub)).toBe(true);
+      expect(await listCollectionGrants(collection.id)).toEqual([{ sub, canUpload: true }]);
     });
   });
 

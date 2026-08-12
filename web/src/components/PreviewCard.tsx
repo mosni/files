@@ -13,6 +13,7 @@ import { CopyLink } from "./CopyLink.tsx";
 import { IconConfirmCancel } from "./InlineRename.tsx";
 import { authHeaders, patchFile, updatedContext } from "../lib/filePatch.ts";
 import { ManageControls } from "./ManageControls.tsx";
+import { ShareDialog } from "./ShareDialog.tsx";
 import { DownloadFallback } from "./VideoPreview.tsx";
 
 // E5 Wave F: lazy, not a static import. Vidstack (VideoPreview.tsx's own dependency) is genuinely heavy
@@ -191,6 +192,9 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
   const [renaming, setRenaming] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // E7 (D-185): the same ShareDialog the row overflow menu opens, mounted here for the preview page's
+  // owner-only entry point.
+  const [shareOpen, setShareOpen] = useState(false);
 
   // "make the existing title editable without turning it into an input" - the <h1> itself becomes
   // `contentEditable` rather than being swapped for a separate <input>. Uncontrolled deliberately: the
@@ -425,7 +429,20 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
       </div>
       {renderMedia(ctx)}
       <CopyLink previewUrl={ctx.previewUrl} directUrl={ctx.directUrl} />
-      {ctx.isOwner && <ManageControls context={ctx} onUpdate={setCtx} />}
+      {ctx.isOwner && (
+        <>
+          <ManageControls context={ctx} onUpdate={setCtx} />
+          <button
+            type="button"
+            className="btn-ghost btn-sm"
+            style={{ justifySelf: "start", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+            onClick={() => setShareOpen(true)}
+          >
+            <mosni-icon name="user-plus" size="16" /> Share
+          </button>
+          <ShareDialog type="file" id={ctx.id} objectLabel={ctx.name} open={shareOpen} onClose={() => setShareOpen(false)} />
+        </>
+      )}
     </div>
   );
 }

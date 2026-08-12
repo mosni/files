@@ -26,56 +26,85 @@ describe("isListedFor()", () => {
       ["owned collection", "user:owner"],
       ["unowned collection", null],
     ] as const)("%s", (_label, ownerSub) => {
-      expect(isListedFor("public", anon, ownerSub, false)).toBe("public");
+      expect(isListedFor("public", anon, ownerSub, false, false)).toBe("public");
       for (const protection of NON_PUBLIC) {
-        expect(isListedFor(protection, anon, ownerSub, false)).toBeNull();
+        expect(isListedFor(protection, anon, ownerSub, false, false)).toBeNull();
       }
     });
   });
 
   describe("the owner sees all four levels of their own files, reason 'own'", () => {
     it.each(PROTECTIONS)("%s", (protection) => {
-      expect(isListedFor(protection, owner, "user:owner", false)).toBe("own");
+      expect(isListedFor(protection, owner, "user:owner", false, false)).toBe("own");
     });
   });
 
   describe("an admin sees everything, including an unowned collection, reason 'admin'", () => {
     it.each(PROTECTIONS)("%s, owned", (protection) => {
-      expect(isListedFor(protection, admin, "user:owner", false)).toBe("admin");
+      expect(isListedFor(protection, admin, "user:owner", false, false)).toBe("admin");
     });
 
     it.each(PROTECTIONS)("%s, unowned", (protection) => {
-      expect(isListedFor(protection, admin, null, false)).toBe("admin");
+      expect(isListedFor(protection, admin, null, false, false)).toBe("admin");
     });
   });
 
   describe("a signed-in non-owner, non-admin, non-granted viewer sees only public", () => {
     it("public is visible, reason 'public'", () => {
-      expect(isListedFor("public", otherUser, "user:owner", false)).toBe("public");
+      expect(isListedFor("public", otherUser, "user:owner", false, false)).toBe("public");
     });
 
     it.each(NON_PUBLIC)("%s is hidden", (protection) => {
-      expect(isListedFor(protection, otherUser, "user:owner", false)).toBeNull();
+      expect(isListedFor(protection, otherUser, "user:owner", false, false)).toBeNull();
     });
 
     it("still sees nothing non-public in an unowned collection - there is no owner to match", () => {
       for (const protection of NON_PUBLIC) {
-        expect(isListedFor(protection, otherUser, null, false)).toBeNull();
+        expect(isListedFor(protection, otherUser, null, false, false)).toBeNull();
       }
     });
   });
 
-  describe("an ACL grant, reason 'granted' (D-103: unreachable in-product until E7, directly testable now)", () => {
+  describe("an ACL grant, reason 'granted' (E7)", () => {
     it.each(PROTECTIONS)("%s is listed for a grantee", (protection) => {
-      expect(isListedFor(protection, otherUser, "user:owner", true)).toBe("granted");
+      expect(isListedFor(protection, otherUser, "user:owner", true, false)).toBe("granted");
     });
 
     it("own takes precedence over granted", () => {
-      expect(isListedFor("private", owner, "user:owner", true)).toBe("own");
+      expect(isListedFor("private", owner, "user:owner", true, false)).toBe("own");
     });
 
     it("granted takes precedence over admin", () => {
-      expect(isListedFor("private", admin, "user:owner", true)).toBe("granted");
+      expect(isListedFor("private", admin, "user:owner", true, false)).toBe("granted");
+    });
+  });
+
+  // D-189 (E7): a fifth reason for a file another account uploaded into a collection the VIEWER owns -
+  // "hosted", "In your collection". Precedence: own, then hosted, then granted, then admin, then public.
+  describe("hostedInOwnCollection, reason 'hosted' (D-189)", () => {
+    it.each(PROTECTIONS)("%s is listed for the host, even with no grant and no admin", (protection) => {
+      expect(isListedFor(protection, owner, "user:other", false, true)).toBe("hosted");
+    });
+
+    it("own beats hosted (the viewer's own row, hostedInOwnCollection true is nonsensical but must not flip the answer)", () => {
+      expect(isListedFor("private", owner, "user:owner", false, true)).toBe("own");
+    });
+
+    it("hosted beats granted", () => {
+      expect(isListedFor("private", owner, "user:other", true, true)).toBe("hosted");
+    });
+
+    it("hosted beats admin", () => {
+      expect(isListedFor("private", admin, "user:other", false, true)).toBe("hosted");
+    });
+
+    it("hosted beats public", () => {
+      expect(isListedFor("public", owner, "user:other", false, true)).toBe("hosted");
+    });
+
+    it("a non-hosted row is unaffected (falls through to the existing precedence)", () => {
+      expect(isListedFor("public", otherUser, "user:owner", false, false)).toBe("public");
+      expect(isListedFor("private", otherUser, "user:owner", false, false)).toBeNull();
     });
   });
 });

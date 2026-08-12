@@ -32,6 +32,7 @@ describe("loadConfig()", () => {
       port: 3000,
       deliverySigningSecret: "test-signing-secret",
       deliveryUrlTtlSeconds: 300,
+      inviteTtlSeconds: 86400,
     });
   });
 
@@ -66,5 +67,14 @@ describe("loadConfig()", () => {
   it("DELIVERY_URL_TTL_SECONDS is honoured when set", () => {
     const config = loadConfig({ ...VALID_ENV, DELIVERY_URL_TTL_SECONDS: "60" });
     expect(config.deliveryUrlTtlSeconds).toBe(60);
+  });
+
+  it("INVITE_TTL_SECONDS defaults to 86400 when unset (E7 - auth's own APP_LINK_TTL_MAX default)", () => {
+    expect(loadConfig(VALID_ENV).inviteTtlSeconds).toBe(86400);
+  });
+
+  it("INVITE_TTL_SECONDS is honoured when set", () => {
+    const config = loadConfig({ ...VALID_ENV, INVITE_TTL_SECONDS: "3600" });
+    expect(config.inviteTtlSeconds).toBe(3600);
   });
 });

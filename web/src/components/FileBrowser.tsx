@@ -44,6 +44,7 @@ import { upsertJob, useReloadSignal } from "../lib/jobs.ts";
 import { DropZone } from "./DropZone.tsx";
 import { IconConfirmCancel, RenameInput } from "./InlineRename.tsx";
 import { ProtectionControl } from "./ProtectionControl.tsx";
+import { ShareDialog } from "./ShareDialog.tsx";
 import { VisibilityIndicator } from "./VisibilityIndicator.tsx";
 
 type MosniUser = Claims | null;
@@ -127,13 +128,15 @@ function delay(ms: number): Promise<void> {
 
 // D-104: rename/protection stay owner-or-superuser only. D-115 (closes BROWSE-ADMIN-DELETE): delete is
 // ADDITIONALLY offered to a files:delete holder, with the same affordance and confirmation as an owner's -
-// a strictly wider gate than manage, never a separate path.
+// a strictly wider gate than manage, never a separate path. D-190 (E7) widens delete once more: the
+// containing collection's owner may delete a file hosted there - `canManage` is deliberately UNCHANGED, so
+// a hosted row gets Delete and nothing else (share included - D-187: only the file's own owner shares it).
 function canManage(reason: VisibilityReason, user: MosniUser): boolean {
   return reason === "own" || (user !== null && isSuperuser(user));
 }
 
 function canDelete(reason: VisibilityReason, user: MosniUser): boolean {
-  return canManage(reason, user) || (user !== null && can(user, "files:delete"));
+  return canManage(reason, user) || (user !== null && can(user, "files:delete")) || reason === "hosted";
 }
 
 async function copyLinkToClipboard(url: string): Promise<void> {
@@ -214,6 +217,7 @@ function RowActions({
   onRename,
   onProtection,
   onMove,
+  onShare,
   onDeleteSelected,
 }: {
   name: string;
@@ -223,6 +227,7 @@ function RowActions({
   onRename: () => void;
   onProtection: () => void;
   onMove: () => void;
+  onShare: () => void;
   onDeleteSelected: () => void;
 }) {
   const ref = useRef<HTMLElement>(null);
@@ -236,11 +241,12 @@ function RowActions({
       else if (value === "rename") onRename();
       else if (value === "protection") onProtection();
       else if (value === "move") onMove();
+      else if (value === "share") onShare();
       else if (value === "delete") onDeleteSelected();
     }
     el.addEventListener("mosni-dropdown-select", onSelect);
     return () => el.removeEventListener("mosni-dropdown-select", onSelect);
-  }, [previewUrl, onRename, onProtection, onMove, onDeleteSelected]);
+  }, [previewUrl, onRename, onProtection, onMove, onShare, onDeleteSelected]);
 
   return (
     // E4.1 Wave E findings (C7, finding 3): icon-only (Wave 0.3) - just the ⋮ glyph, no visible text and
@@ -254,6 +260,9 @@ function RowActions({
       {manage && <mosni-dropdown-item value="protection">Protection</mosni-dropdown-item>}
       {/* G3 (E4.1 live-testing findings): gated on `manage`, same as rename/protection. */}
       {manage && <mosni-dropdown-item value="move">Move</mosni-dropdown-item>}
+      {/* E7: gated on `manage` too - only the object's own owner (or a superuser) may share it (D-187),
+          exactly the same population that may rename/change protection/move it. */}
+      {manage && <mosni-dropdown-item value="share">Share</mosni-dropdown-item>}
       {mayDelete && (
         <mosni-dropdown-item value="delete" variant="danger">
           Delete
@@ -296,6 +305,7 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
   const [renameValue, setRenameValue] = useState(row.name);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [moveDestination, setMoveDestination] = useState("");
   const [moveCollections, setMoveCollections] = useState<CollectionOption[]>([]);
   const [moveCollectionsLoaded, setMoveCollectionsLoaded] = useState(false);
@@ -426,6 +436,7 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
               onRename={startRename}
               onProtection={() => setPanel("protection")}
               onMove={openMove}
+              onShare={() => setShareOpen(true)}
               onDeleteSelected={() => setDeleteOpen(true)}
             />
           )}
@@ -446,6 +457,13 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
             collections={moveCollections}
             onConfirm={() => void submitMove()}
             onCancel={() => setMoveOpen(false)}
+          />
+          <ShareDialog
+            type="file"
+            id={row.id}
+            objectLabel={row.name}
+            open={shareOpen}
+            onClose={() => setShareOpen(false)}
           />
         </td>
       </tr>
@@ -476,6 +494,7 @@ function CollectionRow({
   const [pending, setPending] = useState<{ collectionCount: number; fileCount: number } | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [moveDestination, setMoveDestination] = useState("");
   const [moveCollections, setMoveCollections] = useState<CollectionOption[]>([]);
   const [moveCollectionsLoaded, setMoveCollectionsLoaded] = useState(false);
@@ -614,6 +633,7 @@ function CollectionRow({
               onRename={startRename}
               onProtection={() => setPanel("protection")}
               onMove={openMove}
+              onShare={() => setShareOpen(true)}
               onDeleteSelected={() => void requestDelete()}
             />
           )}
@@ -649,6 +669,13 @@ function CollectionRow({
             collections={moveCollections}
             onConfirm={() => void submitMove()}
             onCancel={() => setMoveOpen(false)}
+          />
+          <ShareDialog
+            type="collection"
+            id={row.id}
+            objectLabel={row.name}
+            open={shareOpen}
+            onClose={() => setShareOpen(false)}
           />
         </td>
       </tr>

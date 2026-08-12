@@ -74,7 +74,12 @@ type Viewer = { sub: string | null; isAdmin: boolean };
 // isAdmin/chain-grant). Threaded into reasonFor() below so a link-authorized listing's rows are labelled
 // "granted", never mislabelled "public", and into listChildCollections/listFilesFor to pick the widened
 // D-125 breadth.
-type PageGrants = { chainGranted: boolean; linkAuthorizedOnly: boolean };
+//
+// `hostedInOwnCollection` (D-189, E7) is a PAGE-LEVEL fact, not a per-row one: true only when the viewer
+// owns the collection being browsed (`viewer.sub === targetOwnerSub`), computed once in browseHandler. It
+// is never a new query - every row on this page already lives inside the same target the viewer owns, so
+// every row that is not the viewer's OWN gets the same "hosted" answer.
+type PageGrants = { chainGranted: boolean; linkAuthorizedOnly: boolean; hostedInOwnCollection: boolean };
 
 // D-99's identity list for reaching a NON-public target collection: owner, superuser, isFilesAdmin (D-101
 // survives here as `visible`'s admin branch - an admin browsing into any collection must not 404, which is
@@ -105,10 +110,11 @@ async function reasonFor(
   viewer: Viewer,
   resolveGranted: () => Promise<boolean>,
   linkAuthorizedOnly: boolean,
+  hostedInOwnCollection: boolean,
 ): Promise<VisibilityReason> {
   const isOwn = viewer.sub !== null && ownerSub !== null && viewer.sub === ownerSub;
   const granted = isOwn ? false : await resolveGranted();
-  const reason = isListedFor(effectiveProtection, viewer, ownerSub, granted);
+  const reason = isListedFor(effectiveProtection, viewer, ownerSub, granted, hostedInOwnCollection);
   if (reason !== null) return reason;
   // D-125 (renamed from A5's tokenAuthorizedOnly): isListedFor legitimately returns null for a row this
   // endpoint chose to list ONLY when the whole page's reachability came from the target collection's own
@@ -150,6 +156,7 @@ async function shapeCollection(
     viewer,
     async () => grants.chainGranted || (viewer.sub !== null && (await hasCollectionAclGrant(record.id, viewer.sub))),
     grants.linkAuthorizedOnly,
+    grants.hostedInOwnCollection,
   );
   const previewUrl = buildCollectionPreviewUrl(
     config,
@@ -184,6 +191,7 @@ async function shapeFile(
     viewer,
     async () => grants.chainGranted || (viewer.sub !== null && (await hasAclGrant(record.id, viewer.sub))),
     grants.linkAuthorizedOnly,
+    grants.hostedInOwnCollection,
   );
   const urls = buildFileUrls(config, effectiveProtection, [...pathSegments, record.name], record.linkToken);
   const thumbUrl = buildThumbUrl(
@@ -360,7 +368,11 @@ export async function browseHandler(request: FastifyRequest, reply: FastifyReply
     pathSegments = rawBreadcrumb.map((crumb) => crumb.name);
   }
 
-  const grants: PageGrants = { ...(await resolvePageGrants(collectionId, viewer)), linkAuthorizedOnly };
+  // D-189: a page-level fact, computed once - true only when the viewer owns the TARGET collection being
+  // browsed. `targetOwnerSub` is null at the pseudo-root (there is no single collection to host anything),
+  // so this is structurally false there.
+  const hostedInOwnCollection = viewer.sub !== null && targetOwnerSub !== null && viewer.sub === targetOwnerSub;
+  const grants: PageGrants = { ...(await resolvePageGrants(collectionId, viewer)), linkAuthorizedOnly, hostedInOwnCollection };
   // See listChildCollections'/listFilesFor's header comment - this is the SAME identity list
   // isIdentityAuthorizedForTarget already used for the reachability gate above (owner/superuser/chain-
   // grant), minus the token bypass (a bare token authorizes this one document/listing, not elevated

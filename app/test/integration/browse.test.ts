@@ -727,6 +727,52 @@ describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scop
     });
   });
 
+  // E7/D-189: the fifth reason - a file another account uploaded into a collection the VIEWER owns.
+  describe("the fifth VisibilityReason: 'hosted' (D-189)", () => {
+    it("the collection's owner sees another account's file inside it as 'hosted', with no 500", async () => {
+      const collection = await seedCollection({ ownerSub: "user:host", protection: "unlisted" });
+      const file = await seedFile({ collectionId: collection.id, ownerSub: "user:guest", protection: "private" });
+      asUser("user:host");
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as BrowseResponse;
+      expect(body.files.find((f) => f.id === file.id)?.reason).toBe("hosted");
+    });
+
+    it("an admin browsing the same page still reads 'admin', not 'hosted'", async () => {
+      const collection = await seedCollection({ ownerSub: "user:host2", protection: "unlisted" });
+      const file = await seedFile({ collectionId: collection.id, ownerSub: "user:guest2", protection: "private" });
+      asAdmin("user:the-admin");
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
+      const body = res.json() as BrowseResponse;
+      expect(body.files.find((f) => f.id === file.id)?.reason).toBe("admin");
+    });
+
+    it("the file's own uploader still sees it as 'own', not 'hosted'", async () => {
+      const collection = await seedCollection({ ownerSub: "user:host3", protection: "unlisted" });
+      const file = await seedFile({ collectionId: collection.id, ownerSub: "user:guest3", protection: "private" });
+      asUser("user:guest3");
+      const res = await get(`/api/browse?scope=mine`, "t");
+      // scope=mine only lists what the viewer owns AT the queried collectionId; the guest's own file lives
+      // inside another owner's collection, so query it directly by collectionId instead - scope=visible,
+      // since scope=mine additionally requires OWNING the target collection itself (browseHandler 404s
+      // otherwise).
+      void res;
+      const viaVisible = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
+      const body = viaVisible.json() as BrowseResponse;
+      expect(body.files.find((f) => f.id === file.id)?.reason).toBe("own");
+    });
+
+    it("a row not hosted in the viewer's own collection is unaffected", async () => {
+      const collection = await seedCollection({ ownerSub: "user:stranger-host", protection: "public" });
+      const file = await seedFile({ collectionId: collection.id, ownerSub: "user:stranger-host", protection: "public" });
+      asUser("user:someone-else");
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
+      const body = res.json() as BrowseResponse;
+      expect(body.files.find((f) => f.id === file.id)?.reason).toBe("public");
+    });
+  });
+
   describe("ordering and pagination (D-102)", () => {
     it("collections come before files, both newest-first", async () => {
       const parent = await seedCollection({ ownerSub: "user:order", protection: "public", name: `order-${randomUUID()}` });

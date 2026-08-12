@@ -277,6 +277,21 @@ const strangerCollection = await seedBrowserCollection({
 });
 await seedBrowserFile(strangerCollection, "someone-elses-file.txt", "user:visual-check-stranger", "unlisted");
 
+// E7: a private file owned by WRITER, with two grants already written directly (not through the UI) -
+// one a real-looking account (reusing the same sub the uploader-block states already use, so its picture
+// resolves against the same fixture identity), one an INVITED account (D-191's link:<id> shape), which is
+// exactly the case ShareDialog.tsx must render by its sub alone, since auth's directory structurally
+// excludes link-bound accounts. `deletableTop` (owned by WRITER) already exists above; `conn` is still
+// open here (it closes below, after every fixture in this file is done with it).
+const shareTargetPrivate = await seedBrowserFile(deletableTop, "confidential-share.txt", WRITER.sub, "private");
+await conn.execute("INSERT INTO file_acl (file_id, sub) VALUES (?, ?)", [
+  shareTargetPrivate,
+  "google:118273645500192837465",
+]);
+await conn.execute("INSERT INTO file_acl (file_id, sub) VALUES (?, ?)", [shareTargetPrivate, "link:visualcheck00000001"]);
+// D-190/D-189: a file another account uploaded into WRITER's own collection - the "hosted" row.
+await seedBrowserFile(deletableTop, "guest-upload.txt", "user:visual-check-guest", "unlisted");
+
 await conn.end();
 
 // Stubs the auth SDK before any page script runs, so the SIGNED-IN drop zone can be rendered without a
@@ -740,6 +755,100 @@ const PAGES = [
       await row.locator("mosni-dropdown-item", { hasText: "Delete" }).click();
       await p.waitForSelector("text=This can't be undone.", { timeout: 10_000 }).catch(() => {});
       await p.waitForTimeout(150);
+    },
+  },
+  {
+    id: "share-dialog-open-with-grants",
+    label: "Share dialog - a private file with two grants (one invited)",
+    url: `/f/vis-${run}-deletable`,
+    note: "E7/D-185: the share dialog, opened on `confidential-share.txt` (private, two grants pre-seeded " +
+      "directly). One grant is a real-looking account (must show its name, from the directory lookup); " +
+      "the other is an INVITED account (`link:visualcheck00000001`) and MUST render its raw sub, never a " +
+      "blank row or a crash - auth's directory structurally excludes link-bound accounts, so this is the " +
+      "one grant this check can prove the sub-fallback for without a live invite. The people-picker below " +
+      "the grant list will be EMPTY here - GET /api/accounts calls auth's internal API, which this sandbox " +
+      "has no reachable `auth` container for at all (a structural sandbox gap, not a defect - see the box " +
+      "checklist in verification-concept.md for where this is proven for real).",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.waitForSelector('[data-row-id]:has-text("confidential-share.txt")', { timeout: 10_000 }).catch(() => {});
+      const row = p.locator("[data-row-id]", { hasText: "confidential-share.txt" });
+      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
+      await row.locator("mosni-dropdown-item", { hasText: "Share" }).click({ timeout: 5_000 }).catch(() => {});
+      await p.waitForSelector("text=link:visualcheck00000001", { timeout: 10_000 }).catch(() => {});
+      await p.waitForTimeout(200);
+    },
+  },
+  {
+    id: "share-dialog-refusal",
+    label: "Share dialog - the refusal state (an unlisted file)",
+    url: `/f/vis-${run}-deletable`,
+    note: "D-186: sharing is refused unless the object's EFFECTIVE protection is private. Opened on " +
+      "`top-file.txt` (unlisted). Must name the current level and point at the protection control - no " +
+      "picker, no grant list, no Invite action anywhere in this shot.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.waitForSelector('[data-row-id]:has-text("top-file.txt")', { timeout: 10_000 }).catch(() => {});
+      const row = p.locator("[data-row-id]", { hasText: "top-file.txt" });
+      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
+      await row.locator("mosni-dropdown-item", { hasText: "Share" }).click({ timeout: 5_000 }).catch(() => {});
+      await p.waitForSelector("text=Only private files can be shared", { timeout: 10_000 }).catch(() => {});
+      await p.waitForTimeout(200);
+    },
+  },
+  {
+    id: "share-dialog-picker-filter-typed",
+    label: "Share dialog - the picker with a filter typed",
+    url: `/f/vis-${run}-deletable`,
+    note: "The 'Add people' filter input with text typed into it. Same structural sandbox gap as the " +
+      "grants state above - the candidate list below the filter will be empty here (no reachable `auth` " +
+      "container), but the input itself, its label and placement are what this shot is for.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.waitForSelector('[data-row-id]:has-text("confidential-share.txt")', { timeout: 10_000 }).catch(() => {});
+      const row = p.locator("[data-row-id]", { hasText: "confidential-share.txt" });
+      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
+      await row.locator("mosni-dropdown-item", { hasText: "Share" }).click({ timeout: 5_000 }).catch(() => {});
+      await p.waitForSelector('input[id^="share-picker-filter-"]', { timeout: 10_000 }).catch(() => {});
+      await p.locator('input[id^="share-picker-filter-"]').fill("ali").catch(() => {});
+      await p.waitForTimeout(200);
+    },
+  },
+  {
+    id: "share-dialog-invite-action",
+    label: "Share dialog - the 'Invite someone without an account' action, clicked",
+    url: `/f/vis-${run}-deletable`,
+    note: "D-191. ⚠ KNOWN SANDBOX-ONLY GAP, not a defect: minting a real invite calls auth's internal " +
+      "/internal/links, and this compose network has no `auth` container reachable at all (only " +
+      "mock-idp, which is a JWT issuer, not auth's internal API) - so this click will show an error toast " +
+      "here, never the minted URL. Claiming a real invite end to end is the one acceptance criterion no " +
+      "automated tier or this check can prove; it is the mandatory box-only check in " +
+      "verification-concept.md's manual-check list. This state still belongs in the durable list so a " +
+      "REAL box run captures the real minted-URL state.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.waitForSelector('[data-row-id]:has-text("confidential-share.txt")', { timeout: 10_000 }).catch(() => {});
+      const row = p.locator("[data-row-id]", { hasText: "confidential-share.txt" });
+      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
+      await row.locator("mosni-dropdown-item", { hasText: "Share" }).click({ timeout: 5_000 }).catch(() => {});
+      await p.waitForSelector("text=Invite someone without an account", { timeout: 10_000 }).catch(() => {});
+      await p.locator("button", { hasText: "Invite someone without an account" }).click({ timeout: 5_000 }).catch(() => {});
+      await p.waitForTimeout(500);
+    },
+  },
+  {
+    id: "browser-hosted-row",
+    label: "Collection page - a 'hosted' row (another account's file, D-189/D-190)",
+    url: `/f/vis-${run}-deletable`,
+    note: "E7/D-189: `guest-upload.txt` was uploaded by a different account into WRITER's own collection. " +
+      "The visibility indicator must read 'In your collection' (folder-open icon), and the row's overflow " +
+      "menu, opened here, must offer Delete and ONLY Delete - no Rename, Protection, Move or Share (D-190).",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.waitForSelector('[data-row-id]:has-text("guest-upload.txt")', { timeout: 10_000 }).catch(() => {});
+      const row = p.locator("[data-row-id]", { hasText: "guest-upload.txt" });
+      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
+      await p.waitForTimeout(200);
     },
   },
   {
