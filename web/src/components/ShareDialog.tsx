@@ -168,6 +168,18 @@ export function ShareDialog({
 
   return (
     <mosni-modal heading={`Share "${objectLabel}"`} open={open}>
+      {/* This wrapper is load-bearing, not layout (review session 045, a crash Hannah hit live). A real
+          mosni-modal MOVES its light-DOM children on connect - `takeSlot`/`takeDefault` call
+          `child.remove()` and re-parent everything into a <dialog> it builds. React does not know that, so
+          it still believes these nodes are direct children of <mosni-modal>. Swapping one of them later
+          makes React call removeChild/insertBefore on the wrong parent, the DOM throws NotFoundError in
+          the commit phase, and the ENTIRE React root unmounts - a white screen, not a broken dialog.
+          Keeping <mosni-modal>'s own child list structurally constant ([this div, the footer button]) is
+          what makes the branching below safe: everything inside this div is under the relocated boundary,
+          where React's parent references are still correct. This is the same D-8 class as the Move and
+          Delete modals, but those only ever mutate content INSIDE a stable child, which is why they never
+          hit it. Do not "simplify" this div away. */}
+      <div>
       {state === null ? (
         <span className="spinner" role="status" aria-label="Loading" />
       ) : !state.shareable ? (
@@ -275,6 +287,7 @@ export function ShareDialog({
           )}
         </div>
       )}
+      </div>
       <button slot="footer" type="button" className="btn-ghost" onClick={onClose}>
         Close
       </button>

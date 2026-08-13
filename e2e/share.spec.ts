@@ -140,3 +140,82 @@ test("a grantee cannot grant, revoke or invite on the object shared with them (D
   });
   expect(granteeTriesToInvite.status()).toBe(404);
 });
+
+// Review session 045. Hannah hit a full React crash - white screen - opening the share dialog on the box,
+// and nothing in any tier caught it. This block is the reason why, and the fix.
+//
+// Wave E2 built share.spec.ts as three `{ request }` tests: the grant/revoke round trip, the /api/accounts
+// gate, and D-187. All three are API-level. Every other feature in this app has `page` tests; E7's client
+// shipped with NONE, so acceptance criteria 5, 9, 10, 14, 15 and 19 - the entire dialog - were never once
+// opened in a browser by any automated tier.
+//
+// It needed to be THIS test specifically, not just any browser test. The crash lives in the seam between
+// React and a real registered custom element: mosni-chrome's MosniModal MOVES its light-DOM children into
+// a <dialog> it builds (`takeSlot`/`takeDefault` call `child.remove()`), so React's recorded parent for
+// those nodes goes stale and the next swap of one throws NotFoundError in React's commit phase, tearing
+// down the whole root. In every test that stubs or never loads mosnicat.js, `<mosni-modal>` is an inert
+// unknown element, children stay exactly where React put them, and the bug cannot exist.
+//
+// This is the SAME class as session 021's production `mosni-tab label` crash, and browse.spec.ts's
+// "real mosni-chrome integration" block is the harness that was built for it - E7 simply never extended
+// that pattern to the component it added. Hence the identical shape here: ignoreHTTPSErrors so the REAL
+// ui.mosni.dev/mosnicat.js loads through the sandbox proxy, scoped with test.use to just this block, with
+// retries for that one genuine external fetch (real network flakiness passes on a retry; the regression
+// this exists to catch fails identically every time).
+test.describe("real mosni-chrome integration: the share dialog must OPEN without crashing React", () => {
+  test.use({ ignoreHTTPSErrors: true });
+  test.describe.configure({ retries: 2 });
+
+  test("opening Share on a private file renders the dialog with zero uncaught page errors", async ({ page, request }) => {
+    const sub = `user:e2e-share-ui-${randomUUID()}`;
+    const token = await mintToken(request, sub);
+    const name = `share-ui-${randomUUID().slice(0, 8)}.txt`;
+    await withDb((conn) => seedPrivateFile(conn, { name, ownerSub: sub }));
+
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err) => pageErrors.push(err.message));
+
+    // Only sdk.js is blocked (it needs a live auth.mosni.dev); mosnicat.js loads for REAL, which is the
+    // entire point - a stubbed design system cannot reproduce this.
+    await page.route("**/sdk.js", (route) => route.abort());
+    await page.addInitScript(`
+      window.mosni = Object.assign(window.mosni ?? {}, {
+        user: () => ({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        token: () => ${JSON.stringify(token)},
+        onChange: (cb) => cb({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        login: () => {}, logout: () => {},
+        toast: () => {},
+      });
+    `);
+
+    await page.goto(`${FILES_ORIGIN}/`);
+
+    // The row's overflow menu -> Share. Waiting on the row first proves the browser actually rendered
+    // before we start clicking, so a failure below is the dialog's and not a slow listing's.
+    const row = page.getByText(name, { exact: true }).first();
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    await page.locator("mosni-dropdown", { has: page.locator("mosni-dropdown-item") }).first().click();
+    await page.locator("mosni-dropdown-item", { hasText: "Share" }).first().click();
+
+    // FIRST, prove the design system actually upgraded this element - without this the whole test is
+    // vacuous. `dialog.modal` is built by MosniModal.render() itself, so it exists ONLY if the real
+    // mosnicat.js loaded and `customElements.define("mosni-modal", ...)` ran. Asserting React-rendered
+    // text alone (the first draft of this test did exactly that) passes identically whether the element
+    // upgraded or stayed an inert unknown tag - and an inert tag is precisely the state in which the crash
+    // cannot happen. Measured: with this assertion missing, this test passed against the CRASHING
+    // component. browse.spec.ts gets this for free by asserting on `mosni-tabs button`, markup only the
+    // upgraded element produces.
+    // Scoped by heading: every row mounts THREE upgraded mosni-modals (Delete, Move, Share), so a bare
+    // `mosni-modal dialog.modal` is a strict-mode violation, not a signal.
+    await expect(page.locator('mosni-modal[heading^="Share"] dialog.modal')).toBeAttached({ timeout: 20_000 });
+
+    // THEN the dialog must reach its LOADED state, not just mount - the crash happens on the
+    // spinner -> content swap, so asserting the spinner alone would pass while the app is already dead.
+    await expect(page.getByText("Add people")).toBeVisible({ timeout: 20_000 });
+
+    // The real assertion. A NotFoundError in React's commit phase unmounts the root, so the surest
+    // symptom is that the page still has its listing AND that nothing was thrown.
+    expect(pageErrors, `uncaught page errors: ${pageErrors.join(", ")}`).toEqual([]);
+    await expect(page.getByText(name, { exact: true }).first()).toBeVisible();
+  });
+});
