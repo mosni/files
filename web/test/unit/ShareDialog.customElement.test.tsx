@@ -70,11 +70,14 @@ const SHAREABLE_STATE: ShareState = {
   id: "f1",
   name: "photo.jpg",
   effectiveProtection: "private",
-  shareable: true,
   grants: [],
 };
 
-const REFUSAL_STATE: ShareState = { ...SHAREABLE_STATE, effectiveProtection: "unlisted", shareable: false };
+// E7-QA1 D-195: the old "refusal state" is gone - this is now a NON-PRIVATE state, which renders the
+// informational note (§B1.6) ABOVE the same picker every state renders. Kept as a distinct fixture because
+// the spinner -> content swap is still the exact same <mosni-modal> direct-child-list hazard regardless of
+// which branch of content it swaps in - this proves it for both shapes, not just the private one.
+const NON_PRIVATE_STATE: ShareState = { ...SHAREABLE_STATE, effectiveProtection: "unlisted" };
 
 let container: HTMLDivElement;
 let root: Root;
@@ -127,8 +130,8 @@ describe("ShareDialog against a REAL custom element that re-parents its children
     expect(container.textContent).toContain("Add people");
   });
 
-  it("survives the spinner -> refusal-state swap too", async () => {
-    fetchShareStateMock.mockImplementation(async () => jsonResponse(REFUSAL_STATE));
+  it("survives the spinner -> non-private-state swap too (the informational note branch)", async () => {
+    fetchShareStateMock.mockImplementation(async () => jsonResponse(NON_PRIVATE_STATE));
 
     await act(async () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open={true} onClose={() => {}} />);

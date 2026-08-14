@@ -12,6 +12,7 @@ import type { Claims } from "../../../app/src/lib/roles.ts";
 import type { DirectoryAccount, InviteMinted, ShareObjectType, ShareState } from "../../../app/src/lib/shareContext.ts";
 import { toastMutationFailure } from "../lib/mutationError.ts";
 import { createInvite, fetchAccounts, fetchShareState, grantShare, revokeShare } from "../lib/share.ts";
+import { useModalClose } from "../lib/modalClose.ts";
 import { CopyLink } from "./CopyLink.tsx";
 
 declare module "react" {
@@ -54,6 +55,50 @@ function useCurrentUserSub(): string | null {
   return sub;
 }
 
+// D-169: the working avatar pattern this app already uses elsewhere (lib/previewContext.ts's
+// uploaderAvatarUrl) - auth.mosni.dev/avatar/<sub> DIRECTLY, on the CSP img-src allowlist. F3's defect was
+// rendering auth's raw `picture` field instead, which is an IdP CDN URL (e.g. Google's) that img-src does
+// not allow at all.
+function avatarUrlFor(sub: string): string {
+  return `https://auth.mosni.dev/avatar/${encodeURIComponent(sub)}`;
+}
+
+// F3: a broken-image robustness wrapper, same pattern PreviewCard.tsx's own uploader avatar already uses -
+// on load failure, degrade to an initial/placeholder rather than the browser's broken-image icon.
+function GrantAvatar({ sub }: { sub: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <span
+        aria-hidden="true"
+        style={{
+          width: 20,
+          height: 20,
+          borderRadius: "50%",
+          background: "var(--mosni-surface-2, #eee)",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: "0.7rem",
+          flexShrink: 0,
+        }}
+      >
+        {sub.slice(-1).toUpperCase()}
+      </span>
+    );
+  }
+  return (
+    <img
+      src={avatarUrlFor(sub)}
+      alt=""
+      width={20}
+      height={20}
+      style={{ borderRadius: "50%", flexShrink: 0 }}
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 export function ShareDialog({
   type,
   id,
@@ -72,9 +117,13 @@ export function ShareDialog({
   const [accounts, setAccounts] = useState<DirectoryAccount[] | null>(null);
   const [filterText, setFilterText] = useState("");
   const [canUpload, setCanUpload] = useState(false);
+  // F13/D-198: defaults ON, per D-23's requirement that the shared-identity consequence be visible and
+  // the safer default chosen - an upgradeable link lets its claimant become a real, distinct account.
+  const [allowRegister, setAllowRegister] = useState(true);
   const [invite, setInvite] = useState<InviteMinted | null>(null);
   const [inviting, setInviting] = useState(false);
   const [busy, setBusy] = useState(false);
+  const modalRef = useModalClose(onClose);
 
   // Reset to a fresh load every time the dialog is opened - the dialog is never re-fetchable stale state
   // across separate opens (matches the invite URL's own "gone once closed" rule below).
@@ -85,6 +134,7 @@ export function ShareDialog({
     setInvite(null);
     setFilterText("");
     setCanUpload(false);
+    setAllowRegister(true);
     void fetchShareState(type, id).then(async (res) => {
       if (!res.ok) {
         await toastMutationFailure(res);
@@ -96,7 +146,9 @@ export function ShareDialog({
   }, [open, type, id]);
 
   useEffect(() => {
-    if (!open || state === null || !state.shareable || accounts !== null) return;
+    // D-195: no longer gated on shareable (removed) - the account directory is needed at every protection
+    // level now, since a grant is always writable.
+    if (!open || state === null || accounts !== null) return;
     void fetchAccounts().then(async (res) => {
       if (!res.ok) {
         await toastMutationFailure(res);
@@ -142,7 +194,7 @@ export function ShareDialog({
   async function sendInvite(): Promise<void> {
     setInviting(true);
     try {
-      const res = await createInvite(type, id, type === "collection" ? canUpload : undefined);
+      const res = await createInvite(type, id, type === "collection" ? canUpload : undefined, allowRegister);
       if (!res.ok) {
         await toastMutationFailure(res);
         return;
@@ -164,10 +216,8 @@ export function ShareDialog({
       return account.sub.toLowerCase().includes(needle) || (account.name ?? "").toLowerCase().includes(needle);
     }) ?? [];
 
-  const objectKindWord = type === "file" ? "files" : "collections";
-
   return (
-    <mosni-modal heading={`Share "${objectLabel}"`} open={open}>
+    <mosni-modal ref={modalRef} heading={`Share "${objectLabel}"`} open={open}>
       {/* This wrapper is load-bearing, not layout (review session 045, a crash Hannah hit live). A real
           mosni-modal MOVES its light-DOM children on connect - `takeSlot`/`takeDefault` call
           `child.remove()` and re-parent everything into a <dialog> it builds. React does not know that, so
@@ -179,27 +229,41 @@ export function ShareDialog({
           where React's parent references are still correct. This is the same D-8 class as the Move and
           Delete modals, but those only ever mutate content INSIDE a stable child, which is why they never
           hit it. Do not "simplify" this div away. */}
-      <div>
+      {/* F1: constrain the whole dialog body so it can never scroll horizontally - maxWidth/overflowWrap
+          here, minWidth: 0 on every flex child below that holds text (a flex item's default `min-width:
+          auto` is what actually prevents wrapping; overflowWrap alone does nothing without it). */}
+      <div style={{ maxWidth: "100%", overflowWrap: "anywhere" }}>
       {state === null ? (
         <span className="spinner" role="status" aria-label="Loading" />
-      ) : !state.shareable ? (
-        // D-186: the refusal state offers no one-click switch and no picker - just the current level and
-        // a plain pointer to the protection control (the preview page's ManageControls, or the row menu's
-        // own Protection item).
-        <p>
-          This {type} is <strong>{state.effectiveProtection}</strong>. Only private {objectKindWord} can be
-          shared with specific people — change the protection level to private first.
-        </p>
       ) : (
-        <div style={{ display: "grid", gap: "1rem" }}>
+        <div style={{ display: "grid", gap: "1rem", minWidth: 0 }}>
+          {/* D-195: the refusal state is gone (sharing succeeds at every level now) - this is an
+              INFORMATIONAL note instead, shown only when a VIEW grant would be inert (the object is
+              already readable by anyone with the link; only the upload half of a grant does anything
+              here). The picker below is never hidden - §0.4.2's accepted consequence, stated plainly
+              rather than pretended away. */}
+          {state.effectiveProtection !== "private" && (
+            <p className="little-link" style={{ minWidth: 0 }}>
+              {type === "file" ? (
+                <>
+                  This file is <strong>{state.effectiveProtection}</strong>, so anyone with the link can
+                  already open it. Sharing it with specific people adds nothing.
+                </>
+              ) : (
+                <>
+                  This collection is <strong>{state.effectiveProtection}</strong>, so anyone with the link
+                  can already open it. Sharing here only controls who can upload.
+                </>
+              )}
+            </p>
+          )}
+
           {state.grants.length > 0 && (
             <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "0.5rem" }}>
               {state.grants.map((grant) => (
-                <li key={grant.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  {grant.picture !== null && (
-                    <img src={grant.picture} alt="" width={20} height={20} style={{ borderRadius: "50%" }} />
-                  )}
-                  <span style={{ flex: 1 }}>{grant.name ?? grant.sub}</span>
+                <li key={grant.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
+                  <GrantAvatar sub={grant.sub} />
+                  <span style={{ flex: 1, minWidth: 0 }}>{grant.name ?? grant.sub}</span>
                   {grant.canUpload && <span className="badge">Upload</span>}
                   <button
                     type="button"
@@ -214,7 +278,9 @@ export function ShareDialog({
             </ul>
           )}
 
-          <div className="field" style={{ marginBottom: 0 }}>
+          {/* F5: normal .field spacing - the outer grid's own gap separates this from its neighbours,
+              so the inner marginBottom:0 override that collapsed it is removed. */}
+          <div className="field">
             <label htmlFor={`share-picker-filter-${id}`}>Add people</label>
             <input
               id={`share-picker-filter-${id}`}
@@ -226,7 +292,11 @@ export function ShareDialog({
           </div>
 
           {type === "collection" && (
-            <label style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+            // F4: mosni-switch could not be confirmed to exist upstream (mosni-chrome is not in this
+            // session's repository scope - see the hand-off's §B1.4 and open question 1). Per the
+            // escalation rule this stays a plain checkbox, reported blocked rather than styled to look
+            // like a switch.
+            <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", minWidth: 0 }}>
               <input type="checkbox" checked={canUpload} onChange={(e) => setCanUpload(e.target.checked)} />
               Can upload into this collection
             </label>
@@ -248,9 +318,9 @@ export function ShareDialog({
                 <li style={{ color: "var(--mosni-text-muted)" }}>No matching accounts.</li>
               ) : (
                 candidates.map((account) => (
-                  <li key={account.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <img src={account.picture} alt="" width={20} height={20} style={{ borderRadius: "50%" }} />
-                    <span style={{ flex: 1 }}>{account.name ?? account.sub}</span>
+                  <li key={account.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
+                    <GrantAvatar sub={account.sub} />
+                    <span style={{ flex: 1, minWidth: 0 }}>{account.name ?? account.sub}</span>
                     <button
                       type="button"
                       className="btn-ghost btn-sm"
@@ -268,21 +338,47 @@ export function ShareDialog({
           <hr />
 
           {invite === null ? (
-            <button
-              type="button"
-              className="btn-ghost btn-sm"
-              style={{ justifySelf: "start", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
-              disabled={inviting}
-              onClick={() => void sendInvite()}
-            >
-              <mosni-icon name="user-plus" size="16" /> Invite someone without an account
-            </button>
+            <div style={{ display: "grid", gap: "0.5rem" }}>
+              {/* F13/D-198: the upgradeable switch, pulled forward from E8 - same "F4 is upstream, this
+                  isn't" reasoning: a plain checkbox, not a raw <input> styled as a toggle. */}
+              <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", minWidth: 0 }}>
+                <input
+                  type="checkbox"
+                  checked={allowRegister}
+                  onChange={(e) => setAllowRegister(e.target.checked)}
+                />
+                Let the recipient turn this into their own account
+              </label>
+              {/* D-23's requirement, sharpened by D-196: a non-upgradeable link carrying upload rights is
+                  a shared WRITE identity, not just a shared read. Shown plainly at the point of choice -
+                  not a tooltip, not behind a disclosure - whenever the switch is off. */}
+              {!allowRegister && (
+                <p className="little-link" role="alert" style={{ minWidth: 0 }}>
+                  Everyone who opens this link shares one identity.
+                  {type === "collection" && canUpload
+                    ? " Uploads will not be attributable to a person, and anyone with the link can delete anyone else's files."
+                    : ""}{" "}
+                  The link dies after at most 24 hours.
+                </p>
+              )}
+              <button
+                type="button"
+                className="btn-ghost btn-sm"
+                style={{ justifySelf: "start", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+                disabled={inviting}
+                onClick={() => void sendInvite()}
+              >
+                <mosni-icon name="user-plus" size="16" /> Invite someone without an account
+              </button>
+            </div>
           ) : (
             // The URL is shown ONCE - it is never re-fetchable; closing the dialog loses it and a new one
             // must be minted (auth stores only its hash). D-23's consequence-at-the-point-of-choice rule.
             <div style={{ display: "grid", gap: "0.5rem" }}>
               <CopyLink previewUrl={invite.url} />
-              <p className="little-link">Anyone who opens this link gets access. The first person to sign up keeps it.</p>
+              <p className="little-link" style={{ minWidth: 0 }}>
+                Anyone who opens this link gets access. The first person to sign up keeps it.
+              </p>
             </div>
           )}
         </div>

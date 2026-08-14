@@ -98,6 +98,7 @@ describe("auth/internalApi.ts", () => {
         ttlSeconds: 86400,
         destination: "https://files.mosni.dev/f/photo.jpg",
         label: "files: photo.jpg",
+        allowRegister: true,
       });
       expect(result).toEqual({
         ok: true,
@@ -105,7 +106,7 @@ describe("auth/internalApi.ts", () => {
       });
     });
 
-    it("sends allow_register: true and the exact params, in auth's snake_case shape", async () => {
+    it("sends the exact params, in auth's snake_case shape, with allow_register passed through as given", async () => {
       const fetchMock = vi.fn().mockResolvedValue(
         new Response(JSON.stringify({ url: MINTED_URL, id: "link1", expires_at: "x" }), { status: 201 }),
       );
@@ -115,6 +116,7 @@ describe("auth/internalApi.ts", () => {
         ttlSeconds: 3600,
         destination: "https://files.mosni.dev/f/photo.jpg",
         label: "files: photo.jpg",
+        allowRegister: true,
       });
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
       expect(url).toBe("http://auth:3001/internal/links");
@@ -128,6 +130,24 @@ describe("auth/internalApi.ts", () => {
       });
     });
 
+    // E7-QA1 §B1.7/D-198: allowRegister is now a real caller-supplied parameter, not a hardcoded `true` -
+    // this is the guard that a `false` choice actually reaches auth, not just that `true` does.
+    it("passes allowRegister: false through as allow_register: false", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ url: MINTED_URL, id: "link2", expires_at: "x" }), { status: 201 }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      await mintInviteLink({
+        roles: ["files:read"],
+        ttlSeconds: 3600,
+        destination: "https://files.mosni.dev/f/photo.jpg",
+        label: "files: photo.jpg",
+        allowRegister: false,
+      });
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect((JSON.parse(init.body as string) as { allow_register: boolean }).allow_register).toBe(false);
+    });
+
     it("a non-2xx JSON error (e.g. ttl_too_long) passes the code through and NEVER contains a minted url", async () => {
       vi.stubGlobal(
         "fetch",
@@ -138,6 +158,7 @@ describe("auth/internalApi.ts", () => {
         ttlSeconds: 999_999,
         destination: "https://files.mosni.dev/f/photo.jpg",
         label: "files: photo.jpg",
+        allowRegister: true,
       });
       expect(result).toEqual({ ok: false, error: "ttl_too_long", status: 400 });
       expect(JSON.stringify(result)).not.toContain("http");
@@ -150,6 +171,7 @@ describe("auth/internalApi.ts", () => {
         ttlSeconds: 86400,
         destination: "https://files.mosni.dev/f/photo.jpg",
         label: "files: photo.jpg",
+        allowRegister: true,
       });
       expect(result).toEqual({ ok: false, error: "auth_unreachable", status: 0 });
       expect(JSON.stringify(result)).not.toContain("http");

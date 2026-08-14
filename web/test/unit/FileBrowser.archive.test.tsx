@@ -34,7 +34,7 @@ function jsonResponse(body: unknown, ok = true, status = ok ? 200 : 404) {
 }
 
 function makeResponse(overrides: Partial<BrowseResponse> = {}): BrowseResponse {
-  return { breadcrumb: [{ id: "root-id", name: "Root", previewUrl: "https://files.mosni.dev/f/Root" }], collections: [], files: [], nextOffset: null, canUpload: false, ...overrides };
+  return { breadcrumb: [{ id: "root-id", name: "Root", previewUrl: "https://files.mosni.dev/f/Root" }], collections: [], files: [], nextOffset: null, canUpload: false, canManage: false, ...overrides };
 }
 
 let container: HTMLDivElement;

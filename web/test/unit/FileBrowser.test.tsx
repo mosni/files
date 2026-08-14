@@ -82,6 +82,7 @@ function makeResponse(overrides: Partial<BrowseResponse> = {}): BrowseResponse {
     files: [],
     nextOffset: null,
     canUpload: false,
+    canManage: false,
     ...overrides,
   };
 }
@@ -164,13 +165,17 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
   // root-mounted case's scope switch does - the browse effect itself must refetch once identity changes,
   // or the listing stays the anonymous snapshot after a sign-in with nothing else to trigger a refetch.
   it("logging in after a cold anonymous load refetches the listing with the new identity, with no tab switch (finding 2)", async () => {
-    let changeCb: ((user: unknown) => void) | undefined;
+    // E7-QA1 §C1: the collection page now also mounts a (closed) ShareDialog, which subscribes to
+    // onChange too (useCurrentUserSub) - the real SDK supports multiple listeners (verified against
+    // mosni/auth), so this mock must too, rather than a single captured callback that the LAST subscriber
+    // silently overwrites.
+    const changeCbs: ((user: unknown) => void)[] = [];
     let currentToken: string | null = null;
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => null,
       token: () => currentToken,
       onChange: (cb: (u: unknown) => void) => {
-        changeCb = cb;
+        changeCbs.push(cb);
         cb(null);
       },
     };
@@ -193,7 +198,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     // it does after a real sign-in redirect resolves.
     currentToken = "tok";
     await act(async () => {
-      changeCb!({ sub: "user:a", roles: ["files:write"] });
+      for (const cb of changeCbs) cb({ sub: "user:a", roles: ["files:write"] });
       await flush();
     });
 
@@ -1324,6 +1329,64 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("New collection"))).toBe(true);
     });
 
+    // E7-QA1 §C1 (F6): the collection page's own Share control, gated on data.canManage alone - never on
+    // canUpload (a grant-only viewer must not see it, D-187).
+    it("renders a Share button when the server says canManage is true", async () => {
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles: ["files:write"] }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write"] }),
+      };
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ canManage: true }))));
+
+      act(() => {
+        root.render(
+          <MemoryRouter>
+            <FileBrowser initialCollectionId="coll-x" />
+          </MemoryRouter>,
+        );
+      });
+      await flush();
+
+      expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Share"))).toBe(true);
+    });
+
+    it("renders NO Share button when canManage is false, even if canUpload is true (a grantee)", async () => {
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles: ["files:write"] }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write"] }),
+      };
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ canUpload: true, canManage: false }))));
+
+      act(() => {
+        root.render(
+          <MemoryRouter>
+            <FileBrowser initialCollectionId="coll-x" />
+          </MemoryRouter>,
+        );
+      });
+      await flush();
+
+      expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Share"))).toBe(false);
+    });
+
+    it("renders no Share button on the root-mounted browser, even for a files:write owner (D-126: no collection to share there)", async () => {
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles: ["files:write"] }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write"] }),
+      };
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ canManage: false }))));
+
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+      });
+      await flush();
+
+      expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Share"))).toBe(false);
+    });
+
     it('a nested collection created from inside a collection is created under that parent (finding 9, AC-A4)', async () => {
       (window as unknown as { mosni: unknown }).mosni = {
         user: () => ({ sub: "user:a", roles: ["files:write"] }),
@@ -1482,6 +1545,105 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       expect(modal).not.toBeNull();
       expect(select).not.toBeNull();
       expect(modal!.contains(select)).toBe(true);
+    });
+
+    // E7-QA1 §C2/C3 (F7): a real mosni-modal can close itself (backdrop/ESC/its own control) without React
+    // knowing, leaving `open` stuck true so a later re-open is a no-op. React serialises `open={true}` as
+    // an empty-string `open` attribute and `open={false}` as no attribute at all (verified against this
+    // exact custom-element declaration) - `hasAttribute("open")` is therefore the DOM-level ground truth for
+    // whether React still believes the modal is open, independent of jsdom's lack of a real MosniModal.
+    //
+    // Proven red-then-green, per the hand-off: reverting the `ref={...}` wiring on ANY of these four
+    // modals makes its own test in this block fail, since nothing would be listening for the dispatched
+    // `close` event and the `open` attribute would stay present.
+    it("the Move modal reopens after closing itself (dispatching `close` on the element, F7)", async () => {
+      installMosni();
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] })))
+          .mockResolvedValueOnce(jsonResponse([{ id: "dest-1", name: "Vacation" }])),
+      );
+
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+      });
+      await flush();
+
+      const row = container.querySelector("[data-row-id]")!;
+      await selectRowAction(row, "move");
+      await flush();
+      const modal = container.querySelector('mosni-modal[heading^="Move"]')!;
+      expect(modal.hasAttribute("open")).toBe(true);
+
+      // The element closes ITSELF - not via React state (nothing calls setMoveOpen here).
+      await act(async () => {
+        modal.dispatchEvent(new Event("close"));
+        await flush();
+      });
+      expect(modal.hasAttribute("open")).toBe(false);
+
+      // Re-opening via the same row action must work again - this is what F7 broke.
+      await selectRowAction(row, "move");
+      await flush();
+      expect(container.querySelector('mosni-modal[heading^="Move"]')!.hasAttribute("open")).toBe(true);
+    });
+
+    it("a file row's Delete modal reopens after closing itself", async () => {
+      installMosni();
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] }))));
+
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+      });
+      await flush();
+
+      const row = container.querySelector("[data-row-id]")!;
+      await selectRowAction(row, "delete");
+      const modal = row.querySelector('mosni-modal[heading^="Delete"]')!;
+      expect(modal.hasAttribute("open")).toBe(true);
+
+      await act(async () => {
+        modal.dispatchEvent(new Event("close"));
+        await flush();
+      });
+      expect(modal.hasAttribute("open")).toBe(false);
+
+      await selectRowAction(row, "delete");
+      expect(row.querySelector('mosni-modal[heading^="Delete"]')!.hasAttribute("open")).toBe(true);
+    });
+
+    it("a collection row's Delete modal reopens after closing itself", async () => {
+      installMosni();
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValue(jsonResponse(makeResponse({ collections: [makeCollection({ reason: "own" })] })))
+          .mockResolvedValueOnce(jsonResponse(makeResponse({ collections: [makeCollection({ reason: "own" })] })))
+          .mockResolvedValueOnce(jsonResponse({ collectionCount: 1, fileCount: 0 }))
+          .mockResolvedValueOnce(jsonResponse({ collectionCount: 1, fileCount: 0 })),
+      );
+
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
+      });
+      await flush();
+
+      const row = container.querySelector("[data-row-id]")!;
+      await selectRowAction(row, "delete");
+      const modal = row.querySelector('mosni-modal[heading^="Delete"]')!;
+      expect(modal.hasAttribute("open")).toBe(true);
+
+      await act(async () => {
+        modal.dispatchEvent(new Event("close"));
+        await flush();
+      });
+      expect(modal.hasAttribute("open")).toBe(false);
+
+      await selectRowAction(row, "delete");
+      expect(row.querySelector('mosni-modal[heading^="Delete"]')!.hasAttribute("open")).toBe(true);
     });
 
     it("the picker lists Root plus the caller's collections; confirming PATCHes collectionId and reloads", async () => {

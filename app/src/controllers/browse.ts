@@ -31,8 +31,8 @@ import { buildCollectionPreviewUrl, buildFileUrls, buildThumbUrl } from "../lib/
 import { fileKindFor } from "../lib/fileKind.ts";
 import { isListedFor, mostRestrictive, type Protection, type VisibilityReason } from "../lib/protection.ts";
 import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../lib/browseContext.ts";
+import { buildBreadcrumb } from "../lib/breadcrumb.ts";
 import {
-  collectionBreadcrumb,
   hasAclGrantOnChain,
   hasCollectionAclGrant,
   listAllChildCollections,
@@ -337,35 +337,10 @@ export async function browseHandler(request: FastifyRequest, reply: FastifyReply
         }
       }
     }
-    const rawBreadcrumb = await collectionBreadcrumb(collectionId);
-    // E4.1 Wave C: each crumb's OWN previewUrl, built the same way a row's is - its effective protection
-    // is the chain up to and including itself (root-first, matching targetChain's order), never the
-    // stored column (D-96).
-    breadcrumb = await Promise.all(
-      rawBreadcrumb.map(async (crumb, i) => {
-        const crumbEffective = mostRestrictive(targetChain.slice(0, i + 1));
-        const segmentsUpToHere = rawBreadcrumb.slice(0, i + 1).map((c) => c.name);
-        let previewUrl = buildCollectionPreviewUrl(config, crumbEffective, segmentsUpToHere, crumb.linkToken);
-        // D-100 (narrow but real): being independently authorized on the deeper TARGET does not imply
-        // authorization on every ancestor above it (an ACL grant can be scoped to one nested collection
-        // with none on its parent) - so a SECRET ancestor's real token must not ride along in the
-        // breadcrumb for a viewer who isn't independently authorized on THAT ancestor specifically. Every
-        // other level already gets the readable /f/ form (dead-but-safe if the viewer can't open it), so
-        // only "secret" needs the extra check.
-        if (crumbEffective === "secret") {
-          const ancestorAuthorized =
-            claims !== null &&
-            (claims.sub === crumb.ownerSub || isSuperuser(claims) || (await hasAclGrantOnChain(crumb.id, claims.sub)));
-          if (!ancestorAuthorized) {
-            // Any non-secret protection forces buildCollectionPreviewUrl's readable-path branch without
-            // exposing the real token - the link is simply dead (404s for everyone) rather than a leak.
-            previewUrl = buildCollectionPreviewUrl(config, "private", segmentsUpToHere, crumb.linkToken);
-          }
-        }
-        return { id: crumb.id, name: crumb.name, previewUrl };
-      }),
-    );
-    pathSegments = rawBreadcrumb.map((crumb) => crumb.name);
+    // E7-QA1 §A1.5: shared with controllers/preview.ts's PreviewContext.ancestors - one builder, so the
+    // two can never independently drift on the D-100 secret-ancestor redaction below.
+    breadcrumb = await buildBreadcrumb(config, collectionId, targetChain, claims);
+    pathSegments = breadcrumb.map((crumb) => crumb.name);
   }
 
   // D-189: a page-level fact, computed once - true only when the viewer owns the TARGET collection being
@@ -386,8 +361,20 @@ export async function browseHandler(request: FastifyRequest, reply: FastifyReply
   // C4 (E4.1 live-testing findings, Wave C): may THIS viewer upload into the collection being listed? The
   // client must not infer this from the user object (D-116's lesson) - the server decides and hands it
   // over on the browse response, so Wave G's collection-page upload box knows whether to render at all.
+  //
+  // E7-QA1 §A2.2/D-196: the root still requires files:write (it holds no ACL rows at all, D-126, so a
+  // can_upload grant has nowhere to live there). A SPECIFIC collection no longer requires files:write -
+  // canUploadTo's own can_upload=1 ACL row is now sufficient on its own, which is what makes an invite
+  // minted with only files:read (D-191) actually able to upload into the collection it was granted on.
   const canUpload =
-    claims !== null && can(claims, "files:write") && (target === null || (await canUploadTo(target, claims)));
+    claims !== null && (target === null ? can(claims, "files:write") : await canUploadTo(target, claims));
+
+  // E7-QA1 §C1 (F6): owner or superuser of the SPECIFIC collection being browsed - never true at the root
+  // (targetOwnerSub is null there, D-126: no single collection to share) and never true for a mere
+  // can_upload grantee (D-187: a grantee never shares). Deliberately NOT `elevatedAccess`, which also
+  // widens for a chain ACL grant - sharing authority does not follow the same rule as browse breadth.
+  const canManage =
+    claims !== null && targetOwnerSub !== null && (viewer.sub === targetOwnerSub || isSuperuser(claims));
 
   const [childCollections, files] = await Promise.all([
     listChildCollections(scope, collectionId, viewer, elevatedAccess, linkAuthorizedOnly),
@@ -417,6 +404,7 @@ export async function browseHandler(request: FastifyRequest, reply: FastifyReply
     files: shapedFiles,
     nextOffset,
     canUpload,
+    canManage,
   };
   reply.send(response);
 }

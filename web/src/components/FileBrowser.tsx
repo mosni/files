@@ -41,6 +41,7 @@ import { collectArchiveEntries, downloadArchive, isArchiveSupported, type Archiv
 import { pluralize } from "../lib/format.ts";
 import { isPlainLeftClick, pathnameOf, tokenOf } from "../lib/links.ts";
 import { upsertJob, useReloadSignal } from "../lib/jobs.ts";
+import { useModalClose } from "../lib/modalClose.ts";
 import { DropZone } from "./DropZone.tsx";
 import { IconConfirmCancel, RenameInput } from "./InlineRename.tsx";
 import { ProtectionControl } from "./ProtectionControl.tsx";
@@ -177,8 +178,14 @@ function MoveModal({
   // children AFTER it has already connected, so a real mosni-modal never projects them into its dialog
   // and they land wherever this component sits in the page instead (see technical-baseline.md's
   // custom-element guidance).
+  //
+  // E7-QA1 §C2 (F7): a real mosni-modal can close itself (backdrop/ESC/its own control) without React
+  // knowing, leaving `open` stuck true so a later setMoveOpen(true) is a no-op and the modal never
+  // reopens. onCancel already does exactly what a self-close should (resets moveOpen to false with no
+  // move applied), so it doubles as the close handler here.
+  const modalRef = useModalClose(onCancel);
   return (
-    <mosni-modal heading={`Move "${itemName}"`} open={open}>
+    <mosni-modal ref={modalRef} heading={`Move "${itemName}"`} open={open}>
       <div className="field" style={{ marginBottom: 0 }}>
         <label htmlFor={`move-destination-${itemName}`}>Destination</label>
         <select
@@ -309,6 +316,9 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
   const [moveDestination, setMoveDestination] = useState("");
   const [moveCollections, setMoveCollections] = useState<CollectionOption[]>([]);
   const [moveCollectionsLoaded, setMoveCollectionsLoaded] = useState(false);
+  // E7-QA1 §C2 (F7): this row's own Delete modal, self-closable via backdrop/ESC - see MoveModal's
+  // comment for why the fix is the same shape everywhere.
+  const deleteModalRef = useModalClose(() => setDeleteOpen(false));
   const manage = canManage(row.reason, user);
   const mayDelete = canDelete(row.reason, user);
 
@@ -440,7 +450,7 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
               onDeleteSelected={() => setDeleteOpen(true)}
             />
           )}
-          <mosni-modal heading={`Delete "${row.name}"?`} open={deleteOpen}>
+          <mosni-modal ref={deleteModalRef} heading={`Delete "${row.name}"?`} open={deleteOpen}>
             <p>This can&apos;t be undone.</p>
             <button slot="footer" type="button" className="btn-ghost" onClick={() => setDeleteOpen(false)}>
               Cancel
@@ -498,6 +508,12 @@ function CollectionRow({
   const [moveDestination, setMoveDestination] = useState("");
   const [moveCollections, setMoveCollections] = useState<CollectionOption[]>([]);
   const [moveCollectionsLoaded, setMoveCollectionsLoaded] = useState(false);
+  // E7-QA1 §C2 (F7): mirrors the Cancel button's own close handling below (resets deleteOpen AND the
+  // dry-run pending count together).
+  const deleteModalRef = useModalClose(() => {
+    setDeleteOpen(false);
+    setPending(null);
+  });
   const manage = canManage(row.reason, user);
   const mayDelete = canDelete(row.reason, user);
 
@@ -638,6 +654,7 @@ function CollectionRow({
             />
           )}
           <mosni-modal
+            ref={deleteModalRef}
             heading={`Delete "${row.name}"?`}
             open={deleteOpen}
           >
@@ -715,6 +732,8 @@ export function FileBrowser({
   // same as upload progress - this is only a local "is one of MY archives currently in flight" flag, so
   // the button can disable itself without this component reading the store back.
   const [archiveInFlight, setArchiveInFlight] = useState(false);
+  // E7-QA1 §C1 (F6): the collection page's own Share control - owner/superuser only (data.canManage).
+  const [shareOpen, setShareOpen] = useState(false);
 
   // E5.1 Wave E (finding 4): a completed upload - root-mounted OR compact on a collection page, via the
   // SAME signal (see jobs.ts's header comment) - refreshes whatever listing is mounted here. Skips the
@@ -834,6 +853,7 @@ export function FileBrowser({
             files: [...prev.files, ...next.files],
             nextOffset: next.nextOffset,
             canUpload: next.canUpload,
+            canManage: next.canManage,
           },
     );
   }
@@ -1109,6 +1129,30 @@ export function FileBrowser({
             >
               <mosni-icon name="download" size="16" /> Download all
             </button>
+          )}
+
+          {/* E7-QA1 §C1 (F6): the collection page's own Share control - owner or superuser only
+              (data.canManage, D-187: a grantee never shares). Never on the root-mounted browser - the
+              root is not a collection and holds no ACL rows (D-126), and data.canManage is structurally
+              false there regardless. */}
+          {isCollectionRoute && data.canManage && (
+            <button
+              type="button"
+              className="btn-ghost btn-sm"
+              style={{ justifySelf: "start", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
+              onClick={() => setShareOpen(true)}
+            >
+              <mosni-icon name="user-plus" size="16" /> Share
+            </button>
+          )}
+          {isCollectionRoute && (
+            <ShareDialog
+              type="collection"
+              id={collectionId}
+              objectLabel={data.breadcrumb.at(-1)?.name ?? "this collection"}
+              open={shareOpen}
+              onClose={() => setShareOpen(false)}
+            />
           )}
 
           {/* E4.1 Wave E/D-79: hiding .table-col-secondary columns (mosni-chrome) still left this

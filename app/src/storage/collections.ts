@@ -441,3 +441,19 @@ export async function canUploadTo(collection: CollectionRecord, claims: Claims):
   );
   return rows.length > 0;
 }
+
+// E7-QA1 §A2.1 (F9/D-196): does this sub hold ANY can_upload grant at all, anywhere? The coarse gate on
+// the tus request pipeline (controllers/upload.ts's onIncomingRequest), which runs before the destination
+// is known - a PATCH chunk carries no upload metadata, only create does. It keeps a merely-authenticated
+// stranger with no grant anywhere out of the upload pipeline entirely, so they cannot consume disk
+// streaming bytes that would be rejected at commit anyway.
+//
+// ⚠ This is NOT an authorization check for any specific destination and must never be used as one - the
+// precise per-destination decision is resolveDestinationCollection's/canUploadTo's, in controllers/upload.ts.
+export async function hasAnyUploadGrant(sub: string): Promise<boolean> {
+  const [rows] = await getPool().query<RowDataPacket[]>(
+    "SELECT 1 FROM collection_acl WHERE sub = ? AND can_upload = 1 LIMIT 1",
+    [sub],
+  );
+  return rows.length > 0;
+}

@@ -31,6 +31,9 @@ function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
     uploaderName: null,
     uploaderAvatarUrl: null,
     isOwner: false,
+    canManage: false,
+    canDelete: false,
+    ancestors: [],
     ...overrides,
   };
 }
@@ -313,7 +316,7 @@ describe("PreviewPage", () => {
   });
 
   it("shows the owner indicator only when isOwner is true", () => {
-    embedContext(makeContext({ isOwner: true, protection: "unlisted" }));
+    embedContext(makeContext({ isOwner: true, canManage: true, protection: "unlisted" }));
     vi.stubGlobal("fetch", vi.fn());
 
     renderAt("/f/photo.png");
@@ -331,10 +334,50 @@ describe("PreviewPage", () => {
     expect(container.textContent).not.toContain("You own this file");
   });
 
+  // E7-QA1 §B2.1/B2.3 (F10/F11): the conflation cannot come back - a superuser (canManage true, isOwner
+  // false) sees the manage controls and protection badge but NEVER the ownership prose.
+  it("a superuser sees the protection level and manage controls, but never 'You own this file'", () => {
+    embedContext(makeContext({ isOwner: false, canManage: true, canDelete: true, protection: "unlisted" }));
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/photo.png");
+
+    expect(container.textContent).not.toContain("You own this file");
+    expect(container.textContent).toContain("unlisted");
+    expect(container.querySelector('button[aria-label="Rename"]')).not.toBeNull();
+  });
+
+  // D-190: a collection owner may delete a file hosted there, but has no rename/protection/move rights -
+  // canDelete without canManage must show ONLY the delete affordance.
+  it("a delete-only viewer (D-190) sees the delete button but no rename pen, no manage controls, no share", () => {
+    embedContext(makeContext({ isOwner: false, canManage: false, canDelete: true }));
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/photo.png");
+
+    expect(container.textContent).not.toContain("You own this file");
+    expect(container.querySelector('button[aria-label="Rename"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Delete file"]')).not.toBeNull();
+    expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Share"))).toBe(false);
+  });
+
+  // A grantee: no rename pen, no protection control, no ownership prose, no delete, no share.
+  it("a grantee (all three false) sees no manage/delete/share affordances and no ownership prose", () => {
+    embedContext(makeContext({ isOwner: false, canManage: false, canDelete: false }));
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderAt("/f/photo.png");
+
+    expect(container.textContent).not.toContain("You own this file");
+    expect(container.querySelector('button[aria-label="Rename"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Delete file"]')).toBeNull();
+    expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Share"))).toBe(false);
+  });
+
   it("picks up the true isOwner from a background refetch when a Bearer is available", async () => {
     installMosni("test-token");
     embedContext(makeContext({ isOwner: false }));
-    const refreshed = makeContext({ isOwner: true });
+    const refreshed = makeContext({ isOwner: true, canManage: true });
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(refreshed) });
     vi.stubGlobal("fetch", fetchSpy);
 
@@ -490,7 +533,7 @@ describe("PreviewPage", () => {
   // be two icons"): an icon-labelled ownership badge and an icon-labelled protection badge, both directly
   // under the header rather than a separate boxed text panel.
   it("shows an icon-labelled ownership badge and protection badge for the owner, one per level", () => {
-    embedContext(makeContext({ isOwner: true, protection: "secret" }));
+    embedContext(makeContext({ isOwner: true, canManage: true, protection: "secret" }));
     vi.stubGlobal("fetch", vi.fn());
 
     renderAt("/f/photo.png");
@@ -505,7 +548,7 @@ describe("PreviewPage", () => {
   // header, alongside the <h1> it edits - see ManageControls.test.tsx for the tests this replaced.
   describe("rename (header)", () => {
     function ownedContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
-      return makeContext({ isOwner: true, ...overrides });
+      return makeContext({ isOwner: true, canManage: true, canDelete: true, ...overrides });
     }
 
     it("starts collapsed behind a pencil icon button in the header, next to the <h1>, not repeated below", () => {
@@ -619,7 +662,7 @@ describe("PreviewPage", () => {
   // component no longer renders it at all.
   describe("delete (header)", () => {
     function ownedContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
-      return makeContext({ isOwner: true, ...overrides });
+      return makeContext({ isOwner: true, canManage: true, canDelete: true, ...overrides });
     }
 
     it("sits next to the rename pencil as a bare trash icon, and requires a confirm step", async () => {
@@ -883,13 +926,17 @@ describe("PreviewPage", () => {
   // G1 (E5.1 Wave G, finding 7): the detail page never rendered a breadcrumb trail. Built from
   // `ctx.path`/`ctx.previewUrl` (already carried by the context - no re-derivation, no separate fetch),
   // reusing FileBrowser's own crumb markup/aria-label so the two surfaces match.
-  describe("breadcrumbs (G1)", () => {
-    it("renders Home, each ancestor collection name, and the file's own name as the current location", () => {
+  describe("breadcrumbs (G1, E7-QA1 §B2.2/F12: every ancestor is a real server-sent link)", () => {
+    it("renders Home, each ancestor as a real anchor built from ctx.ancestors, and the file's own name as the current location", () => {
       embedContext(
         makeContext({
           name: "img.png",
           path: "Photos/Vacation/img.png",
           previewUrl: "https://files.mosni.dev/f/Photos/Vacation/img.png",
+          ancestors: [
+            { id: "coll-photos", name: "Photos", previewUrl: "https://files.mosni.dev/f/Photos" },
+            { id: "coll-vacation", name: "Vacation", previewUrl: "https://files.mosni.dev/f/Photos/Vacation" },
+          ],
         }),
         "/f/Photos/Vacation/img.png",
       );
@@ -903,13 +950,22 @@ describe("PreviewPage", () => {
       expect(nav!.textContent).toContain("Photos");
       expect(nav!.textContent).toContain("Vacation");
       expect(nav!.textContent).toContain("img.png");
+
+      // Every crumb is a REAL <a>, built from the server-sent previewUrl - never assembled client-side.
+      const links = Array.from(nav!.querySelectorAll("a"));
+      expect(links.map((a) => a.textContent)).toEqual(["Home", "Photos", "Vacation", "img.png"]);
+      const photosCrumb = links.find((a) => a.textContent === "Photos")!;
+      expect(photosCrumb.getAttribute("href")).toBe("/f/Photos");
+      const vacationCrumb = links.find((a) => a.textContent === "Vacation")!;
+      expect(vacationCrumb.getAttribute("href")).toBe("/f/Photos/Vacation");
     });
 
     // D-100 (non-negotiable, §0.2): a secret file's display path is redacted to its bare name server-side
-    // (displayPathFor) - the breadcrumb must not reintroduce a collection name that was deliberately hidden.
+    // (displayPathFor), and its ancestors are correspondingly empty - the breadcrumb must not reintroduce
+    // a collection name that was deliberately hidden.
     it("shows only Home and the file's own name for a redacted path - never a collection name (D-100)", () => {
       embedContext(
-        makeContext({ name: "hidden.txt", path: "hidden.txt", previewUrl: "https://files.mosni.dev/t/Ab3xY" }),
+        makeContext({ name: "hidden.txt", path: "hidden.txt", previewUrl: "https://files.mosni.dev/t/Ab3xY", ancestors: [] }),
         "/t/Ab3xY",
       );
       vi.stubGlobal("fetch", vi.fn());
@@ -919,32 +975,19 @@ describe("PreviewPage", () => {
       const nav = container.querySelector('nav[aria-label="Breadcrumb"]');
       expect(nav!.textContent).toContain("Home");
       expect(nav!.textContent).toContain("hidden.txt");
-      // No stray collection name could appear anyway - the path IS just the bare file name here - but
-      // assert there is exactly one non-Home crumb, proving no ancestor segment was invented.
       expect(nav!.querySelectorAll("a")).toHaveLength(2); // Home + the file's own current-location crumb
     });
 
-    // D-100 also binds on the WAY the trail is built: PreviewContext carries no per-ancestor collection id
-    // or URL (unlike FileBrowser's own breadcrumb, fed by /api/browse), so an intermediate collection crumb
-    // would have to be a URL ASSEMBLED from its bare name - exactly what D-100 forbids ("the client
-    // constructs no URLs"). Ancestor names are shown as plain orientation text; only Home and the file's
-    // own current-location crumb (both real, server-provided URLs) are anchors.
-    it("does not turn an ancestor collection name into a link - only Home and the file itself are anchors", () => {
-      embedContext(
-        makeContext({
-          name: "img.png",
-          path: "Photos/Vacation/img.png",
-          previewUrl: "https://files.mosni.dev/f/Photos/Vacation/img.png",
-        }),
-        "/f/Photos/Vacation/img.png",
-      );
+    // A root-level file (E7-QA1's own acceptance criterion): empty ancestors renders exactly "Home / <file>".
+    it("a root-level file (empty ancestors) renders exactly Home / <file>", () => {
+      embedContext(makeContext({ name: "root-file.png", path: "root-file.png", ancestors: [] }), "/f/root-file.png");
       vi.stubGlobal("fetch", vi.fn());
 
-      renderAt("/f/Photos/Vacation/img.png");
+      renderAt("/f/root-file.png");
 
       const nav = container.querySelector('nav[aria-label="Breadcrumb"]')!;
       const links = Array.from(nav.querySelectorAll("a")).map((a) => a.textContent);
-      expect(links).toEqual(["Home", "img.png"]);
+      expect(links).toEqual(["Home", "root-file.png"]);
     });
 
     it("the current-location crumb is a real anchor to the file's own previewUrl (D-121)", () => {
@@ -957,6 +1000,29 @@ describe("PreviewPage", () => {
       const currentCrumb = Array.from(nav.querySelectorAll("a")).find((a) => a.textContent === "photo.png");
       expect(currentCrumb?.getAttribute("href")).toBe("/f/photo.png");
       expect(currentCrumb?.getAttribute("aria-current")).toBe("location");
+    });
+
+    // A modifier/middle click must be left to the browser, not intercepted by the SPA navigation -
+    // isPlainLeftClick already guards Home and the current crumb; this proves the SAME guard covers an
+    // ancestor crumb now that it is a real anchor too.
+    it("a modifier click on an ancestor crumb is NOT intercepted - the browser handles it", () => {
+      embedContext(
+        makeContext({
+          name: "img.png",
+          path: "Photos/img.png",
+          ancestors: [{ id: "coll-photos", name: "Photos", previewUrl: "https://files.mosni.dev/f/Photos" }],
+        }),
+        "/f/Photos/img.png",
+      );
+      vi.stubGlobal("fetch", vi.fn());
+
+      renderAt("/f/Photos/img.png");
+
+      const nav = container.querySelector('nav[aria-label="Breadcrumb"]')!;
+      const photosCrumb = Array.from(nav.querySelectorAll("a")).find((a) => a.textContent === "Photos")!;
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true });
+      const prevented = !photosCrumb.dispatchEvent(event);
+      expect(prevented).toBe(false); // preventDefault() was NOT called - the browser's own ctrl-click handling applies
     });
   });
 

@@ -339,17 +339,21 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
           >
             {ctx.name}
           </h1>
-          {ctx.isOwner && headerMode === "view" && (
+          {/* E7-QA1 §B2.1 (F10/F11): rename is canManage, delete is canDelete - they are NOT the same
+              population (D-190: a collection owner may delete a file hosted there without being able to
+              rename/reprotect/move it). Read each site individually rather than blanket-replacing isOwner
+              with one boolean, which would just reproduce the original conflation with a better name. */}
+          {headerMode === "view" && ctx.canManage && (
             // D-111: btn-icon, never a bare <button> - mosni-chrome's _button.scss styles the bare
             // `button` element as a filled purple primary with no opt-out.
-            <>
-              <button type="button" className="btn-icon" aria-label="Rename" onClick={startRename}>
-                <mosni-icon name="pencil" size="16" />
-              </button>
-              <button type="button" className="btn-icon" aria-label="Delete file" onClick={startDelete}>
-                <mosni-icon name="trash-2" size="16" />
-              </button>
-            </>
+            <button type="button" className="btn-icon" aria-label="Rename" onClick={startRename}>
+              <mosni-icon name="pencil" size="16" />
+            </button>
+          )}
+          {headerMode === "view" && ctx.canDelete && (
+            <button type="button" className="btn-icon" aria-label="Delete file" onClick={startDelete}>
+              <mosni-icon name="trash-2" size="16" />
+            </button>
           )}
           {headerMode === "renaming" && (
             <IconConfirmCancel
@@ -378,15 +382,22 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
         {renameError !== null && <p role="alert">{renameError}</p>}
 
         {/* E5.1 live-testing round 2: replaces the old "You own this file (<level>)." text panel with two
-            small icon+label badges, directly under the header rather than a separate boxed panel. */}
-        {ctx.isOwner && (
+            small icon+label badges, directly under the header rather than a separate boxed panel.
+            E7-QA1 §B2.1 (F10/F11): "You own this file" is the ONE thing ctx.isOwner is allowed to be keyed
+            on - strict ownership, never a superuser or a grantee. The protection badge sits alongside the
+            manage affordances below it (ManageControls is what lets a canManage viewer, owner or
+            superuser, actually change this level), so it stays visible to canManage as a group; a
+            superuser sees the level with no ownership claim next to it. */}
+        {ctx.canManage && (
           <p
             className="little-link"
             style={{ display: "flex", gap: STACK_GAP, margin: `${STACK_GAP} 0 0`, marginLeft: 0 }}
           >
-            <span style={{ display: "inline-flex", alignItems: "center", gap: INLINE_ICON_GAP }}>
-              <mosni-icon name="user-check" size="14" /> You own this file
-            </span>
+            {ctx.isOwner && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: INLINE_ICON_GAP }}>
+                <mosni-icon name="user-check" size="14" /> You own this file
+              </span>
+            )}
             <span style={{ display: "inline-flex", alignItems: "center", gap: INLINE_ICON_GAP }}>
               <mosni-icon name={PROTECTION_ICON[ctx.protection]} size="14" /> {ctx.protection}
             </span>
@@ -429,7 +440,10 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
       </div>
       {renderMedia(ctx)}
       <CopyLink previewUrl={ctx.previewUrl} directUrl={ctx.directUrl} />
-      {ctx.isOwner && (
+      {/* E7-QA1 §B2.1 (F10/F11): ManageControls (rename/protection/move authority) AND Share (D-187: only
+          the owner or a superuser shares - a grantee never grants) both key on canManage, never isOwner -
+          a superuser gets both, a D-190 delete-only viewer (canDelete but not canManage) gets neither. */}
+      {ctx.canManage && (
         <>
           <ManageControls context={ctx} onUpdate={setCtx} />
           <button

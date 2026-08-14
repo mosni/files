@@ -419,6 +419,87 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
     expect(record?.collectionId).toBe("");
   });
 
+  // E7-QA1 §A2.4/D-196: a grant-only caller (no files:write, only a can_upload=1 ACL row) can now reach
+  // the upload pipeline at all (A2.1) and complete an upload into the collection they were granted on.
+  describe("a grant-only caller (D-196: no files:write, only a can_upload ACL row)", () => {
+    it("uploads into the granted collection", async () => {
+      const ownerSub = `user:${randomUUID()}`;
+      const grantedSub = `user:${randomUUID()}`;
+      createdOwnerSubs.push(ownerSub, grantedSub);
+      const granted = await createCollection({ parentId: "", name: `grant-${randomUUID()}`, ownerSub });
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+        granted.id,
+        grantedSub,
+      ]);
+      mockAuthorizedAs(grantedSub, { roles: [] }); // D-191's invite shape: files:read only, no files:write
+
+      const content = Buffer.from("uploaded via an invite's upload grant");
+      const createRes = await createUpload(grantedSub, content.length, {
+        filename: "invited.txt",
+        destinationCollectionId: granted.id,
+      });
+      expect(createRes.status).toBe(201);
+      const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
+      const patchRes = await patchUpload(uploadUrl, grantedSub, 0, content);
+      expect(patchRes.status).toBe(200);
+
+      const record = await resolveByNames([granted.name, "invited.txt"]);
+      expect(record).not.toBeNull();
+      expect(record?.collectionId).toBe(granted.id);
+    });
+
+    // A2.3's landmine: under D-196 the OLD root-fallback rule would have let a grant-only caller drop
+    // files at the root just by sending a bogus destinationCollectionId - the hard 403 below is what
+    // closes that.
+    it("sending a bogus destination gets 403, NOT a root upload", async () => {
+      const grantedSub = `user:${randomUUID()}`;
+      createdOwnerSubs.push(grantedSub);
+      const elsewhere = await createCollection({ parentId: "", name: `elsewhere-${randomUUID()}`, ownerSub: `user:${randomUUID()}` });
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+        elsewhere.id,
+        grantedSub,
+      ]);
+      mockAuthorizedAs(grantedSub, { roles: [] });
+
+      const content = Buffer.from("should never land anywhere");
+      const createRes = await createUpload(grantedSub, content.length, {
+        filename: "bogus-dest.txt",
+        destinationCollectionId: randomUUID(), // resolves to nothing
+      });
+      expect(createRes.status).toBe(201); // tus create itself always succeeds - the destination is only resolved on finish
+      const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
+      const patchRes = await patchUpload(uploadUrl, grantedSub, 0, content);
+      expect(patchRes.status).toBe(403);
+
+      expect(await resolveByNames(["bogus-dest.txt"])).toBeNull(); // did NOT land at the root
+    });
+
+    it("sending NO destination at all gets 403 too (the same landmine, absent-metadata shape)", async () => {
+      const grantedSub = `user:${randomUUID()}`;
+      createdOwnerSubs.push(grantedSub);
+      const elsewhere = await createCollection({ parentId: "", name: `elsewhere2-${randomUUID()}`, ownerSub: `user:${randomUUID()}` });
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+        elsewhere.id,
+        grantedSub,
+      ]);
+      mockAuthorizedAs(grantedSub, { roles: [] });
+
+      const content = Buffer.from("no destination given");
+      const createRes = await createUpload(grantedSub, content.length, { filename: "no-dest.txt" });
+      const uploadUrl = new URL(createRes.headers.get("location")!, baseUrl()).toString();
+      const patchRes = await patchUpload(uploadUrl, grantedSub, 0, content);
+      expect(patchRes.status).toBe(403);
+
+      expect(await resolveByNames(["no-dest.txt"])).toBeNull();
+    });
+  });
+
+  it("a caller with no upload grant anywhere gets 403 at onIncomingRequest, before any destination is even asked about", async () => {
+    verifyMock.mockResolvedValue({ sub: `user:${randomUUID()}`, roles: [] } as never);
+    const res = await createUpload("t", 5, { filename: "no-grant.txt" });
+    expect(res.status).toBe(403);
+  });
+
   it("protection at ingest comes from the destination collection's default_protection (D-86)", async () => {
     const uploaderSub = `user:${randomUUID()}`;
     createdOwnerSubs.push(uploaderSub);

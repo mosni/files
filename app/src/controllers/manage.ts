@@ -4,9 +4,15 @@
 //
 // Authorization for every handler: owner, or `mosni_owner` (isSuperuser). DELETE /api/files/:id
 // additionally allows a `files:delete` holder (D-22's surviving half). A missing/invalid Bearer is 401
-// (identical response whether or not the target exists, so it leaks nothing); anything else - wrong
-// owner, or no such row - is 404, never 403, matching the preview controller's existing rule that this
-// app never becomes an existence oracle.
+// (identical response whether or not the target exists, so it leaks nothing).
+//
+// E7-QA1 §A1.4: rename/protection/move (updateFileHandler/updateCollectionHandler) now distinguish two
+// denial cases, narrowing "never confirm existence" deliberately: a caller with NO legitimate reason to
+// know the object exists still gets 404, but a caller who CAN already see it - an ACL grantee, or someone
+// independently authorized via the ancestor chain (lib/accessVisibility.ts's canSeeFile/canSeeCollection) -
+// and merely may not edit it now gets 403. This only ever fires for someone who has already been shown the
+// object (via a preview page or a browse listing), so it reveals nothing new. Delete keeps its own rule
+// unchanged (still 404, per D-190's comment on deleteFileHandler below) - this round does not touch it.
 
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "../config.ts";
@@ -16,6 +22,7 @@ import { mostRestrictive, PROTECTION_ORDER, type Protection } from "../lib/prote
 import { isReservedRootName, safeSegment } from "../lib/paths.ts";
 import { actorLabel } from "../lib/audit.ts";
 import { buildCollectionPreviewUrl } from "../lib/fileUrls.ts";
+import { canSeeCollection, canSeeFile } from "../lib/accessVisibility.ts";
 import { ownerContextFor } from "./preview.ts";
 import { emitAuditEvent } from "../storage/audit.ts";
 import {
@@ -175,6 +182,20 @@ async function authorizeCollectionOwner(
   return collection;
 }
 
+type ManageAuthorization<T> = { ok: true; record: T } | { ok: false; status: 403 | 404 };
+
+// E7-QA1 §A1.4: the rename/protection/move gate, distinct from authorizeCollectionOwner above (which
+// deleteCollectionHandler still uses unchanged - delete is not part of this round's narrowing). Owner or
+// superuser succeeds; anyone else who can already SEE the collection (an ACL grant on it or an ancestor -
+// canSeeCollection) gets 403; anyone who cannot see it at all gets 404, same as before.
+async function authorizeCollectionManage(claims: Claims, id: string): Promise<ManageAuthorization<CollectionRecord>> {
+  const collection = await resolveCollectionById(id);
+  if (collection === null) return { ok: false, status: 404 };
+  if (collection.ownerSub === claims.sub || isSuperuser(claims)) return { ok: true, record: collection };
+  const visible = await canSeeCollection(claims, collection);
+  return { ok: false, status: visible ? 403 : 404 };
+}
+
 export async function updateCollectionHandler(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -184,11 +205,12 @@ export async function updateCollectionHandler(
   if (claims === null) return;
 
   const { id } = request.params as { id: string };
-  const collection = await authorizeCollectionOwner(claims, id);
-  if (collection === null) {
-    reply.code(404).send();
+  const authResult = await authorizeCollectionManage(claims, id);
+  if (!authResult.ok) {
+    reply.code(authResult.status).send();
     return;
   }
+  const collection = authResult.record;
 
   const body = request.body as {
     name?: string;
@@ -351,12 +373,27 @@ export async function deleteCollectionHandler(
 
 // --- Files --------------------------------------------------------------------------------------------
 
+// Used by moveFilesHandler's batch loop below, which reports per-item outcomes in its JSON body (never a
+// per-item HTTP status), so A1.4's 403/404 distinction has nothing to attach to there - kept as the plain
+// owner-or-superuser-or-null oracle for that one caller.
 async function authorizeFileOwner(claims: Claims, id: string): Promise<FileRecord | null> {
   const record = await resolveById(id);
   if (record === null) return null;
   const isOwner = record.ownerSub !== null && record.ownerSub === claims.sub;
   if (!isOwner && !isSuperuser(claims)) return null;
   return record;
+}
+
+// E7-QA1 §A1.4: updateFileHandler's own gate. Owner or superuser succeeds; anyone else who can already SEE
+// the file (an ACL grant on it or its collection chain - canSeeFile) gets 403; anyone who cannot see it at
+// all gets 404, same as before.
+async function authorizeFileManage(claims: Claims, id: string): Promise<ManageAuthorization<FileRecord>> {
+  const record = await resolveById(id);
+  if (record === null) return { ok: false, status: 404 };
+  const isOwner = record.ownerSub !== null && record.ownerSub === claims.sub;
+  if (isOwner || isSuperuser(claims)) return { ok: true, record };
+  const visible = await canSeeFile(claims, record);
+  return { ok: false, status: visible ? 403 : 404 };
 }
 
 export async function updateFileHandler(
@@ -368,11 +405,12 @@ export async function updateFileHandler(
   if (claims === null) return;
 
   const { id } = request.params as { id: string };
-  const record = await authorizeFileOwner(claims, id);
-  if (record === null) {
-    reply.code(404).send();
+  const authResult = await authorizeFileManage(claims, id);
+  if (!authResult.ok) {
+    reply.code(authResult.status).send();
     return;
   }
+  const record = authResult.record;
 
   const body = request.body as { name?: string; protection?: string; collectionId?: string };
   if (body.name !== undefined && body.name !== record.name) {
@@ -460,7 +498,7 @@ export async function updateFileHandler(
   // the file's previewUrl/directUrl, and the SPA has no way to recompute them (it never sees the
   // link_token).
   const updated = await resolveById(id);
-  reply.send(await ownerContextFor(config, updated!));
+  reply.send(await ownerContextFor(config, updated!, claims));
 }
 
 // Live-testing addition (2026-08-06, Hannah: "moving a grouped set of uploads" should notify once).

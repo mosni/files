@@ -40,8 +40,25 @@ export type PreviewContext = {
   // C1 (E5.1 Wave C): null exactly when there is no uploaderSub at all, NOT when uploaderName is null. A
   // file with a captured sub but no name still has an avatar - only uploaderName's presence is independent
   // (see buildPreviewContext's D-168 fallback).
-  isOwner: boolean; // ALWAYS false in the embedded document copy (D-75: the document is
-  // anonymous). Only the API, given a Bearer, can return true.
+  // E7-QA1 §1.1: `isOwner` used to answer two different questions ("may this viewer see the owner block"
+  // and "does this viewer actually own the file"), which is F10/F11's root cause - a superuser or an ACL
+  // grantee got told "You own this file" and shown controls that then 404'd. Split into three honest
+  // booleans; there is no compatibility alias, because a lingering `isOwner` meaning "canManage" is exactly
+  // how the conflation would survive its own fix.
+  isOwner: boolean; // STRICT ownership: record.ownerSub !== null && claims.sub === record.ownerSub. Nothing
+  // else sets this true - not a superuser, not a grantee. The ONLY thing "You own this file" may be keyed
+  // on. ALWAYS false in the embedded document copy (D-75: the document is anonymous).
+  canManage: boolean; // may rename / change protection / move: owner OR superuser. Mirrors
+  // controllers/manage.ts's authorization exactly. A grantee is NEVER canManage, whatever can_upload says
+  // (D-187: a grantee never grants, and never edits). ALWAYS false in the embedded document copy.
+  canDelete: boolean; // may delete: canManage OR can(claims, "files:delete") OR the D-190 case (the
+  // collection owner may delete a file someone else uploaded into their collection). Mirrors
+  // controllers/manage.ts's delete guard. ALWAYS false in the embedded document copy.
+  // E7-QA1 §1.2/F12: D-100-safe breadcrumb ancestors, built by the SAME server-side builder
+  // controllers/browse.ts's own breadcrumb uses (lib/breadcrumb.ts) - the client only ever reads a
+  // pathname out of `previewUrl`, never assembles one. Empty for a root-level file. ALWAYS empty in the
+  // embedded document copy (D-75/D-100: the anonymous document reveals no path).
+  ancestors: { id: string; name: string; previewUrl: string }[];
 };
 
 const BYTE_UNITS = ["KB", "MB", "GB", "TB"] as const;
@@ -119,9 +136,13 @@ export function buildPreviewContext(
     // avatar (PreviewCard.tsx omits only the name line, not the whole block).
     uploaderAvatarUrl: record.uploaderSub === null ? null : urls.uploaderAvatarUrl,
     textPreview: record.textPreview,
-    // Always false here - this builder feeds the anonymous document copy (D-75). Only the API handler,
-    // given a Bearer it can check against ownerSub/superuser/ACL, may set this true.
+    // Always false/empty here - this builder feeds the anonymous document copy (D-75/D-100). Only the API
+    // handler, given a Bearer it can check against ownerSub/superuser/ACL, may set isOwner/canManage/
+    // canDelete true or populate ancestors (see controllers/preview.ts's ownerContextFor/sendContext).
     isOwner: false,
+    canManage: false,
+    canDelete: false,
+    ancestors: [],
   };
 }
 

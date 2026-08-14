@@ -13,6 +13,7 @@ import {
   deleteCollectionRecursive,
   grantCollectionAcl,
   hasAclGrantOnChain,
+  hasAnyUploadGrant,
   hasCollectionAclGrant,
   isDescendantOf,
   listCollectionGrants,
@@ -292,6 +293,34 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
         [collection.id, "user:denied"],
       );
       expect(await canUploadTo(collection, { sub: "user:denied" })).toBe(false);
+    });
+  });
+
+  describe("hasAnyUploadGrant (E7-QA1 §A2.1) - the coarse tus gate, NOT a per-destination authorization check", () => {
+    it("is true for a sub holding a can_upload grant ANYWHERE, even on a collection unrelated to what's asked next", async () => {
+      const collection = await createCollection({ parentId: "", name: `hug-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      const sub = `user:${randomUUID()}`;
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+        collection.id,
+        sub,
+      ]);
+      expect(await hasAnyUploadGrant(sub)).toBe(true);
+    });
+
+    it("is false for a sub with a VIEW-only grant (can_upload = 0)", async () => {
+      const collection = await createCollection({ parentId: "", name: `hug-view-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      const sub = `user:${randomUUID()}`;
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 0)", [
+        collection.id,
+        sub,
+      ]);
+      expect(await hasAnyUploadGrant(sub)).toBe(false);
+    });
+
+    it("is false for a sub with no grant anywhere", async () => {
+      expect(await hasAnyUploadGrant(`user:${randomUUID()}`)).toBe(false);
     });
   });
 

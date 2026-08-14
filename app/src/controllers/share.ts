@@ -7,9 +7,9 @@
 // "not found OR not yours" so every handler sends the same 404 for both, never confirming an object exists
 // to someone who may not share it (matching controllers/manage.ts's existing rule).
 //
-// D-186: sharing is refused unless the object's EFFECTIVE protection is `private` - never the stored
-// column (D-96). D-182/D-183: a share is the ACL row alone; `files:read` gates nothing and is never
-// consulted here.
+// E7-QA1 D-195: D-186's "refused unless effectively private" is REVERSED - sharing succeeds at EVERY
+// protection level now. D-182/D-183: a share is the ACL row alone; `files:read` gates nothing and is
+// never consulted here.
 
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "../config.ts";
@@ -82,10 +82,11 @@ async function grantsFor(target: ResolvedShareTarget): Promise<{ sub: string; ca
   return listCollectionGrants(target.collection.id);
 }
 
-// D-186's own gate reads EFFECTIVE protection, resolved through resolveEffective/resolveCollectionEffective
-// above - never `record.protection` directly (D-96). destinationUrlFor below the SAME rule for the exact
-// same reason: a file stored `unlisted` inside a `private` collection must mint an invite that matches what
-// the object actually resolves to for everyone else, not what its own row says.
+// Protection is read EFFECTIVE, resolved through resolveEffective/resolveCollectionEffective above - never
+// `record.protection` directly (D-96), even though D-195 no longer gates sharing on the result. destinationUrlFor
+// below follows the SAME rule for the exact same reason: a file stored `unlisted` inside a `private`
+// collection must mint an invite that matches what the object actually resolves to for everyone else, not
+// what its own row says.
 async function destinationUrlFor(config: Config, target: ResolvedShareTarget): Promise<string> {
   if (target.type === "file") {
     const segments = [...(await collectionPath(target.file.collectionId)), target.file.name];
@@ -112,7 +113,6 @@ async function buildShareState(target: ResolvedShareTarget): Promise<ShareState>
     id: meta.id,
     name: meta.name,
     effectiveProtection: meta.effectiveProtection,
-    shareable: meta.effectiveProtection === "private",
     grants,
   };
 }
@@ -172,10 +172,10 @@ export async function grantShareHandler(request: FastifyRequest, reply: FastifyR
     return;
   }
   const meta = targetMeta(target);
-  if (meta.effectiveProtection !== "private") {
-    reply.code(409).send({ error: "not_private" });
-    return;
-  }
+  // E7-QA1 D-195: D-186's "refused unless effectively private" is REVERSED - sharing now succeeds at
+  // every protection level. Grants are always writable; on a non-private object the VIEW half is simply
+  // redundant (the object is already readable by anyone holding the link), which is exactly what makes
+  // the upload half meaningful on an unlisted/public collection - the point of this decision.
   if (body.sub === claims.sub) {
     reply.code(400).send({ error: "cannot_share_with_self" });
     return;
@@ -223,7 +223,7 @@ const MINT_ERROR_PASSTHROUGH = new Set(["ttl_too_long", "not_grantable", "bad_de
 export async function createInviteHandler(request: FastifyRequest, reply: FastifyReply, config: Config): Promise<void> {
   const claims = await requireClaims(request, reply, config);
   if (claims === null) return;
-  const body = request.body as { type?: string; id?: string; canUpload?: boolean };
+  const body = request.body as { type?: string; id?: string; canUpload?: boolean; allow_register?: boolean };
   if (!isShareObjectType(body.type) || typeof body.id !== "string") {
     reply.code(400).send({ error: "bad_request" });
     return;
@@ -238,10 +238,7 @@ export async function createInviteHandler(request: FastifyRequest, reply: Fastif
     return;
   }
   const meta = targetMeta(target);
-  if (meta.effectiveProtection !== "private") {
-    reply.code(409).send({ error: "not_private" });
-    return;
-  }
+  // D-195: see grantShareHandler's comment - the same reversal applies to invites.
 
   const destination = await destinationUrlFor(config, target);
   const minted = await mintInviteLink({
@@ -250,6 +247,9 @@ export async function createInviteHandler(request: FastifyRequest, reply: Fastif
     destination,
     // Shown to Hannah in auth's own /admin screen - names the object and nothing sensitive.
     label: `files: ${meta.name}`,
+    // E7-QA1 §B1.7/D-198: defaults to true, matching the dialog's own default-on switch - only D-23's
+    // `allow_register` moves here; the rest of invite management stays E8's (D-191).
+    allowRegister: body.allow_register ?? true,
   });
   if (!minted.ok) {
     if (MINT_ERROR_PASSTHROUGH.has(minted.error)) {

@@ -51,6 +51,11 @@ export type BrowseResponse = {
   // listed? Server-decided (D-116's lesson: the client never infers upload rights from the user object) -
   // true at the root for any files:write holder, and canUploadTo(target, claims) for a specific collection.
   canUpload: boolean;
+  // E7-QA1 §C1 (F6): may THIS viewer SHARE the collection currently being browsed - owner or superuser
+  // only (D-187: a grantee never shares, whatever canUpload says). Always false at the root (there is no
+  // single collection there to share, D-126). Same server-decides-never-infer rule as canUpload above -
+  // FileBrowser.tsx's header Share control renders on this field alone.
+  canManage: boolean;
 };
 
 // D-107/§1.2 of the E4.1 waves hand-off: what the SPA shell's embedded context carries when a `/f/*` or

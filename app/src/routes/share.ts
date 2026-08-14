@@ -64,6 +64,9 @@ const createInviteSchema = {
       type: { type: "string", enum: SHARE_TYPE_ENUM },
       id: { type: "string", minLength: 1 },
       canUpload: { type: "boolean" },
+      // E7-QA1 §B1.7/D-198: the upgradeable switch. Optional - the controller defaults to true, matching
+      // the dialog's own default-on state.
+      allow_register: { type: "boolean" },
     },
     additionalProperties: false,
   },

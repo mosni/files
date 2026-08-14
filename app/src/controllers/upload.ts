@@ -32,7 +32,7 @@ import {
   diskRelPath,
   resolveEffective,
 } from "../storage/files.ts";
-import { canUploadTo, collectionPath, resolveCollectionById } from "../storage/collections.ts";
+import { canUploadTo, collectionPath, hasAnyUploadGrant, resolveCollectionById } from "../storage/collections.ts";
 import { stripInPlace } from "../storage/strip.ts";
 import { probeMedia } from "../storage/probe.ts";
 import { generateThumb } from "../storage/thumbs.ts";
@@ -63,10 +63,19 @@ function bearerToken(req: http.IncomingMessage): string | null {
 type UploadDestination = { id: string; defaultProtection: Protection };
 const ROOT_DESTINATION: UploadDestination = { id: "", defaultProtection: "unlisted" }; // D-105's root default
 
-// A requested destination is honoured only when it resolves AND canUploadTo() passes; anything else falls
-// through to the root, exactly as it used to fall through to the per-user default collection (D-1: a
-// stale or unauthorized destination must never turn "drop a file" into an error dialog). This can no
-// longer fail - there is always a valid destination.
+// A requested destination is honoured only when it resolves AND canUploadTo() passes.
+//
+// E7-QA1 §A2.3/D-196: the root fallback below is the landmine D-196 creates. Under the OLD rule (every
+// caller here held files:write, or onIncomingRequest would already have rejected them), falling through to
+// the root for a stale/unauthorized destination was safe and deliberate (D-1: never turn "drop a file"
+// into an error dialog). Under D-196 a caller can now reach this point holding ONLY a can_upload grant on
+// ONE specific collection and no files:write at all - for THAT caller, falling through to the root would
+// let them drop files somewhere they were never granted anything, just by sending a bogus/missing
+// destinationCollectionId. So the fallback now branches on whether the caller independently holds
+// files:write:
+//   - files:write holder: UNCHANGED. A stale or unauthorized destination still falls through to the root.
+//   - grant-only caller (no files:write): a destination that does not resolve, fails canUploadTo, or is
+//     absent/empty is a hard 403 - there is no root fallback for them, ever.
 async function resolveDestinationCollection(
   claims: VerifiedClaims,
   requestedCollectionId: unknown,
@@ -77,7 +86,8 @@ async function resolveDestinationCollection(
       return { id: requested.id, defaultProtection: requested.defaultProtection };
     }
   }
-  return ROOT_DESTINATION;
+  if (can(claims, "files:write")) return ROOT_DESTINATION;
+  tusError(403, "no upload rights for this destination");
 }
 
 async function cleanupFailedClaim(
@@ -133,7 +143,16 @@ export function buildTusServer(config: Config): TusServer {
         );
         tusError(401, "invalid token");
       }
-      if (!can(claims, "files:write")) tusError(403, "files:write required");
+      // E7-QA1 §A2.1/D-196: the coarse gate on the whole tus pipeline - runs before the destination is
+      // even known (a PATCH chunk carries no upload metadata, only create does). A files:write holder
+      // passes as before; a caller with NO files:write but who holds a can_upload grant SOMEWHERE also
+      // passes now, so an invite minted with only files:read (D-191) can reach the pipeline at all. This
+      // is NOT the precise per-destination decision - resolveDestinationCollection below is - it exists
+      // only to keep a caller with zero upload rights anywhere from streaming bytes that would be rejected
+      // at commit regardless.
+      if (!can(claims, "files:write") && !(await hasAnyUploadGrant(claims.sub))) {
+        tusError(403, "no upload rights anywhere");
+      }
       (req as RequestWithClaims).filesClaims = claims;
     },
 
@@ -151,7 +170,16 @@ export function buildTusServer(config: Config): TusServer {
         tusError(400, "unsafe filename");
       }
 
-      const destination = await resolveDestinationCollection(claims, upload.metadata?.destinationCollectionId);
+      // A2.3's hard 403 (a grant-only caller with no valid destination) can now throw HERE, before any row
+      // is claimed - D-85's "a failed upload leaves neither a row nor bytes" still applies to the tus
+      // temp file itself, so it is cleaned up the same way the unsafe-filename rejection just above does.
+      let destination: UploadDestination;
+      try {
+        destination = await resolveDestinationCollection(claims, upload.metadata?.destinationCollectionId);
+      } catch (err) {
+        await unlink(tempPath).catch(() => {});
+        throw err;
+      }
 
       // A root-level file named "t" would shadow the static /t/:token route on dl.mosni.dev, the same
       // collision lib/paths.ts's isReservedRootName already guards for a root COLLECTION name (A6, Wave A

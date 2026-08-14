@@ -7,16 +7,17 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
-import { isSuperuser } from "../lib/roles.ts";
+import { can, isSuperuser, type Claims } from "../lib/roles.ts";
 import { buildFileUrls, buildThumbUrl } from "../lib/fileUrls.ts";
 import { safeSegments } from "../lib/paths.ts";
 import { readablePathResolves } from "../lib/protection.ts";
 import { buildPreviewContext, previewKindFor, type PreviewContext } from "../lib/previewContext.ts";
+import { buildBreadcrumb } from "../lib/breadcrumb.ts";
+import { canSeeCollection, canSeeFile } from "../lib/accessVisibility.ts";
 import { signDelivery } from "../lib/deliverySignature.ts";
 import { injectHead } from "../lib/shellHtml.ts";
 import type { CollectionLocation } from "../lib/browseContext.ts";
 import {
-  hasAclGrant,
   resolveByNames,
   resolveByToken,
   resolveEffective,
@@ -26,6 +27,8 @@ import {
 import {
   collectionPath,
   hasAclGrantOnChain,
+  protectionChain,
+  resolveCollectionById,
   resolveCollectionByNames,
   resolveCollectionByToken,
   resolveCollectionEffective,
@@ -56,22 +59,37 @@ async function resolveDocumentByNames(segments: readonly string[]): Promise<Reso
   return resolved;
 }
 
-// D-107/§1.2: authorization for a collection reached via its READABLE /f/ path - D-99's identity list
-// (owner, superuser, or an ACL grant anywhere on its own chain; hasAclGrantOnChain already checks the
-// collection's own row before walking up). Unlike a file's `private`, which still 200s an anonymous
-// requester a minimal, reveal-nothing shell, a collection route mounts the real browser and there is no
-// useful "reveal nothing" shell for it to hand back - so this gate decides at the document layer instead
-// of deferring to the API, and a non-public collection 404s outright for anyone not on that list.
-async function collectionDocumentAuthorized(
+// E7-QA1 §A1.1 (F8): a `/f/<...>` path that names a COLLECTION, resolved for the DOCUMENT route only - a
+// top-level browser navigation, which carries NO Authorization header (the auth SDK's token lives in JS
+// that has not run yet when the document is requested). The old single resolver applied an identity gate
+// here too, which made every private-collection deep link 404 for everyone, including its own owner,
+// since E4 - `claimsFromBearer` always returned null on a headerless request. This function therefore
+// applies NO identity gate at all, exactly matching how a private FILE's document route already behaves
+// (D-72/D-75: reveal nothing, defer the real decision to the API). `secret` still 404s for everyone here
+// (readablePathResolves rejects it) - the token path is its only way in, unchanged.
+async function resolveCollectionForDocument(segments: readonly string[]): Promise<ResolvedCollection | null> {
+  const record = await resolveCollectionByNames(segments);
+  if (record === null) return null;
+  const resolved = await resolveCollectionEffective(record);
+  if (!readablePathResolves(resolved.effectiveProtection)) return null;
+  return resolved;
+}
+
+// D-107/§1.2: authorization for a collection reached via its READABLE /f/ path, now checked ONLY here - at
+// the API layer (`/api/preview/...`, a client-side XHR that DOES carry a bearer once the SPA has mounted
+// and the auth SDK has resolved). D-99's identity list (owner, superuser, or an ACL grant anywhere on its
+// own chain - lib/accessVisibility.ts's canSeeCollection). Unlike a file's `private`, which still 200s an
+// anonymous requester a minimal, reveal-nothing shell, a collection route mounts the real browser and
+// there is no useful "reveal nothing" shell for the API to hand back either - so a non-public collection
+// 404s outright here for anyone not on that list, and the SPA falls back to its own not-found state.
+async function collectionApiAuthorized(
   request: FastifyRequest,
   config: Config,
   resolved: ResolvedCollection,
 ): Promise<boolean> {
   // D-124 (E4.1 live-testing findings, Wave B): the link shape IS the credential for public/unlisted
   // (D-59) - "not listed, but the link works for anyone who has it" is exactly what `unlisted` means, and
-  // the FILE half of this app already honours that (readablePathResolves() allows it through). This
-  // collection-document gate had never been reconciled with that rule. `secret` never reaches here
-  // (readablePathResolves rejected it in the caller); only `private` still asks who is asking.
+  // the FILE half of this app already honours that (readablePathResolves() allows it through).
   // ⚠ Accepted cost (D-127, Hannah, 2026-07-30): collection names are user-supplied and therefore
   // guessable, so guessing an `unlisted` collection's name reveals its unlisted contents - consistent with
   // the posture already recorded for files (session 007: co-mingled unlisted files are mutually
@@ -79,14 +97,12 @@ async function collectionDocumentAuthorized(
   if (resolved.effectiveProtection === "public" || resolved.effectiveProtection === "unlisted") return true;
   const claims = await claimsFromBearer(request, config.appOrigin);
   if (claims === null) return false;
-  const isOwner = claims.sub === resolved.ownerSub;
-  return isOwner || isSuperuser(claims) || (await hasAclGrantOnChain(resolved.id, claims.sub));
+  return canSeeCollection(claims, resolved);
 }
 
-// The collection counterpart of resolveDocumentByNames above, for a `/f/<...>` path that names a
-// collection rather than a file (E4-COLLECTION-TOKEN-UNRESOLVED's readable-path half). `secret` 404s for
-// everyone here, same as a file (D-59/D-99) - the token path below is the only way in for it.
-async function resolveDocumentCollectionByNames(
+// The collection counterpart of resolveDocumentByNames above, for the API layer only (§A1.1). `secret`
+// 404s for everyone here, same as a file (D-59/D-99) - the token path below is the only way in for it.
+async function resolveCollectionForApi(
   request: FastifyRequest,
   config: Config,
   segments: readonly string[],
@@ -95,7 +111,7 @@ async function resolveDocumentCollectionByNames(
   if (record === null) return null;
   const resolved = await resolveCollectionEffective(record);
   if (!readablePathResolves(resolved.effectiveProtection)) return null;
-  if (!(await collectionDocumentAuthorized(request, config, resolved))) return null;
+  if (!(await collectionApiAuthorized(request, config, resolved))) return null;
   return resolved;
 }
 
@@ -148,10 +164,22 @@ async function sendDocument(reply: FastifyReply, config: Config, record: Resolve
 
 // D-107/§1.2: both /f/<...> and /t/<token> resolve to a collection id, and the SPA opens the browser
 // there - reusing the D-70 embedded-context splice (renderEmbeddedCollectionLocation), never a second
-// delivery mechanism.
-async function sendCollectionDocument(reply: FastifyReply, resolved: ResolvedCollection, embeddedFor: string): Promise<void> {
+// delivery mechanism. E7-QA1 §A1.2/D-197: `revealName` decides which head this collection gets - a real
+// title (public/unlisted readable-path, or ANY token reach - D-59/D-98's bypass IS the grant) or the same
+// reveal-nothing shell a private FILE's document already uses. The embedded CollectionLocation is sent
+// EITHER WAY: it is not a credential, just the id the SPA needs to even ask /api/browse (which gates on a
+// real bearer) whether this viewer may see anything more.
+async function sendCollectionDocument(
+  reply: FastifyReply,
+  config: Config,
+  resolved: ResolvedCollection,
+  embeddedFor: string,
+  revealName: boolean,
+): Promise<void> {
   const location: CollectionLocation = { kind: "collection", collectionId: resolved.id };
-  const head = renderCollectionHead(resolved.name, resolved.effectiveProtection === "public");
+  const head = revealName
+    ? renderCollectionHead(resolved.name, resolved.effectiveProtection === "public")
+    : renderPreviewHead(null, config.appOrigin);
   reply
     .type("text/html; charset=utf-8")
     .send(injectHead(getSpaShell(), head + renderEmbeddedCollectionLocation(location, embeddedFor)));
@@ -177,9 +205,19 @@ export async function previewByPath(
     return;
   }
 
-  const collectionRecord = await resolveDocumentCollectionByNames(request, config, segments);
+  // F8/A1.1: no identity gate at the document layer any more - see resolveCollectionForDocument's own
+  // comment. `revealName` is the ONLY place this route still distinguishes protection levels: public/
+  // unlisted keep today's real title, private renders reveal-nothing (D-197's accepted consequence -
+  // existence becomes probeable by name, same as a private file already is; §0.4.3).
+  const collectionRecord = await resolveCollectionForDocument(segments);
   if (collectionRecord !== null) {
-    await sendCollectionDocument(reply, collectionRecord, request.url);
+    await sendCollectionDocument(
+      reply,
+      config,
+      collectionRecord,
+      request.url,
+      collectionRecord.effectiveProtection !== "private",
+    );
     return;
   }
 
@@ -200,9 +238,11 @@ export async function previewByToken(
 
   // A collection's own token bypasses the readable-path/authorization gate entirely, same as a file's -
   // knowing the unguessable token IS the access grant (D-59/D-98). A `secret` collection resolves here.
+  // A1.2: revealName is unconditionally true - reaching a collection by its own token already proved
+  // whatever the token requires, exactly as a private FILE's own /t/<token> already reveals its name.
   const collectionRecord = await resolveCollectionByToken(token);
   if (collectionRecord !== null) {
-    await sendCollectionDocument(reply, await resolveCollectionEffective(collectionRecord), request.url);
+    await sendCollectionDocument(reply, config, await resolveCollectionEffective(collectionRecord), request.url, true);
     return;
   }
 
@@ -213,21 +253,43 @@ export async function previewByToken(
 // on the file, or an ACL row on any ANCESTOR COLLECTION - D-99, matched byte-for-byte for the sub,
 // security invariant 6) - but this app never distinguishes 401 from 403 for a preview: an unauthorized
 // request just gets the same 404 a nonexistent file would (D-72's whole point is that neither the
-// document nor the API becomes an existence oracle for `private`).
-async function hasElevatedAccess(
-  request: FastifyRequest,
-  config: Config,
+// document nor the API becomes an existence oracle for `private`). E7-QA1: renamed from hasElevatedAccess
+// (F10/F11) - its true job is deciding VISIBILITY, whether a private file's document/context may be sent
+// at all. It must never be mistaken for any of the three PreviewContext booleans below (previewBooleansFor
+// computes those on its own, honest rule) - that conflation is exactly F10/F11's root cause.
+// D-190: wider than manage.ts's A1.4 visibility gate on purpose. canSeeFile alone answers "does this
+// viewer have a right to KNOW this file exists" (owner/superuser/ACL grant), which manage.ts's 403-vs-404
+// split needs unchanged - a collection host with no grant of their own still gets a flat 404 attempting to
+// rename a file they merely host (app/test/integration/manage.test.ts's D-190 block). But viewing a
+// private file's context is the READ half of the same right previewBooleansFor's canDelete already grants
+// the host - they may already delete this file, so denying them a look at its context first would be
+// nonsensical, not extra safety.
+async function canSeePrivateContent(claims: Claims, record: ResolvedFile): Promise<boolean> {
+  if (await canSeeFile(claims, record)) return true;
+  if (record.collectionId === "") return false;
+  const collection = await resolveCollectionById(record.collectionId);
+  return collection !== null && collection.ownerSub === claims.sub;
+}
+
+// E7-QA1 §1.1/A1.3 (F10/F11): the three honest PreviewContext booleans, computed once and shared between
+// ownerContextFor (the manage-mutation response and the private-branch API response) and sendContext's
+// non-private branch. `isOwner` is STRICT ownership - never true for a superuser or a grantee, the whole
+// point of the split. `canManage` mirrors controllers/manage.ts's rename/protection/move guard exactly.
+// `canDelete` mirrors its delete guard, including the D-190 collection-owner case.
+async function previewBooleansFor(
   record: ResolvedFile,
-): Promise<boolean> {
-  const claims = await claimsFromBearer(request, config.appOrigin);
-  if (claims === null) return false;
+  claims: Claims | null,
+): Promise<{ isOwner: boolean; canManage: boolean; canDelete: boolean }> {
+  if (claims === null) return { isOwner: false, canManage: false, canDelete: false };
   const isOwner = record.ownerSub !== null && claims.sub === record.ownerSub;
-  return (
-    isOwner ||
-    isSuperuser(claims) ||
-    (await hasAclGrant(record.id, claims.sub)) ||
-    (await hasAclGrantOnChain(record.collectionId, claims.sub))
-  );
+  const canManage = isOwner || isSuperuser(claims);
+  // D-190, mirroring controllers/manage.ts's deleteFileHandler exactly: the collection's owner may delete
+  // a file another account uploaded into it, and nothing else - rename/protection/move (canManage, above)
+  // are deliberately unaffected.
+  const viewerOwnsContainingCollection =
+    record.collectionId !== "" && (await resolveCollectionById(record.collectionId))?.ownerSub === claims.sub;
+  const canDelete = canManage || can(claims, "files:delete") || viewerOwnsContainingCollection;
+  return { isOwner, canManage, canDelete };
 }
 
 // D-84/D-137: only an authenticated, authorized request for a `private` file gets a signed directUrl (and,
@@ -247,22 +309,32 @@ function withSignedDirectUrl(ctx: PreviewContext, config: Config, record: Resolv
   };
 }
 
-// The context an already-authorized owner sees: current display path, current URLs (which change shape
-// when protection does - `secret` moves both links onto /t/<token>), and a D-84 signed directUrl when the
-// file is `private`, so its bytes still render in its own preview.
+// The context an already-authorized viewer sees: current display path, current URLs (which change shape
+// when protection does - `secret` moves both links onto /t/<token>), a D-84 signed directUrl when the
+// file is `private` so its bytes still render in its own preview, the honest isOwner/canManage/canDelete
+// booleans (§A1.3), and the real ancestor breadcrumb (§A1.5/F12).
 //
 // Exported because controllers/manage.ts returns exactly this from a successful PATCH /api/files/:id.
 // Both a rename and a protection change invalidate previewUrl/directUrl, and the SPA cannot recompute
 // them (it never sees the link_token) - so the mutation response has to carry them, or the page keeps
 // offering the URL the mutation just retired. Sharing this builder is what keeps the two answers
 // identical; a second copy in manage.ts would be one refactor away from disagreeing.
-export async function ownerContextFor(config: Config, record: FileRecord): Promise<PreviewContext> {
+//
+// `claims` is now a required parameter (E7-QA1, F10/F11): ownerContextFor used to hardcode `isOwner:
+// true`, which was wrong for every caller except the literal owner - a superuser or an ACL grantee got
+// told they owned the file. The caller has already established SOME form of authorization (owner,
+// superuser, or a grant) before calling this; it no longer guesses which.
+export async function ownerContextFor(config: Config, record: FileRecord, claims: Claims): Promise<PreviewContext> {
   const resolved = await resolveEffective(record);
   const segments = await displayPathFor(resolved);
   const urls = previewUrlsFor(config, resolved, segments);
+  const booleans = await previewBooleansFor(resolved, claims);
+  const targetChain = await protectionChain(resolved.collectionId);
+  const ancestors = await buildBreadcrumb(config, resolved.collectionId, targetChain, claims);
   const ctx: PreviewContext = {
     ...buildPreviewContext(resolved, segments.join("/"), urls),
-    isOwner: true,
+    ...booleans,
+    ancestors,
   };
   return withSignedDirectUrl(ctx, config, resolved);
 }
@@ -278,13 +350,14 @@ async function sendContext(
     return;
   }
 
+  const claims = await claimsFromBearer(request, config.appOrigin);
+
   if (record.effectiveProtection === "private") {
-    const granted = await hasElevatedAccess(request, config, record);
-    if (!granted) {
+    if (claims === null || !(await canSeePrivateContent(claims, record))) {
       reply.code(404).send();
       return;
     }
-    reply.send(await ownerContextFor(config, record));
+    reply.send(await ownerContextFor(config, record, claims));
     return;
   }
 
@@ -293,8 +366,10 @@ async function sendContext(
   const displayPath = segments.join("/");
 
   const ctx = buildPreviewContext(record, displayPath, urls);
-  const isOwner = await hasElevatedAccess(request, config, record);
-  reply.send({ ...ctx, isOwner });
+  const booleans = await previewBooleansFor(record, claims);
+  const targetChain = await protectionChain(record.collectionId);
+  const ancestors = await buildBreadcrumb(config, record.collectionId, targetChain, claims);
+  reply.send({ ...ctx, ...booleans, ancestors });
 }
 
 // E4.1 Wave C: a client-side navigation (or a back/forward that lands React Router on this route without
@@ -319,7 +394,9 @@ export async function previewContextByPath(
     return;
   }
 
-  const collectionRecord = await resolveDocumentCollectionByNames(request, config, segments);
+  // A1.1: the API-layer resolver, which DOES carry a bearer (a client-side XHR) and is where a private
+  // collection's authorization is now actually decided (F8).
+  const collectionRecord = await resolveCollectionForApi(request, config, segments);
   if (collectionRecord !== null) {
     const location: CollectionLocation = { kind: "collection", collectionId: collectionRecord.id };
     reply.send(location);

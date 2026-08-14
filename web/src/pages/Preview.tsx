@@ -19,21 +19,17 @@ import { FileBrowser } from "../components/FileBrowser.tsx";
 
 type ApiTarget = PreviewContext | { kind: "collection"; collectionId: string };
 
-// G1 (E5.1 Wave G, finding 7): built from `ctx.path`/`ctx.previewUrl` - both already on the context, so
-// no re-derivation and no separate fetch. Reuses FileBrowser's own breadcrumb markup/aria-label so the two
-// surfaces match (same "Home" root crumb, same `/` separators).
+// G1 (E5.1 Wave G, finding 7): built from `ctx.path`/`ctx.previewUrl`/`ctx.ancestors` - all already on the
+// context, so no re-derivation and no separate fetch. Reuses FileBrowser's own breadcrumb markup/aria-label
+// so the two surfaces match (same "Home" root crumb, same `/` separators).
 //
-// Ancestor segments (everything but the file's own trailing name) are rendered as plain text, NOT anchors.
-// This is a deliberate, narrower reading of D-121 than FileBrowser's own breadcrumb: PreviewContext carries
-// no per-ancestor collection id or URL the way `/api/browse`'s response does, so a clickable ancestor crumb
-// would have to be a URL ASSEMBLED from its bare name - exactly what D-100 ("the client constructs no
-// URLs") forbids. Only Home (`/`) and the file's own current-location crumb (`ctx.previewUrl`, a real,
-// already-resolved URL) are anchors. Flagged for the review session as a judgment call, not a silent
-// narrowing - see the session log.
+// E7-QA1 §B2.2 (F12): every ancestor is now a REAL `<a href>`, built from the server-sent
+// `ctx.ancestors[i].previewUrl` (§A1.5's builder, the same one /api/browse's own breadcrumb uses) - the
+// client only ever extracts a pathname out of an already-resolved URL, never assembles one from a bare
+// name (D-100 stands). This replaces the plain-text ancestors a prior round deliberately narrowed to,
+// because PreviewContext carried no per-ancestor URL at all until §1.2 added `ancestors`.
 function Breadcrumb({ ctx }: { ctx: PreviewContext }) {
   const navigate = useNavigate();
-  const segments = ctx.path.split("/");
-  const ancestors = segments.slice(0, -1);
   const href = pathnameOf(ctx.previewUrl);
 
   return (
@@ -48,14 +44,24 @@ function Breadcrumb({ ctx }: { ctx: PreviewContext }) {
       >
         Home
       </a>
-      {ancestors.map((name, i) => (
-        // eslint-disable-next-line react/no-array-index-key -- names alone carry no stable identity here,
-        // and this list is never reordered independently of the pathname it derives from.
-        <span key={i} style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
-          <span aria-hidden="true">/</span>
-          <span>{name}</span>
-        </span>
-      ))}
+      {ctx.ancestors.map((ancestor) => {
+        const ancestorHref = pathnameOf(ancestor.previewUrl);
+        return (
+          <span key={ancestor.id} style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+            <span aria-hidden="true">/</span>
+            <a
+              href={ancestorHref}
+              onClick={(event) => {
+                if (!isPlainLeftClick(event)) return;
+                event.preventDefault();
+                navigate(ancestorHref);
+              }}
+            >
+              {ancestor.name}
+            </a>
+          </span>
+        );
+      })}
       <span aria-hidden="true">/</span>
       <a
         href={href}

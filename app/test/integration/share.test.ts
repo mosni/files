@@ -224,27 +224,57 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
     });
   });
 
-  describe("D-186: sharing refused unless EFFECTIVE protection is private", () => {
-    it("grant on an effectively-unlisted file -> 409 not_private, and no row written", async () => {
-      const file = await seedFile({ ownerSub: "user:owner", protection: "unlisted" });
+  // E7-QA1 §A3.4/D-195: D-186's refusal is REVERSED - a grant now succeeds at every effective protection
+  // level. The `409 not_private` test is REPLACED, not deleted, by these - each asserting the grant is
+  // actually WRITTEN, not merely that the status is 200.
+  describe("D-195: sharing succeeds at ANY effective protection level (D-186 reversed)", () => {
+    it("grant on a public file succeeds and writes the ACL row", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "public" });
       asUser("user:owner");
       const res = await req("POST", "/api/shares", { token: "t", body: { type: "file", id: file.id, sub: "user:grantee" } });
-      expect(res.statusCode).toBe(409);
-      expect(res.json()).toEqual({ error: "not_private" });
-      expect(await hasAclGrant(file.id, "user:grantee")).toBe(false);
+      expect(res.statusCode).toBe(200);
+      expect(await hasAclGrant(file.id, "user:grantee")).toBe(true);
     });
 
-    it("grant on a public collection -> 409 not_private", async () => {
+    // The whole point of D-195/D-196: granting can_upload on an UNLISTED collection now does something
+    // real - the view half is inert (the collection is already readable by anyone with the link), but the
+    // upload half is exactly what an "invite someone to drop files in here" flow needs.
+    it("grant with canUpload=true on an unlisted collection succeeds and writes a real can_upload=1 row", async () => {
+      const collection = await seedCollection("user:owner", { protection: "unlisted" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/shares", {
+        token: "t",
+        body: { type: "collection", id: collection.id, sub: "user:grantee", canUpload: true },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(await hasCollectionAclGrant(collection.id, "user:grantee")).toBe(true);
+      const [rows] = await getPool().query("SELECT can_upload FROM collection_acl WHERE collection_id = ? AND sub = ?", [
+        collection.id,
+        "user:grantee",
+      ]);
+      expect((rows as { can_upload: number }[])[0]?.can_upload).toBe(1);
+    });
+
+    it("grant on a public collection succeeds too", async () => {
       const collection = await seedCollection("user:owner", { protection: "public" });
       asUser("user:owner");
       const res = await req("POST", "/api/shares", {
         token: "t",
         body: { type: "collection", id: collection.id, sub: "user:grantee" },
       });
-      expect(res.statusCode).toBe(409);
+      expect(res.statusCode).toBe(200);
+      expect(await hasCollectionAclGrant(collection.id, "user:grantee")).toBe(true);
     });
 
-    it("a file stored unlisted inside a private collection IS shareable (effective, not stored)", async () => {
+    it("grant on a private file still succeeds, unchanged", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/shares", { token: "t", body: { type: "file", id: file.id, sub: "user:grantee" } });
+      expect(res.statusCode).toBe(200);
+      expect(await hasAclGrant(file.id, "user:grantee")).toBe(true);
+    });
+
+    it("a file stored unlisted inside a private collection is shareable, exactly as before (effective, not stored)", async () => {
       const collection = await seedCollection("user:owner", { protection: "private" });
       const file = await seedFile({ ownerSub: "user:owner", collectionId: collection.id, protection: "unlisted" });
       asUser("user:owner");
@@ -259,6 +289,18 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
       asUser("user:owner");
       const res = await req("POST", "/api/shares", { token: "t", body: { type: "file", id: file.id, sub: "user:grantee" } });
       expect(res.statusCode).toBe(200);
+    });
+
+    // §B1.6 needs this from the client: the picker must be able to tell whether a view grant is inert.
+    // effectiveProtection stays on the response (only `shareable` was removed) precisely so it can.
+    it("GET /api/shares still reports the resolved EFFECTIVE protection, never the stored column (D-96 survives D-195)", async () => {
+      const collection = await seedCollection("user:owner", { protection: "public" });
+      const file = await seedFile({ ownerSub: "user:owner", collectionId: collection.id, protection: "private" });
+      asUser("user:owner");
+      const res = await req("GET", `/api/shares?type=file&id=${file.id}`, { token: "t" });
+      expect(res.statusCode).toBe(200);
+      expect((res.json() as { effectiveProtection: string }).effectiveProtection).toBe("private");
+      expect(res.json()).not.toHaveProperty("shareable");
     });
   });
 
@@ -354,12 +396,50 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
       expect(delivered.statusCode).toBe(200);
     });
 
-    it("409 not_private if the object is not effectively private, and no link is minted", async () => {
-      const file = await seedFile({ ownerSub: "user:owner", protection: "unlisted" });
+    // E7-QA1 §B1.7/D-198: allow_register defaults to true when omitted, and is passed through verbatim
+    // when the caller (the dialog's switch) sends it explicitly.
+    it("allow_register defaults to true when the client omits it", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      const linkId = `L${randomUUID()}`;
+      mintInviteLinkMock.mockResolvedValue({
+        ok: true,
+        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt: "2026-08-13T00:00:00.000Z" },
+      });
       asUser("user:owner");
       const res = await req("POST", "/api/invites", { token: "t", body: { type: "file", id: file.id } });
-      expect(res.statusCode).toBe(409);
-      expect(mintInviteLinkMock).not.toHaveBeenCalled();
+      expect(res.statusCode).toBe(201);
+      expect(mintInviteLinkMock).toHaveBeenCalledWith(expect.objectContaining({ allowRegister: true }));
+    });
+
+    it("allow_register: false from the client reaches mintInviteLink as allowRegister: false", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      const linkId = `L${randomUUID()}`;
+      mintInviteLinkMock.mockResolvedValue({
+        ok: true,
+        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt: "2026-08-13T00:00:00.000Z" },
+      });
+      asUser("user:owner");
+      const res = await req("POST", "/api/invites", {
+        token: "t",
+        body: { type: "file", id: file.id, allow_register: false },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(mintInviteLinkMock).toHaveBeenCalledWith(expect.objectContaining({ allowRegister: false }));
+    });
+
+    // E7-QA1 D-195: replaces the old "409 not_private" test - an invite for a non-private object now
+    // mints and grants exactly like a private one does.
+    it("invite creation succeeds for a non-private object too (D-195)", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "unlisted" });
+      const linkId = `L${randomUUID()}`;
+      mintInviteLinkMock.mockResolvedValue({
+        ok: true,
+        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt: "2026-08-13T00:00:00.000Z" },
+      });
+      asUser("user:owner");
+      const res = await req("POST", "/api/invites", { token: "t", body: { type: "file", id: file.id } });
+      expect(res.statusCode).toBe(201);
+      expect(await hasAclGrant(file.id, `link:${linkId}`)).toBe(true);
     });
 
     it("passes auth's ttl_too_long through as 400", async () => {

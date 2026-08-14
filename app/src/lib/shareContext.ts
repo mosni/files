@@ -26,9 +26,9 @@ export type ShareState = {
   id: string;
   name: string;
   effectiveProtection: Protection;
-  // D-186: false for anything not effectively `private`. The dialog refuses on this alone and never
-  // re-derives the rule client-side.
-  shareable: boolean;
+  // E7-QA1 D-195: D-186's `shareable` field is REMOVED, not just unused - sharing now succeeds at every
+  // protection level, so a boolean that is always `true` is a trap for the next reader. `effectiveProtection`
+  // stays: the dialog uses it to render an informational note when a view grant would be inert (§B1.6).
   grants: ShareGrant[];
 };
 

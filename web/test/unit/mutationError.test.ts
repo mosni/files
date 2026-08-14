@@ -44,7 +44,6 @@ describe("toastMutationFailure()", () => {
   });
 
   it.each([
-    ["not_private", "Only private files can be shared with specific people."],
     ["unknown_account", "That account hasn't signed in yet — send them an invite instead."],
     ["link_account_not_grantable", "That's an invite account; it already has access through its link."],
     ["cannot_share_with_self", "You already have access to your own file."],

@@ -81,11 +81,16 @@ export async function setAccountRole(sub: string, role: string, action: "add" | 
 
 // §A7.1: mint a one-person invite link. NEVER logs the returned url (auth's own invariant 11 - a bearer
 // token in a query-free path segment) - only the id, if a caller logs anything at all.
+//
+// E7-QA1 §B1.7/D-198: `allowRegister` is now a caller-supplied parameter, not a hardcoded `true` - D-23's
+// upgradeable switch ships in E7-QA1 rather than being deferred to E8. Default stays `true` at the
+// controller layer (controllers/share.ts), matching the switch's own default-on in the dialog.
 export async function mintInviteLink(params: {
   roles: string[];
   ttlSeconds: number;
   destination: string;
   label: string;
+  allowRegister: boolean;
 }): Promise<InternalResult<{ url: string; id: string; expiresAt: string }>> {
   const result = await post("/internal/links", {
     namespace: AUTH_NAMESPACE,
@@ -93,7 +98,7 @@ export async function mintInviteLink(params: {
     ttl_seconds: params.ttlSeconds,
     destination: params.destination,
     label: params.label,
-    allow_register: true,
+    allow_register: params.allowRegister,
   });
   if (!result.ok) return result;
   const body = result.value as { url: string; id: string; expires_at: string };

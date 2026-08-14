@@ -407,8 +407,8 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
     expect(collectionId).toEqual(expect.any(String));
   });
 
-  it("GET /api/preview/t/<token> for a collection-gated file never exposes the collection's name (D-100)", async () => {
-    const { collectionName, linkToken } = await seed({
+  it("GET /api/preview/t/<token> for a collection-gated file never exposes the collection's real TOKEN (D-100)", async () => {
+    const { collectionId, collectionName, linkToken } = await seed({
       name: "leak-check5.txt",
       protection: "public",
       collectionProtection: "secret",
@@ -419,7 +419,14 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
     expect(ctx.previewUrl).not.toContain(collectionName);
     expect(ctx.directUrl).not.toContain(collectionName);
     expect(ctx.previewUrl).toContain(`/t/${linkToken}`);
-    expect(JSON.stringify(ctx)).not.toContain(collectionName);
+    // lib/breadcrumb.ts's own D-100 design (matched by app/test/integration/browse.test.ts): the ancestor's
+    // NAME is orientation, not a credential, and is expected here - only its real link TOKEN, an actual
+    // live credential the viewer was never granted, must never ride along.
+    const ancestorCrumb = ctx.ancestors.find((a) => a.id === collectionId);
+    expect(ancestorCrumb?.name).toBe(collectionName);
+    const [tokenRows] = await getPool().query("SELECT link_token FROM collections WHERE id = ?", [collectionId]);
+    const realCollectionToken = (tokenRows as { link_token: string }[])[0]!.link_token;
+    expect(ancestorCrumb?.previewUrl).not.toContain(realCollectionToken);
   });
 
   it("reports the EFFECTIVE protection for a collection-gated file, never the stored column (D-96)", async () => {
@@ -466,6 +473,179 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
     verifyMock.mockResolvedValue({ sub: grantedSub } as never);
     const res = await get(`/api/preview/t/${linkToken}`, { authorization: "Bearer t" });
     expect(res.statusCode).toBe(200);
+    // E7-QA1 F10/F11: a grantee's context must NEVER claim ownership or management rights - the conflation
+    // that told a grantee "You own this file" and showed them a rename pen that then 404'd.
+    const ctx = res.json() as PreviewContext;
+    expect(ctx.isOwner).toBe(false);
+    expect(ctx.canManage).toBe(false);
+    expect(ctx.canDelete).toBe(false);
+  });
+
+  // E7-QA1 §A1.6/F10/F11: the honest three-boolean split, asserted directly rather than inferred from a
+  // status code. A superuser is the exact conflation F10/F11 shipped: `isOwner` used to be `true` for
+  // ANYONE passing hasElevatedAccess, which includes a superuser who does not literally own the file.
+  it("a superuser's preview context: isOwner FALSE, canManage true (the conflation cannot come back)", async () => {
+    const { collectionName } = await seed({ name: "su.txt", protection: "private", ownerSub: "user:owner" });
+    verifyMock.mockResolvedValue({ sub: "user:root", mosni_owner: true } as never);
+    const res = await get(`/api/preview/f/${collectionName}/su.txt`, { authorization: "Bearer t" });
+    expect(res.statusCode).toBe(200);
+    const ctx = res.json() as PreviewContext;
+    expect(ctx.isOwner).toBe(false);
+    expect(ctx.canManage).toBe(true);
+    expect(ctx.canDelete).toBe(true);
+  });
+
+  it("the owner's preview context: isOwner, canManage and canDelete are ALL true (the positive case)", async () => {
+    const { collectionName } = await seed({ name: "own.txt", protection: "private", ownerSub: "user:owner" });
+    verifyMock.mockResolvedValue({ sub: "user:owner" } as never);
+    const res = await get(`/api/preview/f/${collectionName}/own.txt`, { authorization: "Bearer t" });
+    const ctx = res.json() as PreviewContext;
+    expect(ctx.isOwner).toBe(true);
+    expect(ctx.canManage).toBe(true);
+    expect(ctx.canDelete).toBe(true);
+  });
+
+  // D-190, mirroring controllers/manage.ts's deleteFileHandler: the collection's owner may DELETE a file
+  // another account uploaded into it, but has no rename/protection/move rights over it.
+  it("the collection owner's context for a file hosted there (not their own): canDelete true, canManage/isOwner false", async () => {
+    const { collectionId } = await seed({
+      name: "hosted-holder.txt",
+      protection: "private",
+      collectionProtection: "private",
+      ownerSub: "user:host",
+    });
+    // A second file, in the SAME collection, uploaded by someone else.
+    const claimed = await claimFileRow({
+      collectionId,
+      name: "hosted.txt",
+      diskDir: "2026/07",
+      diskName: `${randomUUID()}-hosted.txt`,
+      ownerSub: "user:visitor",
+      uploaderSub: "user:visitor",
+      protection: "private",
+      uploaderName: null,
+    });
+    const abs = path.join(root, ...diskRelPath(claimed).split("/"));
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, "content");
+    await commitFileRow(claimed.id, {
+      bytes: 7,
+      width: null,
+      height: null,
+      durationSeconds: null,
+      textPreview: null,
+      thumbName: null,
+      isText: false,
+    });
+
+    verifyMock.mockResolvedValue({ sub: "user:host" } as never);
+    const res = await get(`/api/preview/t/${claimed.linkToken}`, { authorization: "Bearer t" });
+    expect(res.statusCode).toBe(200);
+    const ctx = res.json() as PreviewContext;
+    expect(ctx.isOwner).toBe(false);
+    expect(ctx.canManage).toBe(false);
+    expect(ctx.canDelete).toBe(true);
+  });
+
+  // §A1.5/F12: PreviewContext.ancestors, built by the SAME breadcrumb lib/breadcrumb.ts's builder uses -
+  // empty in the anonymous document copy always, populated in the authorized API copy, with a secret
+  // ancestor's own token redacted for a viewer not independently authorized on THAT ancestor.
+  describe("PreviewContext.ancestors (§A1.5/F12)", () => {
+    it("is empty in the embedded document copy, even for a nested public file", async () => {
+      const top = await createCollection({ parentId: "", name: `anc-doc-${randomUUID()}`, ownerSub: "user:owner", protection: "public" });
+      const claimed = await claimFileRow({
+        collectionId: top.id,
+        name: "nested.txt",
+        diskDir: "2026/07",
+        diskName: `${randomUUID()}-nested.txt`,
+        ownerSub: "user:owner",
+        uploaderSub: "user:owner",
+        protection: "public",
+        uploaderName: null,
+      });
+      const abs = path.join(root, ...diskRelPath(claimed).split("/"));
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, "content");
+      await commitFileRow(claimed.id, { bytes: 7, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null, isText: false });
+
+      const res = await get(`/f/${top.name}/nested.txt`);
+      expect(res.statusCode).toBe(200);
+      expect(embeddedContextOf(res.body).ancestors).toEqual([]);
+    });
+
+    it("is populated in the API copy, with the real ancestor id/name/previewUrl", async () => {
+      // A genuinely root-level file (collectionId "", D-126) - no containing collection at all, so the
+      // breadcrumb is empty. The nested (non-empty) shape is exercised in the next test.
+      const name = `nested-api-${randomUUID()}.txt`;
+      const claimed = await claimFileRow({
+        collectionId: "",
+        name,
+        diskDir: "2026/07",
+        diskName: `${randomUUID()}-nested-api.txt`,
+        ownerSub: "user:owner",
+        uploaderSub: "user:owner",
+        protection: "public",
+        uploaderName: null,
+      });
+      const abs = path.join(root, ...diskRelPath(claimed).split("/"));
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, "content");
+      await commitFileRow(claimed.id, { bytes: 7, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null, isText: false });
+
+      const res = await get(`/api/preview/f/${name}`);
+      expect(res.statusCode).toBe(200);
+      const ctx = res.json() as PreviewContext;
+      expect(ctx.ancestors).toEqual([]);
+    });
+
+    it("a nested file's API context carries its real ancestor chain", async () => {
+      const top = await createCollection({ parentId: "", name: `anc-chain-${randomUUID()}`, ownerSub: "user:owner", protection: "public" });
+      const claimed = await claimFileRow({
+        collectionId: top.id,
+        name: "chained.txt",
+        diskDir: "2026/07",
+        diskName: `${randomUUID()}-chained.txt`,
+        ownerSub: "user:owner",
+        uploaderSub: "user:owner",
+        protection: "public",
+        uploaderName: null,
+      });
+      const abs = path.join(root, ...diskRelPath(claimed).split("/"));
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, "content");
+      await commitFileRow(claimed.id, { bytes: 7, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null, isText: false });
+
+      const res = await get(`/api/preview/f/${top.name}/chained.txt`);
+      expect(res.statusCode).toBe(200);
+      const ctx = res.json() as PreviewContext;
+      expect(ctx.ancestors).toEqual([{ id: top.id, name: top.name, previewUrl: expect.stringContaining(top.name) }]);
+    });
+
+    it("redacts a SECRET ancestor's real token when the viewer is not independently authorized on it", async () => {
+      const top = await createCollection({ parentId: "", name: `anc-sec-${randomUUID()}`, ownerSub: "user:owner", protection: "secret" });
+      const child = await createCollection({ parentId: top.id, name: "child", ownerSub: "user:owner", protection: "public" });
+      const claimed = await claimFileRow({
+        collectionId: child.id,
+        name: "under-secret.txt",
+        diskDir: "2026/07",
+        diskName: `${randomUUID()}-under-secret.txt`,
+        ownerSub: "user:owner",
+        uploaderSub: "user:owner",
+        protection: "public",
+        uploaderName: null,
+      });
+      const abs = path.join(root, ...diskRelPath(claimed).split("/"));
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, "content");
+      await commitFileRow(claimed.id, { bytes: 7, width: null, height: null, durationSeconds: null, textPreview: null, thumbName: null, isText: false });
+
+      const res = await get(`/api/preview/t/${claimed.linkToken}`);
+      expect(res.statusCode).toBe(200);
+      const ctx = res.json() as PreviewContext;
+      const topCrumb = ctx.ancestors.find((a) => a.id === top.id);
+      expect(topCrumb).toBeDefined();
+      expect(topCrumb!.previewUrl).not.toContain(top.linkToken);
+    });
   });
 
   // --- oEmbed (D-74) --------------------------------------------------------------------------------
@@ -643,15 +823,72 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       });
     });
 
-    it("private: anonymous 404s at the readable path (unlike a file, which reveals nothing but still 200s)", async () => {
+    // E7-QA1 D-197/F8: a private collection's readable-path document now serves the SAME reveal-nothing
+    // shell a private FILE's document has always used - for EVERYONE, with NO Authorization header
+    // involved, because a document request is a top-level browser navigation and cannot carry one. This is
+    // the fix for F8: the old gate called claimsFromBearer on the DOCUMENT request, which always returned
+    // null (a browser sends no header on a navigation), so a private collection's deep link 404'd for
+    // everyone including its own owner since E4. Authorization moved to /api/browse (see the API-layer
+    // describe block below, which the SPA calls WITH a bearer once it mounts).
+    it("private: 200 with NO Authorization header, minimal head, no name anywhere - identical for anonymous, the owner, and a stranger (F8/D-197/D-200)", async () => {
       const collection = await createCollection({
         parentId: "",
         name: `private-${randomUUID()}`,
         ownerSub: "user:owner",
         protection: "private",
       });
-      const res = await get(`/f/${collection.name}`);
-      expect(res.statusCode).toBe(404);
+
+      const anon = await get(`/f/${collection.name}`);
+      expect(anon.statusCode).toBe(200);
+      // No OG/JSON-LD, no title naming it, no canonical - the same MinimalHead a private FILE's document
+      // already uses. `embeddedFor` legitimately echoes the collection's name back (it is built from the
+      // REQUEST path the caller already typed, D-160 - not a database lookup that reveals anything new), so
+      // this is a narrower check than "the body never contains the name" would be.
+      expect(anon.body).not.toContain("og:");
+      expect(anon.body).not.toContain("canonical");
+      expect(anon.body).toContain("noindex, nofollow");
+      // The embedded CollectionLocation is still sent - it is not a credential, just the id the SPA needs
+      // to even ASK /api/browse whether this viewer may see anything more.
+      expect(embeddedLocationOf(anon.body)).toEqual({
+        kind: "collection",
+        collectionId: collection.id,
+        embeddedFor: `/f/${collection.name}`,
+      });
+
+      // D-200: this is the exact test whose absence let F8 ship - the owner's own document is requested
+      // with NO Authorization header (a real browser navigation cannot send one), and reaches the SAME
+      // reveal-nothing shell as anonymous. Nothing here depends on who is asking.
+      const noHeader = await get(`/f/${collection.name}`);
+      expect(noHeader.statusCode).toBe(200);
+      expect(noHeader.body).toBe(anon.body);
+    });
+
+    // D-200's companion case: even if SOMETHING fabricated a Bearer on a document request (which a real
+    // browser cannot do), the response must not depend on it - the document no longer reads it at all.
+    it("private collection document: identical bytes with and without a Bearer (the document no longer depends on a header a browser cannot send)", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `private-idem-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "private",
+      });
+      const withoutHeader = await get(`/f/${collection.name}`);
+      verifyMock.mockResolvedValue({ sub: "user:owner" } as never);
+      const withHeader = await get(`/f/${collection.name}`, { authorization: "Bearer t" });
+      expect(withHeader.statusCode).toBe(withoutHeader.statusCode);
+      expect(withHeader.body).toBe(withoutHeader.body);
+    });
+
+    it("private collection reached by its own TOKEN: the name IS revealed (A1.2's second branch - the token IS the grant, D-59/D-98)", async () => {
+      const collection = await createCollection({
+        parentId: "",
+        name: `private-tok-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "private",
+      });
+      const res = await get(`/t/${collection.linkToken}`);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toContain(collection.name);
     });
 
     // AC6/D-124 (E4.1 live-testing findings, Wave B): the exact reproduction of finding 4 - a collection's
@@ -671,80 +908,6 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
         kind: "collection",
         collectionId: collection.id,
         embeddedFor: `/f/${collection.name}`,
-      });
-    });
-
-    it("private: the owner and a superuser CAN reach it at the readable path", async () => {
-      const collection = await createCollection({
-        parentId: "",
-        name: `priv-owner-${randomUUID()}`,
-        ownerSub: "user:owner",
-        protection: "private",
-      });
-
-      verifyMock.mockResolvedValue({ sub: "user:owner" } as never);
-      const ownerRes = await get(`/f/${collection.name}`, { authorization: "Bearer t" });
-      expect(ownerRes.statusCode).toBe(200);
-      expect(embeddedLocationOf(ownerRes.body)).toEqual({
-        kind: "collection",
-        collectionId: collection.id,
-        embeddedFor: `/f/${collection.name}`,
-      });
-
-      verifyMock.mockResolvedValue({ sub: "user:root", mosni_owner: true } as never);
-      expect((await get(`/f/${collection.name}`, { authorization: "Bearer t" })).statusCode).toBe(200);
-    });
-
-    it("private: a signed-in stranger with no grant still 404s", async () => {
-      const collection = await createCollection({
-        parentId: "",
-        name: `priv-stranger-${randomUUID()}`,
-        ownerSub: "user:owner",
-        protection: "private",
-      });
-      verifyMock.mockResolvedValue({ sub: "user:stranger" } as never);
-      expect((await get(`/f/${collection.name}`, { authorization: "Bearer t" })).statusCode).toBe(404);
-    });
-
-    it("private: an ACL grant on the collection itself grants access (D-99)", async () => {
-      const collection = await createCollection({
-        parentId: "",
-        name: `priv-granted-${randomUUID()}`,
-        ownerSub: "user:owner",
-        protection: "private",
-      });
-      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 0)", [
-        collection.id,
-        "user:granted",
-      ]);
-      verifyMock.mockResolvedValue({ sub: "user:granted" } as never);
-      expect((await get(`/f/${collection.name}`, { authorization: "Bearer t" })).statusCode).toBe(200);
-    });
-
-    it("private: an ACL grant on an ANCESTOR collection pierces down (D-99)", async () => {
-      const top = await createCollection({
-        parentId: "",
-        name: `priv-anc-${randomUUID()}`,
-        ownerSub: "user:owner",
-        protection: "private",
-      });
-      const child = await createCollection({
-        parentId: top.id,
-        name: "child",
-        ownerSub: "user:owner",
-        protection: "private",
-      });
-      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 0)", [
-        top.id,
-        "user:granted",
-      ]);
-      verifyMock.mockResolvedValue({ sub: "user:granted" } as never);
-      const res = await get(`/f/${top.name}/child`, { authorization: "Bearer t" });
-      expect(res.statusCode).toBe(200);
-      expect(embeddedLocationOf(res.body)).toEqual({
-        kind: "collection",
-        collectionId: child.id,
-        embeddedFor: `/f/${top.name}/child`,
       });
     });
 
@@ -818,7 +981,10 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       expect((await get(`/api/preview/f/${collection.name}`)).statusCode).toBe(404);
     });
 
-    it("GET /api/preview/f/<private collection's path> 404s for anonymous, 200 for the owner (D-99)", async () => {
+    // E7-QA1 §A1.1: this route is where a private collection's authorization ACTUALLY lives now (F8) -
+    // owner, superuser, an ACL grant on the collection itself, or on any ancestor (D-99), same identity
+    // list the document route used to apply in the wrong place. A stranger still 404s.
+    it("GET /api/preview/f/<private collection's path>: 404 for anonymous and a stranger, 200 for the owner, a superuser, and an ACL grantee (D-99)", async () => {
       const collection = await createCollection({
         parentId: "",
         name: `ctxpriv-${randomUUID()}`,
@@ -827,10 +993,46 @@ describe("routes/preview.ts + controllers/preview.ts (D-81/D-84: resolved throug
       });
       expect((await get(`/api/preview/f/${collection.name}`)).statusCode).toBe(404);
 
+      verifyMock.mockResolvedValue({ sub: "user:stranger" } as never);
+      expect((await get(`/api/preview/f/${collection.name}`, { authorization: "Bearer t" })).statusCode).toBe(404);
+
       verifyMock.mockResolvedValue({ sub: "user:owner" } as never);
       const res = await get(`/api/preview/f/${collection.name}`, { authorization: "Bearer t" });
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ kind: "collection", collectionId: collection.id });
+
+      verifyMock.mockResolvedValue({ sub: "user:root", mosni_owner: true } as never);
+      expect((await get(`/api/preview/f/${collection.name}`, { authorization: "Bearer t" })).statusCode).toBe(200);
+
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 0)", [
+        collection.id,
+        "user:granted",
+      ]);
+      verifyMock.mockResolvedValue({ sub: "user:granted" } as never);
+      expect((await get(`/api/preview/f/${collection.name}`, { authorization: "Bearer t" })).statusCode).toBe(200);
+    });
+
+    it("GET /api/preview/f/<path>: an ACL grant on an ANCESTOR collection pierces down (D-99)", async () => {
+      const top = await createCollection({
+        parentId: "",
+        name: `ctxanc-${randomUUID()}`,
+        ownerSub: "user:owner",
+        protection: "private",
+      });
+      const child = await createCollection({
+        parentId: top.id,
+        name: "child",
+        ownerSub: "user:owner",
+        protection: "private",
+      });
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 0)", [
+        top.id,
+        "user:granted",
+      ]);
+      verifyMock.mockResolvedValue({ sub: "user:granted" } as never);
+      const res = await get(`/api/preview/f/${top.name}/child`, { authorization: "Bearer t" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ kind: "collection", collectionId: child.id });
     });
 
     it("a file token still wins over a collection token (§1.1 file-then-collection ordering)", async () => {

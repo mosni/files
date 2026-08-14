@@ -86,7 +86,7 @@ describe("previewKindFor()", () => {
 });
 
 describe("buildPreviewContext()", () => {
-  it("maps a FileRecord + display path + urls into a PreviewContext with isOwner always false", () => {
+  it("maps a FileRecord + display path + urls into a PreviewContext with isOwner/canManage/canDelete always false and ancestors empty", () => {
     // uploaderSub is set and no name was captured, so per D-168 uploaderName falls back to the sub itself,
     // unconditionally - see the "uploaderName fallback (D-168)" describe block below for the full matrix.
     const record = makeRecord();
@@ -113,6 +113,9 @@ describe("buildPreviewContext()", () => {
       uploaderName: "user-1",
       uploaderAvatarUrl: urls.uploaderAvatarUrl,
       isOwner: false,
+      canManage: false,
+      canDelete: false,
+      ancestors: [],
     });
   });
 
@@ -130,9 +133,12 @@ describe("buildPreviewContext()", () => {
     expect(ctx.protection).toBe("private");
   });
 
-  it("isOwner is false even when the record has an ownerSub", () => {
+  it("isOwner/canManage/canDelete are false and ancestors empty even when the record has an ownerSub", () => {
     const ctx = buildPreviewContext(makeRecord({ ownerSub: "someone" }), displayPath, urls);
     expect(ctx.isOwner).toBe(false);
+    expect(ctx.canManage).toBe(false);
+    expect(ctx.canDelete).toBe(false);
+    expect(ctx.ancestors).toEqual([]);
   });
 
   it("maps thumbUrl straight through from urls (D-137)", () => {

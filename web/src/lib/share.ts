@@ -34,10 +34,20 @@ export async function revokeShare(type: ShareObjectType, id: string, sub: string
   });
 }
 
-export async function createInvite(type: ShareObjectType, id: string, canUpload?: boolean): Promise<Response> {
+export async function createInvite(
+  type: ShareObjectType,
+  id: string,
+  canUpload?: boolean,
+  allowRegister?: boolean,
+): Promise<Response> {
   return fetch("/api/invites", {
     method: "POST",
     headers: jsonHeaders(),
-    body: JSON.stringify({ type, id, ...(canUpload !== undefined ? { canUpload } : {}) }),
+    body: JSON.stringify({
+      type,
+      id,
+      ...(canUpload !== undefined ? { canUpload } : {}),
+      ...(allowRegister !== undefined ? { allow_register: allowRegister } : {}),
+    }),
   });
 }

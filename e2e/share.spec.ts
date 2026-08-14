@@ -218,4 +218,45 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
     expect(pageErrors, `uncaught page errors: ${pageErrors.join(", ")}`).toEqual([]);
     await expect(page.getByText(name, { exact: true }).first()).toBeVisible();
   });
+
+  // E7-QA1 §D3/F8: the headline finding of this round, proven in a REAL browser - a genuine navigation to
+  // a private collection's deep link, which sends no Authorization header at all (that is what a browser
+  // navigation is). Before this fix the document layer gated on that missing header and 404'd for
+  // EVERYONE, including the owner; this test drives the exact request shape a real user's click produces,
+  // never a fabricated header (D-200 applies to e2e assertions as much as integration ones).
+  test("a private collection's deep link opens for its own owner via a real browser navigation (F8/D-197)", async ({ page, request }) => {
+    const sub = `user:e2e-private-coll-${randomUUID()}`;
+    const token = await mintToken(request, sub);
+    const collectionName = `private-deep-link-${randomUUID().slice(0, 8)}`;
+
+    await withDb(async (conn) => {
+      const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
+      await conn.execute(
+        `INSERT INTO collections (id, parent_id, name, owner_sub, protection, default_protection, link_token)
+         VALUES (?, '', ?, ?, 'private', 'unlisted', ?)`,
+        [newId(), collectionName, sub, linkToken],
+      );
+    });
+
+    await page.addInitScript(`
+      window.mosni = Object.assign(window.mosni ?? {}, {
+        user: () => ({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        token: () => ${JSON.stringify(token)},
+        onChange: (cb) => cb({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        login: () => {}, logout: () => {},
+        toast: () => {},
+      });
+    `);
+
+    // A real top-level navigation - Playwright's page.goto() sends exactly what a browser sends on a
+    // clicked link: no Authorization header. The auth SDK's token only becomes available to the SPA
+    // AFTER this document has already loaded and mounted, via the client-side /api/browse call.
+    await page.goto(`${FILES_ORIGIN}/f/${collectionName}`);
+
+    // Before F8's fix this 404'd (the styled NotFound view) for every viewer including the owner. Now the
+    // document always 200s with the reveal-nothing shell, and the SPA's own /api/browse call (WITH the
+    // bearer, once the SDK resolves) is what actually authorizes the owner into the real listing.
+    await expect(page.locator("nav[aria-label=Breadcrumb]")).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText("This file doesn't exist")).toHaveCount(0);
+  });
 });

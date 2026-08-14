@@ -262,6 +262,21 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       expect(res.statusCode).toBe(404);
     });
 
+    // E7-QA1 §A1.4: the collection counterpart of the file guard above - visible-but-not-manageable is
+    // 403, invisible is 404.
+    it("an ACL grantee attempting to rename the collection gets 403, not 404 - they can already see it", async () => {
+      const collection = await seedCollection("user:owner");
+      const granteeSub = `user:${randomUUID()}`;
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+        collection.id,
+        granteeSub,
+      ]);
+      asUser(granteeSub);
+      const res = await req("PATCH", `/api/collections/${collection.id}`, { token: "t", body: { name: "renamed" } });
+      expect(res.statusCode).toBe(403);
+      expect((await resolveCollectionById(collection.id))?.name).not.toBe("renamed");
+    });
+
     it("a mosni_owner superuser may rename anyone's collection", async () => {
       const collection = await seedCollection("user:owner");
       asUser("user:root", { mosni_owner: true });
@@ -541,6 +556,42 @@ describe("routes/manage.ts + controllers/manage.ts (E3 §1.5 mutation API)", () 
       asUser("user:has-delete-role", { roles: ["files:delete"] });
       const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { name: "x.txt" } });
       expect(res.statusCode).toBe(404);
+    });
+
+    // E7-QA1 §A1.4: the narrowed "never confirm existence" rule - a caller who CAN already see the file
+    // (an ACL grantee) but may not manage it gets 403, not 404. A total stranger with no grant still 404s.
+    describe("A1.4: 403 (visible, not manageable) vs 404 (cannot see it at all)", () => {
+      it("an ACL grantee attempting to rename gets 403, not 404 - the file is visible to them", async () => {
+        const collection = await seedCollection("user:owner");
+        const file = await seedFile({ collectionId: collection.id, ownerSub: "user:owner" });
+        const granteeSub = `user:${randomUUID()}`;
+        await getPool().query("INSERT INTO file_acl (file_id, sub) VALUES (?, ?)", [file.id, granteeSub]);
+        asUser(granteeSub);
+        const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { name: "renamed.txt" } });
+        expect(res.statusCode).toBe(403);
+        expect((await resolveById(file.id))?.name).not.toBe("renamed.txt");
+      });
+
+      it("a grant on the file's COLLECTION (not the file itself) also yields 403, not 404", async () => {
+        const collection = await seedCollection("user:owner");
+        const file = await seedFile({ collectionId: collection.id, ownerSub: "user:owner" });
+        const granteeSub = `user:${randomUUID()}`;
+        await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+          collection.id,
+          granteeSub,
+        ]);
+        asUser(granteeSub);
+        const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { protection: "private" } });
+        expect(res.statusCode).toBe(403);
+      });
+
+      it("a total stranger with no grant anywhere still gets 404 (existence stays hidden)", async () => {
+        const collection = await seedCollection("user:owner");
+        const file = await seedFile({ collectionId: collection.id, ownerSub: "user:owner" });
+        asUser(`user:${randomUUID()}`);
+        const res = await req("PATCH", `/api/files/${file.id}`, { token: "t", body: { name: "x.txt" } });
+        expect(res.statusCode).toBe(404);
+      });
     });
 
     it("changes protection level", async () => {

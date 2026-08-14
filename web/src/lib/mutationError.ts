@@ -12,7 +12,8 @@ const MESSAGES: Record<string, string> = {
   name_taken: "That name is already used here — choose another.",
   invalid_destination: "A collection can't be moved into itself.",
   // E7 (D-128's whole point extended to the share dialog): a rejected share/invite says why too.
-  not_private: "Only private files can be shared with specific people.",
+  // E7-QA1 D-195: `not_private` is DEAD - sharing succeeds at every protection level now, so the server
+  // never sends this code any more. Do not re-add it without a fresh decision reversing D-195.
   unknown_account: "That account hasn't signed in yet — send them an invite instead.",
   link_account_not_grantable: "That's an invite account; it already has access through its link.",
   cannot_share_with_self: "You already have access to your own file.",

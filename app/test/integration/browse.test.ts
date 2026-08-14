@@ -39,6 +39,7 @@ type BrowseResponse = {
   }[];
   nextOffset: number | null;
   canUpload: boolean;
+  canManage: boolean;
 };
 
 describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scopes by D-116)", () => {
@@ -876,6 +877,89 @@ describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scop
       asUser("user:stranger", { roles: ["files:write"] });
       const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
       expect((res.json() as BrowseResponse).canUpload).toBe(false);
+    });
+
+    // E7-QA1 §A2.4/H1/D-196: the case E7 shipped with NO tier asserting at all - AC3's positive case. A
+    // non-owner holding a can_upload=1 ACL row, and NO files:write role, must still get canUpload: true.
+    // Every existing positive test above is an owner; this is the actual invite-with-upload-rights shape.
+    it("is TRUE for a non-owner with can_upload=1 and NO files:write (E7 AC3's never-asserted positive case)", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "unlisted" });
+      const grantedSub = `user:${randomUUID()}`;
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+        collection.id,
+        grantedSub,
+      ]);
+      asUser(grantedSub, { roles: [] }); // deliberately NO files:write - D-191's invite-only role
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
+      expect((res.json() as BrowseResponse).canUpload).toBe(true);
+    });
+
+    it("is false for the same sub with can_upload=0 (the view/upload split still holds)", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "unlisted" });
+      const grantedSub = `user:${randomUUID()}`;
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 0)", [
+        collection.id,
+        grantedSub,
+      ]);
+      asUser(grantedSub, { roles: ["files:write"] });
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
+      expect((res.json() as BrowseResponse).canUpload).toBe(false);
+    });
+
+    it("is false AT THE ROOT for a grant-only caller with no files:write (A2.2's root branch is unchanged)", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "unlisted" });
+      const grantedSub = `user:${randomUUID()}`;
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+        collection.id,
+        grantedSub,
+      ]);
+      asUser(grantedSub, { roles: [] });
+      const res = await get("/api/browse?scope=visible", "t");
+      expect((res.json() as BrowseResponse).canUpload).toBe(false);
+    });
+  });
+
+  // E7-QA1 §C1 (F6): may THIS viewer SHARE the collection currently being browsed - owner or superuser
+  // only (D-187), never a mere can_upload grantee. Server-decided, same pattern as canUpload.
+  describe("canManage (Wave C1's collection-page Share control depends on this)", () => {
+    it("is true for the owner browsing their own collection", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "unlisted" });
+      asUser("user:a", { roles: ["files:write"] });
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
+      expect((res.json() as BrowseResponse).canManage).toBe(true);
+    });
+
+    it("is true for a superuser", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "unlisted" });
+      asUser("user:root", { roles: ["files:write", "files:delete"], mosni_owner: true });
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
+      expect((res.json() as BrowseResponse).canManage).toBe(true);
+    });
+
+    it("is FALSE for a can_upload grantee (D-187: a grantee never shares, whatever canUpload says)", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "unlisted" });
+      const grantedSub = `user:${randomUUID()}`;
+      await getPool().query("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+        collection.id,
+        grantedSub,
+      ]);
+      asUser(grantedSub, { roles: [] });
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
+      const body = res.json() as BrowseResponse;
+      expect(body.canUpload).toBe(true); // the grant IS real for upload
+      expect(body.canManage).toBe(false); // but confers no sharing authority
+    });
+
+    it("is false anonymously", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "public" });
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`);
+      expect((res.json() as BrowseResponse).canManage).toBe(false);
+    });
+
+    it("is false AT THE ROOT even for a files:write holder (D-126: no single collection there to share)", async () => {
+      asUser("user:a", { roles: ["files:write"] });
+      const res = await get("/api/browse?scope=mine", "t");
+      expect((res.json() as BrowseResponse).canManage).toBe(false);
     });
   });
 });

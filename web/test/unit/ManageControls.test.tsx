@@ -29,6 +29,9 @@ function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
     uploaderName: null,
     uploaderAvatarUrl: null,
     isOwner: true,
+    canManage: true,
+    canDelete: true,
+    ancestors: [],
     ...overrides,
   };
 }
