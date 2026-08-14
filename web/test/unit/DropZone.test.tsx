@@ -154,6 +154,32 @@ describe("DropZone", () => {
     expect(container.querySelector('input[type="file"]')).toBeNull();
   });
 
+  // E7-QA1 live-testing round 2 (F9/D-196 regression): a can_upload-only grantee (an invite claimant or a
+  // direct ACL grant, NO files:write role - exactly D-182's intended shape) reached a collection page's
+  // compact upload box, which server-side (controllers/browse.ts's `canUpload`) correctly decided they may
+  // upload here - that is the ENTIRE point of FileBrowser only ever mounting `<DropZone compact
+  // fixedCollectionId>` when `data.canUpload` is true (G2/Wave C4, D-116's "server decides" rule). But this
+  // component's OWN internal `can(user, "files:write")` gate above never learned about compact mode and
+  // fired anyway, hiding the real drop zone behind "No upload access" for every can_upload-only grantee -
+  // exactly what Hannah hit live with a freshly claimed invite. The root-mounted case just above this test
+  // is DELIBERATELY unchanged: D-126/A2.2 still require files:write at the pseudo-root (no ACL row can live
+  // there), so only `compact` may skip the role check.
+  it("a compact mount still renders the drop zone for a can_upload-only grantee with no files:write role (F9/D-196)", () => {
+    installMockMosni({ sub: "user:grantee", roles: [] });
+
+    act(() => {
+      root.render(
+        <>
+          <DropZone compact fixedCollectionId="c1" />
+          <UploadStack />
+        </>,
+      );
+    });
+
+    expect(container.textContent).not.toContain("No upload access");
+    expect(container.querySelector('input[type="file"]')).not.toBeNull();
+  });
+
   it("renders the drop zone when signed in with files:write, and calls startBatch with source picker (F1)", async () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 

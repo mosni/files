@@ -53,6 +53,16 @@ async function flush() {
   });
 }
 
+// F4/F13: <mosni-switch> is an inert, unregistered custom element in jsdom - it never builds its own
+// internal checkbox, so there is nothing to `.click()`. This reproduces exactly the contract
+// lib/switchChange.ts's useSwitchChange hook relies on (see its own header comment): flip the host's OWN
+// `checked` attribute, then dispatch a plain, bubbling `change` - the same order a real mosni-switch
+// leaves things in by the time its bubble phase reaches an ancestor listener.
+function toggleMosniSwitch(el: Element): void {
+  el.toggleAttribute("checked", !el.hasAttribute("checked"));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
 describe("ShareDialog (E7/D-185)", () => {
   beforeEach(() => {
     container = document.createElement("div");
@@ -197,6 +207,38 @@ describe("ShareDialog (E7/D-185)", () => {
     expect(container.textContent).not.toContain("Bob");
   });
 
+  // E7-QA1 live-testing round 2: a claimed invite's grant carries no `name` (auth's directory excludes
+  // link-bound subs, buildShareState's own B3 comment) - `grant.name ?? grant.sub` used to fall straight
+  // through to the raw `link:<uuid>` sub, a long opaque id Hannah watched break this dialog's layout.
+  it("a link-bound grant with no name shows a generic label, never the raw link:<id> sub", async () => {
+    fetchShareStateMock.mockImplementation(async () =>
+      jsonResponse({
+        ...SHAREABLE_STATE,
+        grants: [{ sub: "link:9f86d081-884c-4d1c-9be0-11223344556677", name: null, picture: null, canUpload: false }],
+      }),
+    );
+    act(() => {
+      root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
+    });
+    await flush();
+
+    expect(container.textContent).toContain("Invite link recipient");
+    expect(container.textContent).not.toContain("9f86d081");
+  });
+
+  // F5: mosni-chrome's `.field` class only supplies the label-to-input gap when the label itself carries
+  // `.field-label` (confirmed by reading the served mosnicat.js CSS directly) - ProtectionControl.tsx
+  // already gets this right, this label was just missing the class, and Hannah saw the two sit flush.
+  it("the 'Add people' label carries mosni-chrome's field-label class for its own spacing", async () => {
+    act(() => {
+      root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
+    });
+    await flush();
+
+    const label = Array.from(container.querySelectorAll("label")).find((l) => l.textContent === "Add people");
+    expect(label?.className).toBe("field-label");
+  });
+
   it("grant/remove round trip against the stubbed API", async () => {
     grantShareMock.mockImplementation(async () =>
       jsonResponse({ ...SHAREABLE_STATE, grants: [{ sub: "google:alice", name: "Alice", picture: null, canUpload: false }] }),
@@ -223,7 +265,7 @@ describe("ShareDialog (E7/D-185)", () => {
     expect(revokeShareMock).toHaveBeenCalledWith("file", "f1", "google:alice");
   });
 
-  it("collection grants pass the canUpload checkbox state", async () => {
+  it("collection grants pass the canUpload switch state", async () => {
     fetchShareStateMock.mockImplementation(async () => jsonResponse({ ...SHAREABLE_STATE, type: "collection", id: "c1" }));
     grantShareMock.mockImplementation(async () => jsonResponse({ ...SHAREABLE_STATE, type: "collection", id: "c1" }));
     act(() => {
@@ -231,9 +273,9 @@ describe("ShareDialog (E7/D-185)", () => {
     });
     await flush();
 
-    const checkbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    const canUploadSwitch = container.querySelector("mosni-switch")!;
     await act(async () => {
-      checkbox.click();
+      toggleMosniSwitch(canUploadSwitch);
       await flush();
     });
 
@@ -265,10 +307,8 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
     });
     await flush();
-    const switchInput = Array.from(container.querySelectorAll('input[type="checkbox"]')).find((el) =>
-      el.parentElement?.textContent?.includes("turn this into their own account"),
-    ) as HTMLInputElement;
-    expect(switchInput.checked).toBe(true);
+    const allowRegisterSwitch = container.querySelector("mosni-switch")!;
+    expect(allowRegisterSwitch.hasAttribute("checked")).toBe(true);
     expect(container.textContent).not.toContain("Everyone who opens this link shares one identity");
 
     const inviteButton = Array.from(container.querySelectorAll("button")).find((b) =>
@@ -286,11 +326,9 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
     });
     await flush();
-    const switchInput = Array.from(container.querySelectorAll('input[type="checkbox"]')).find((el) =>
-      el.parentElement?.textContent?.includes("turn this into their own account"),
-    ) as HTMLInputElement;
+    const allowRegisterSwitch = container.querySelector("mosni-switch")!;
     await act(async () => {
-      switchInput.click();
+      toggleMosniSwitch(allowRegisterSwitch);
       await flush();
     });
     expect(container.textContent).toContain("Everyone who opens this link shares one identity");

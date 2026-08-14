@@ -13,6 +13,7 @@ import type { DirectoryAccount, InviteMinted, ShareObjectType, ShareState } from
 import { toastMutationFailure } from "../lib/mutationError.ts";
 import { createInvite, fetchAccounts, fetchShareState, grantShare, revokeShare } from "../lib/share.ts";
 import { useModalClose } from "../lib/modalClose.ts";
+import { useSwitchChange } from "../lib/switchChange.ts";
 import { CopyLink } from "./CopyLink.tsx";
 
 declare module "react" {
@@ -24,6 +25,18 @@ declare module "react" {
       >;
       "mosni-icon": React.DetailedHTMLProps<
         React.HTMLAttributes<HTMLElement> & { name?: string; size?: string | number },
+        HTMLElement
+      >;
+      // E7-QA1 live-testing round 2 (F4/F13): confirmed real and registered by fetching and reading the
+      // ACTUAL built https://ui.mosni.dev/mosnicat-core.js directly (the source repo stays out of this
+      // session's scope, but the served bundle is a public URL) - `observedAttributes: ["checked",
+      // "disabled"]`, plus a `label` attribute it renders itself. `checked`/`disabled` are boolean
+      // ATTRIBUTES here, same as `mosni-modal`'s `open` above (React serializes a boolean prop on an
+      // unrecognized custom element as the attribute's bare presence/absence, never a stringified
+      // "true"/"false" - confirmed empirically this session). lib/switchChange.ts's useSwitchChange is the
+      // paired hook for reading the user's actual toggle back out.
+      "mosni-switch": React.DetailedHTMLProps<
+        React.HTMLAttributes<HTMLElement> & { checked?: boolean; disabled?: boolean; label?: string },
         HTMLElement
       >;
     }
@@ -61,6 +74,18 @@ function useCurrentUserSub(): string | null {
 // not allow at all.
 function avatarUrlFor(sub: string): string {
   return `https://auth.mosni.dev/avatar/${encodeURIComponent(sub)}`;
+}
+
+// E7-QA1 live-testing round 2: a claimed invite's grant has no name - buildShareState's own comment (B3)
+// says so directly: "the same shape an invited/link-bound sub always renders as, since auth's directory
+// excludes those too". Before this, `grant.name ?? grant.sub` fell straight through to the raw sub -
+// controllers/share.ts's createInviteHandler always constructs it as `link:${minted.value.id}`, a long
+// opaque id with no human meaning, and Hannah watched it break this dialog's layout in several places. A
+// generic, short, recognizably-not-a-person label reads better here than a truncated id fragment would -
+// nobody needs the id itself to understand "this row is the invite link, not a named account".
+function displayNameFor(sub: string, name: string | null): string {
+  if (name !== null) return name;
+  return sub.startsWith("link:") ? "Invite link recipient" : sub;
 }
 
 // F3: a broken-image robustness wrapper, same pattern PreviewCard.tsx's own uploader avatar already uses -
@@ -124,6 +149,8 @@ export function ShareDialog({
   const [inviting, setInviting] = useState(false);
   const [busy, setBusy] = useState(false);
   const modalRef = useModalClose(onClose);
+  const canUploadSwitchRef = useSwitchChange(setCanUpload);
+  const allowRegisterSwitchRef = useSwitchChange(setAllowRegister);
 
   // Reset to a fresh load every time the dialog is opened - the dialog is never re-fetchable stale state
   // across separate opens (matches the invite URL's own "gone once closed" rule below).
@@ -263,7 +290,12 @@ export function ShareDialog({
               {state.grants.map((grant) => (
                 <li key={grant.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
                   <GrantAvatar sub={grant.sub} />
-                  <span style={{ flex: 1, minWidth: 0 }}>{grant.name ?? grant.sub}</span>
+                  <span
+                    style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                    title={grant.name ?? grant.sub}
+                  >
+                    {displayNameFor(grant.sub, grant.name)}
+                  </span>
                   {grant.canUpload && <span className="badge">Upload</span>}
                   <button
                     type="button"
@@ -279,9 +311,14 @@ export function ShareDialog({
           )}
 
           {/* F5: normal .field spacing - the outer grid's own gap separates this from its neighbours,
-              so the inner marginBottom:0 override that collapsed it is removed. */}
+              so the inner marginBottom:0 override that collapsed it is removed. E7-QA1 live-testing round
+              2: the label-to-input gap itself lives in mosni-chrome's `.field-label` class (margin-bottom,
+              confirmed by reading the served mosnicat.js CSS directly), never on a bare `.field > label` -
+              ProtectionControl.tsx already gets this right; this label was just missing the class. */}
           <div className="field">
-            <label htmlFor={`share-picker-filter-${id}`}>Add people</label>
+            <label htmlFor={`share-picker-filter-${id}`} className="field-label">
+              Add people
+            </label>
             <input
               id={`share-picker-filter-${id}`}
               type="text"
@@ -292,14 +329,9 @@ export function ShareDialog({
           </div>
 
           {type === "collection" && (
-            // F4: mosni-switch could not be confirmed to exist upstream (mosni-chrome is not in this
-            // session's repository scope - see the hand-off's §B1.4 and open question 1). Per the
-            // escalation rule this stays a plain checkbox, reported blocked rather than styled to look
-            // like a switch.
-            <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", minWidth: 0 }}>
-              <input type="checkbox" checked={canUpload} onChange={(e) => setCanUpload(e.target.checked)} />
-              Can upload into this collection
-            </label>
+            // F4: a real <mosni-switch> (confirmed registered - see the JSX.IntrinsicElements comment
+            // above), not a plain checkbox styled to look like one.
+            <mosni-switch ref={canUploadSwitchRef} checked={canUpload} label="Can upload into this collection" />
           )}
 
           {accounts !== null && (
@@ -320,7 +352,12 @@ export function ShareDialog({
                 candidates.map((account) => (
                   <li key={account.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
                     <GrantAvatar sub={account.sub} />
-                    <span style={{ flex: 1, minWidth: 0 }}>{account.name ?? account.sub}</span>
+                    <span
+                      style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      title={account.name ?? account.sub}
+                    >
+                      {displayNameFor(account.sub, account.name)}
+                    </span>
                     <button
                       type="button"
                       className="btn-ghost btn-sm"
@@ -339,16 +376,12 @@ export function ShareDialog({
 
           {invite === null ? (
             <div style={{ display: "grid", gap: "0.5rem" }}>
-              {/* F13/D-198: the upgradeable switch, pulled forward from E8 - same "F4 is upstream, this
-                  isn't" reasoning: a plain checkbox, not a raw <input> styled as a toggle. */}
-              <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", minWidth: 0 }}>
-                <input
-                  type="checkbox"
-                  checked={allowRegister}
-                  onChange={(e) => setAllowRegister(e.target.checked)}
-                />
-                Let the recipient turn this into their own account
-              </label>
+              {/* F13/D-198: the upgradeable switch, pulled forward from E8 - a real <mosni-switch>. */}
+              <mosni-switch
+                ref={allowRegisterSwitchRef}
+                checked={allowRegister}
+                label="Let the recipient turn this into their own account"
+              />
               {/* D-23's requirement, sharpened by D-196: a non-upgradeable link carrying upload rights is
                   a shared WRITE identity, not just a shared read. Shown plainly at the point of choice -
                   not a tooltip, not behind a disclosure - whenever the switch is off. */}

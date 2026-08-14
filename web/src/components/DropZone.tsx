@@ -385,7 +385,15 @@ export function DropZone({
     );
   }
 
-  if (!can(user, "files:write")) {
+  // E7-QA1 (F9/D-196): a compact mount is ONLY ever rendered by a caller that already asked the SERVER
+  // whether this viewer may upload here (FileBrowser.tsx's `isCollectionRoute && data.canUpload`, D-116's
+  // "server decides" rule) - can_upload-only grantees have no files:write role by design since D-182 (the
+  // ACL row IS the grant, no role is added). Re-checking a role this component was never told to require
+  // here undid F9's entire point: a fresh invite claimant with a can_upload grant and no role hit this exact
+  // gate and got turned away. The root-mounted case (no fixedCollectionId) keeps the role requirement -
+  // D-126/A2.2: the pseudo-root holds no ACL rows at all, so files:write is the only right that can exist
+  // there.
+  if (!compact && !can(user, "files:write")) {
     return (
       <div className="panel">
         <h1 style={{ marginTop: 0 }}>No upload access</h1>

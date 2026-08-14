@@ -141,6 +141,85 @@ test("a grantee cannot grant, revoke or invite on the object shared with them (D
   expect(granteeTriesToInvite.status()).toBe(404);
 });
 
+// E7-QA1 live-testing round 2: Hannah minted an invite with upload allowed, claimed it in a fresh session,
+// and got "Your account does not have permission to upload files." The server-side grant was correct
+// (app/test/integration/upload.test.ts's own D-196 block already proves a can_upload-only tus request
+// succeeds) - the break was client-side only, and invisible to every tier before this one: FileBrowser.tsx
+// correctly asks the SERVER whether this viewer may upload (`data.canUpload`, D-116) before mounting a
+// compact DropZone, but DropZone.tsx's OWN internal gate re-checked the files:write ROLE regardless, which
+// a can_upload-only grantee (an invite claimant, or any direct ACL grant - D-182 stopped adding a role for
+// either) never has by design. web/test/unit/landingPageJobs.test.tsx's own compact-mount test used
+// `roles: ["files:write"]` in its mock, which made that exact role check pass by coincidence and hid the
+// bug from every tier below this one - real proof needs a real browser rendering the real DropZone with NO
+// files:write role, driving an actual tus upload through the real production image.
+test("a can_upload-only grantee (no files:write role) can upload into a shared collection via a real browser drop (F9/D-196)", async ({
+  page,
+  request,
+}) => {
+  const run = randomUUID().slice(0, 8);
+  const ownerSub = `user:e2e-upload-owner-${run}`;
+  const granteeSub = `user:e2e-upload-grantee-${run}`;
+  const collectionName = `grant-upload-${run}`;
+  const filename = `grantee-drop-${randomUUID().slice(0, 8)}.txt`;
+  const body = `uploaded by a can_upload-only grantee ${randomUUID()}`;
+
+  const collectionId = await withDb(async (conn) => {
+    const id = newId();
+    const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
+    await conn.execute(
+      `INSERT INTO collections (id, parent_id, name, owner_sub, protection, default_protection, link_token)
+       VALUES (?, '', ?, ?, 'public', 'public', ?)`,
+      [id, collectionName, ownerSub, linkToken],
+    );
+    // The ACL row IS the grant (D-182) - no role is ever added for it, which is the exact shape a claimed
+    // invite produces (controllers/share.ts's createInviteHandler grants the SAME way).
+    await conn.execute("INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, 1)", [
+      id,
+      granteeSub,
+    ]);
+    return id;
+  });
+
+  // `""` roles - deliberately no files:write, matching a fresh invite claimant/grantee exactly.
+  const granteeToken = await mintToken(request, granteeSub, "");
+
+  await page.route("**/sdk.js", (route) => route.abort());
+  await page.addInitScript(`
+    window.mosni = Object.assign(window.mosni ?? {}, {
+      user: () => ({ sub: ${JSON.stringify(granteeSub)}, roles: [] }),
+      token: () => ${JSON.stringify(granteeToken)},
+      onChange: (cb) => cb({ sub: ${JSON.stringify(granteeSub)}, roles: [] }),
+      login: () => {}, logout: () => {},
+      toast: (m) => { window.__toast = m; },
+    });
+  `);
+
+  await page.goto(`${FILES_ORIGIN}/f/${collectionName}`);
+
+  // The exact regression: this used to render "No upload access" here despite the server-side grant.
+  await expect(page.getByText("No upload access")).toHaveCount(0);
+  const picker = page.locator('[role="button"] input[type="file"]');
+  await expect(picker).toBeAttached({ timeout: 20_000 });
+
+  await picker.setInputFiles({ name: filename, mimeType: "text/plain", buffer: Buffer.from(body) });
+
+  const stackItem = page.locator(".panel", { hasText: filename });
+  const viewLink = stackItem.locator("a", { hasText: "view" });
+  await expect(viewLink).toBeVisible({ timeout: 30_000 });
+
+  // Landed in the collection the grant was scoped to, not somewhere else.
+  const shareUrl = await viewLink.getAttribute("href");
+  expect(shareUrl).toContain(`/${collectionName}/`);
+  const preview = await request.get(`${FILES_ORIGIN}${new URL(shareUrl!).pathname}`, { headers: { host: FILES_HOST } });
+  expect(preview.status()).toBe(200);
+  expect(await preview.text()).toContain(filename);
+
+  await withDb(async (conn) => {
+    const [rows] = await conn.execute("SELECT collection_id FROM files WHERE name = ?", [filename]);
+    expect((rows as { collection_id: string }[])[0]?.collection_id).toBe(collectionId);
+  });
+});
+
 // Review session 045. Hannah hit a full React crash - white screen - opening the share dialog on the box,
 // and nothing in any tier caught it. This block is the reason why, and the fix.
 //
