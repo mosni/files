@@ -65,6 +65,50 @@ describe("useSliderChange", () => {
     el.remove();
   });
 
+  // Review session 052. `useSwitchChange`, the hook this was copied from, is safe by CONSTRUCTION: it
+  // reads `hasAttribute`, which is a boolean for every possible DOM state. `useSliderChange` reads a
+  // string and coerces it, so it inherits a trust boundary the switch never had - and `Number()` turns
+  // three ordinary "the element did something we did not predict" states into three different wrong
+  // answers. Measured: `Number(null)` and `Number("")` are **0**, a perfectly valid stop index, so a
+  // missing attribute silently selects 30 minutes - the shortest possible link - without the user
+  // choosing it. `Number("abc")` is NaN and `"99"`/`"-1"` are out of range, and `INVITE_DURATION_STOPS[i]`
+  // is then `undefined`, so ShareDialog's `.label` read throws a TypeError **in React's render phase**,
+  // which unmounts the whole root: the white-screen class this codebase has now been bitten by three
+  // times (D-8, session 021's mosni-tab, session 045's F0).
+  //
+  // This is not a hypothetical about a badly-behaved element. `<mosni-slider>` is GENERIC - it is handed
+  // a pipe-delimited `stops` string and reflects an index it computed against that string. The app's array
+  // and the element's stop count are two separate things that must agree forever, and nothing enforces it.
+  // A garbage or out-of-range value is not a user selection, so the hook must not report one.
+  it("ignores a change whose value attribute is missing entirely, rather than reporting index 0", () => {
+    const onChange = vi.fn();
+    const attach = mount(onChange);
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    act(() => attach(el));
+
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(onChange).not.toHaveBeenCalled();
+    el.remove();
+  });
+
+  it("ignores a change whose value attribute is not a number, rather than reporting NaN", () => {
+    const onChange = vi.fn();
+    const attach = mount(onChange);
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    act(() => attach(el));
+
+    for (const garbage of ["", "abc", "1.5", "Infinity"]) {
+      el.setAttribute("value", garbage);
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    expect(onChange).not.toHaveBeenCalled();
+    el.remove();
+  });
+
   it("reads a value of 0 correctly, not as falsy/missing", () => {
     const onChange = vi.fn();
     const attach = mount(onChange);

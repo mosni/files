@@ -11,7 +11,33 @@ export const CSP_DIRECTIVES = {
   frameAncestors: ["'self'", "https://files.mosni.dev"],
   // D-169: the avatar <img> links straight to auth.mosni.dev/avatar/<sub> (no more files.-side proxy) -
   // without this origin here, every avatar image is silently blocked by this exact policy.
-  imgSrc: ["'self'", "https://mosni.dev", "https://ui.mosni.dev", "https://auth.mosni.dev", "https://dl.mosni.dev", "data:", "blob:"],
+  // Review session 052 - F3's ACTUAL root cause, still live after two rounds that thought they had fixed
+  // it. `auth.mosni.dev` being allow-listed is NOT enough, because `GET auth.mosni.dev/avatar/<sub>` is a
+  // **302 redirect**, and CSP img-src is enforced against the FINAL url after redirects, not the one the
+  // page asked for. Read out of `mosni/auth/app/src/routes/avatar.ts`: a Google account redirects to its
+  // stored `picture` (Google's CDN), an EVE account to `images.evetech.net`, the owner to
+  // `mosni.dev/portraits/...` (already allowed, which is why the owner's avatar always worked), and
+  // everything else gets an inline SVG served by auth itself (also fine). So exactly the two IdP-backed
+  // cases were blocked - the ones with a real photo.
+  //
+  // F3 was originally diagnosed correctly ("img-src allows auth.mosni.dev but not an IdP CDN") and then
+  // fixed by pointing at `auth.mosni.dev/avatar/<sub>` instead, which just moves the same CDN one hop
+  // away. Session 048 then "disproved" the whole premise by curling the route for INVENTED subs - which
+  // have no account row, so they can only ever return the default SVG. curl enforces no CSP either.
+  //
+  // Named origins only, never a wildcard - the same posture frameSrc keeps below. A files.mosni.dev
+  // proxy is not the alternative: D-169 deliberately removed one.
+  imgSrc: [
+    "'self'",
+    "https://mosni.dev",
+    "https://ui.mosni.dev",
+    "https://auth.mosni.dev",
+    "https://dl.mosni.dev",
+    "https://lh3.googleusercontent.com",
+    "https://images.evetech.net",
+    "data:",
+    "blob:",
+  ],
   mediaSrc: ["'self'", "https://dl.mosni.dev"],
   connectSrc: ["'self'", "https://auth.mosni.dev", "https://dl.mosni.dev"],
 } as const;

@@ -20,7 +20,23 @@ export function useSliderChange(onChange: (index: number) => void): React.RefCal
       cleanupRef.current = null;
       if (element === null) return;
 
-      const handleChange = () => onChange(Number(element.getAttribute("value")));
+      // Review session 052: `useSwitchChange` reads `hasAttribute`, which is a well-defined boolean for
+      // EVERY possible DOM state, so it has no failure mode here. This hook reads a string, and `Number()`
+      // silently turns "the element did something we did not predict" into a wrong answer three different
+      // ways - `Number(null)` and `Number("")` are **0**, a valid stop index, so a missing attribute would
+      // select the FIRST stop (the shortest link) as though the user had chosen it; `Number("abc")` is NaN
+      // and an out-of-range index is `undefined` at the consumer, whose `.label` read then throws in
+      // React's render phase and unmounts the whole root. A garbage value is not a user selection, so it
+      // is not reported at all: the consumer keeps whatever it last had.
+      const handleChange = () => {
+        const raw = element.getAttribute("value");
+        // `""` is checked separately from `null` on purpose: `Number("")` is **0**, not NaN, so an
+        // empty attribute would otherwise pass every check below and report the first stop.
+        if (raw === null || raw.trim() === "") return;
+        const index = Number(raw);
+        if (!Number.isInteger(index) || index < 0) return;
+        onChange(index);
+      };
       element.addEventListener("change", handleChange);
       cleanupRef.current = () => element.removeEventListener("change", handleChange);
     },

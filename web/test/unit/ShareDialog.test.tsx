@@ -406,6 +406,32 @@ describe("ShareDialog (E7/D-185)", () => {
       expect(createInviteMock).toHaveBeenCalledWith("file", "f1", undefined, true, 7776000);
     });
 
+    // Review session 052, defence in depth for the same trust boundary sliderChange.test.tsx guards. The
+    // hook now refuses to report a garbage index, so this should be unreachable through the hook - but the
+    // consequence of being wrong is a TypeError in React's RENDER phase, which unmounts the entire root
+    // (the white-screen class, three times over: D-8, session 021's mosni-tab, session 045's F0). A
+    // component whose failure mode is "the whole app disappears" does not get to rely on one caller
+    // upstream being careful, especially when `<mosni-slider>` is generic and its stop count and this
+    // app's array are two separate things that must agree forever.
+    it("an out-of-range duration index does not tear down the React root", async () => {
+      act(() => {
+        root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
+      });
+      await flush();
+
+      const slider = container.querySelector("mosni-slider")!;
+      await act(async () => {
+        // Past the end of the stop list - what a drifted `stops` string would produce.
+        setMosniSlider(slider, INVITE_DURATION_STOPS.length + 5);
+        await flush();
+      });
+
+      // The root survived and the dialog is still usable: the modal is still mounted and the picker is
+      // still there. A thrown render would have left `container` empty.
+      expect(container.querySelector("mosni-modal")).not.toBeNull();
+      expect(container.textContent).toContain("Add people");
+    });
+
     it("the duration sentence renders with the switch ON - the case that said nothing today", async () => {
       act(() => {
         root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);

@@ -122,6 +122,25 @@ function GrantAvatar({ sub }: { sub: string }) {
   );
 }
 
+// Review session 052 (Hannah, live: "the link usernames remain untruncated everywhere they are
+// displayed"). A displayed identity is `name ?? sub`, and when the directory has no name the fallback is
+// a raw sub - for an invite that is `link:<uuid>`, ~40 opaque characters. Session 048 added ellipsis
+// truncation here and commit `b5ba853` reverted it along with the label substitution it was bundled
+// with; only the LABEL half was ever the problem (it parsed the sub, violating invariant 6). Truncation
+// parses nothing, so it comes back on its own.
+//
+// Why the dialog's `overflowWrap: anywhere` is not enough: it makes the sub WRAP rather than overflow, so
+// nothing is clipped and review 049's overflow check stayed clean - but a 40-character id wrapped over
+// three lines still shoves the Upload badge and the Remove button around and reads as broken. One line
+// with an ellipsis, and the full value in `title` so it is still recoverable on hover.
+const IDENTITY_TEXT: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
 export function ShareDialog({
   type,
   id,
@@ -146,6 +165,15 @@ export function ShareDialog({
   // E7-QA2 D-205: the default is 1h (index into INVITE_DURATION_STOPS), not a config-driven constant -
   // INVITE_TTL_SECONDS is retired.
   const [durationIndex, setDurationIndex] = useState(DEFAULT_INVITE_DURATION_INDEX);
+  // Review session 052 - defence in depth, not paranoia. `<mosni-slider>` is GENERIC: it is handed a
+  // pipe-delimited `stops` string and reflects an index it computed against that string, so the element's
+  // stop count and this array are two separate things that must agree forever, and nothing enforces it.
+  // A bare `INVITE_DURATION_STOPS[durationIndex]` is `undefined` for any out-of-range index, and the
+  // `.label`/`.seconds` read below would then throw in React's RENDER phase - which unmounts the entire
+  // root, not just this dialog (D-8, session 021's mosni-tab, session 045's F0: three times already).
+  // lib/sliderChange.ts refuses to report a garbage index in the first place; this is the second lock,
+  // because the cost of being wrong here is the whole app disappearing.
+  const durationStop = INVITE_DURATION_STOPS[durationIndex] ?? INVITE_DURATION_STOPS[DEFAULT_INVITE_DURATION_INDEX];
   const [invite, setInvite] = useState<InviteMinted | null>(null);
   const [inviting, setInviting] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -229,7 +257,7 @@ export function ShareDialog({
         id,
         type === "collection" ? canUpload : undefined,
         allowRegister,
-        INVITE_DURATION_STOPS[durationIndex].seconds,
+        durationStop.seconds,
       );
       if (!res.ok) {
         await toastMutationFailure(res);
@@ -311,7 +339,7 @@ export function ShareDialog({
               {state.grants.map((grant) => (
                 <li key={grant.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
                   <GrantAvatar sub={grant.sub} />
-                  <span style={{ flex: 1, minWidth: 0 }}>{grant.name ?? grant.sub}</span>
+                  <span style={IDENTITY_TEXT} title={grant.name ?? grant.sub}>{grant.name ?? grant.sub}</span>
                   {grant.canUpload && <span className="badge">Upload</span>}
                   <button
                     type="button"
@@ -368,7 +396,7 @@ export function ShareDialog({
                 candidates.map((account) => (
                   <li key={account.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
                     <GrantAvatar sub={account.sub} />
-                    <span style={{ flex: 1, minWidth: 0 }}>{account.name ?? account.sub}</span>
+                    <span style={IDENTITY_TEXT} title={account.name ?? account.sub}>{account.name ?? account.sub}</span>
                     <button
                       type="button"
                       className="btn-ghost btn-sm"
@@ -409,7 +437,7 @@ export function ShareDialog({
               {/* D-208: this sentence renders in BOTH switch positions - today's default path said nothing
                   about expiry at all. No hardcoded "24 hours": it names the SELECTED stop. */}
               <p className="little-link" style={{ minWidth: 0 }}>
-                This link expires after {INVITE_DURATION_STOPS[durationIndex].label}.
+                This link expires after {durationStop.label}.
               </p>
               {/* D-23's requirement, sharpened by D-196: a non-upgradeable link carrying upload rights is
                   a shared WRITE identity, not just a shared read. Shown plainly at the point of choice -

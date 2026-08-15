@@ -70,9 +70,6 @@ const createInviteSchema = {
       // E7-QA2 §A2: optional - absent means the controller's default (1h, D-205). Fastify's AJV runs with
       // removeAdditional: true, so without this line the field is silently STRIPPED, not rejected, and
       // the whole round appears to no-op.
-      // E7-QA2 §A2: optional - absent means the controller's default (1h, D-205). Fastify's AJV runs with
-      // removeAdditional: true, so without this line the field is silently STRIPPED, not rejected, and
-      // the whole round appears to no-op.
       ttl_seconds: { type: "integer" },
     },
     additionalProperties: false,

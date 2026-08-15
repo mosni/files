@@ -317,6 +317,20 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
       );
     });
 
+    // Review session 052: THIS LINE WAS MISSING, and its absence is why this test has been red since it
+    // was written. Every sibling test in this block aborts sdk.js; this one did not, so the genuine
+    // `auth.mosni.dev/sdk.js` loaded and OVERWROTE the injected `window.mosni` stub with the real SDK -
+    // which is unauthenticated in this sandbox, so the SPA's /api/browse call went out with no bearer,
+    // and a private collection with no bearer is exactly the case D-197 correctly answers with nothing to
+    // list. The breadcrumb then never renders and the assertion below times out at 20s.
+    //
+    // Session 047 diagnosed this EXACT mechanism while debugging its own ad-hoc repro script, fixed the
+    // script, wrote "(the real test does)" about blocking sdk.js - and the real test did not. It then
+    // recorded the remaining failure as sandbox rate-limit flakiness, which is what every session since
+    // has inherited. Measured this session: it fails 3/3 alone on a freshly flushed limiter, and fails
+    // identically against a pre-E7-QA2 build, so it was never contention and never a QA2 regression.
+    // **The F8 fix itself is fine** - only its guard was broken.
+    await page.route("**/sdk.js", (route) => route.abort());
     await page.addInitScript(`
       window.mosni = Object.assign(window.mosni ?? {}, {
         user: () => ({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),

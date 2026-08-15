@@ -433,7 +433,25 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
                   onError={() => setAvatarFailedUrl(ctx.uploaderAvatarUrl)}
                 />
               )}
-              {ctx.uploaderName !== null && <span>{ctx.uploaderName}</span>}
+              {/* Review session 052: `uploaderName` is `record.uploaderName ?? record.uploaderSub` (D-168),
+                  so with no captured name this renders a RAW SUB - and since D-196 let link accounts
+                  upload, that sub can now be a ~40-character `link:<uuid>`. Truncate rather than let it
+                  run through the byline; the full value stays available in `title`. No sub is parsed
+                  (invariant 6) - this is presentation only. */}
+              {ctx.uploaderName !== null && (
+                <span
+                  title={ctx.uploaderName}
+                  style={{
+                    minWidth: 0,
+                    maxWidth: "18rem",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {ctx.uploaderName}
+                </span>
+              )}
             </>
           )}
         </p>

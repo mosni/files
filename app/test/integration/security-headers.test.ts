@@ -107,6 +107,26 @@ describe("security headers", () => {
     expect(imgSrc).toContain("blob:");
   });
 
+  // Review session 052, F3's real root cause. Allow-listing `auth.mosni.dev` looks like it covers the
+  // avatar, and does not: `GET auth.mosni.dev/avatar/<sub>` is a **302**, and img-src is enforced against
+  // the FINAL url. A Google account lands on Google's CDN and an EVE one on images.evetech.net, so both
+  // were blocked while the owner (redirected to mosni.dev, already allowed) and every account with no
+  // stored picture (an inline SVG from auth itself) worked - which is exactly why this survived two
+  // rounds of "the avatars still don't load". Deleting either origin re-breaks real photos in the share
+  // dialog's picker and the preview byline.
+  it("CSP allows the IdP CDNs auth's /avatar/<sub> REDIRECTS to, not just auth's own origin", async () => {
+    const res = await app.inject({ method: "GET", url: "/health" });
+    const csp = res.headers["content-security-policy"] as string;
+    const imgSrc = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("img-src"));
+
+    expect(imgSrc).toBeDefined();
+    expect(imgSrc).toContain("https://auth.mosni.dev");
+    expect(imgSrc).toContain("https://lh3.googleusercontent.com");
+    expect(imgSrc).toContain("https://images.evetech.net");
+    // Named origins only - a wildcard here would let any redirect target through.
+    expect(imgSrc).not.toContain("*");
+  });
+
   // Regression guard: <mosni-logo> inside <mosni-header> loads mosni.svg from the design system's own
   // origin, so omitting it here makes the site logo a broken image on every page (found by D-79's
   // visual check, after session 009 mistook the console warning for unrelated noise).
