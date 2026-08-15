@@ -55,7 +55,24 @@ function renderIdentity(target: HTMLElement, user: VerifiedClaims | null): void 
   avatar.addEventListener("error", () => avatar.remove(), { once: true });
   target.append(avatar);
 
-  target.append(displayNameFor(user));
+  // Review session 052: an ELEMENT, not a bare text node, so the identity can be truncated. D-168's
+  // fallback renders the raw `sub` whenever no name was captured, and since D-196 that sub can be a
+  // ~40-character `link:<uuid>` for a claimed invite - which ran straight across the top bar, on every
+  // page, in the one identity display the user cannot navigate away from. `display: inline-block` and a
+  // `max-width` are both load-bearing: `text-overflow` does nothing on an inline box with no width
+  // constraint. `title` keeps the full value recoverable. Nothing here parses the sub (invariant 6) -
+  // this is presentation only, and the sibling fix in ShareDialog/PreviewCard uses the same treatment.
+  const name = document.createElement("span");
+  name.dataset.identityName = "";
+  name.textContent = displayNameFor(user);
+  name.title = displayNameFor(user);
+  name.style.display = "inline-block";
+  name.style.maxWidth = "14rem";
+  name.style.overflow = "hidden";
+  name.style.textOverflow = "ellipsis";
+  name.style.whiteSpace = "nowrap";
+  name.style.verticalAlign = "middle";
+  target.append(name);
 }
 
 /** Wires <mosni-header>'s right-side tagline slot to the signed-in identity. Never throws into main.tsx's

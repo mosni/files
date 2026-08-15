@@ -84,6 +84,33 @@ describe("initHeaderIdentity (live-testing addition, 2026-08-06)", () => {
     expect(target.textContent).toBe("Logged in as google:123");
   });
 
+  // Review session 052, round 2 (Hannah: "it is now truncated in the modal but not in the header"). The
+  // first pass fixed the two share-dialog lists and the preview byline and MISSED this one - the header
+  // appends the identity as a bare text node, so a claimed invite renders ~40 opaque characters
+  // (`link:<uuid>`) straight across the top bar, in the one place that is on EVERY page. Same treatment as
+  // the other three sites: one line, ellipsis, full value in `title`. No sub is parsed (invariant 6).
+  it("truncates a long identity rather than running it across the header", async () => {
+    const sdk = installSdk();
+    initHeaderIdentity();
+    await flush();
+
+    sdk.signIn({ sub: "link:9f86d081-884c-4d1c-9be0-11223344556677" });
+    await flush();
+
+    const target = document.querySelector(".little-link")!;
+    const nameEl = target.querySelector<HTMLElement>("[data-identity-name]");
+    expect(nameEl, "the identity must be an element that can be truncated, not a bare text node").not.toBeNull();
+    expect(nameEl!.textContent).toBe("link:9f86d081-884c-4d1c-9be0-11223344556677");
+    // The full value stays recoverable even though the rendering is clipped.
+    expect(nameEl!.getAttribute("title")).toBe("link:9f86d081-884c-4d1c-9be0-11223344556677");
+    expect(nameEl!.style.textOverflow).toBe("ellipsis");
+    expect(nameEl!.style.whiteSpace).toBe("nowrap");
+    expect(nameEl!.style.overflow).toBe("hidden");
+    // text-overflow does nothing on an inline box with no width constraint.
+    expect(nameEl!.style.display).toBe("inline-block");
+    expect(nameEl!.style.maxWidth).not.toBe("");
+  });
+
   it("clears back to empty on sign-out", async () => {
     const sdk = installSdk();
     initHeaderIdentity();
