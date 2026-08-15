@@ -76,18 +76,6 @@ function avatarUrlFor(sub: string): string {
   return `https://auth.mosni.dev/avatar/${encodeURIComponent(sub)}`;
 }
 
-// E7-QA1 live-testing round 2: a claimed invite's grant has no name - buildShareState's own comment (B3)
-// says so directly: "the same shape an invited/link-bound sub always renders as, since auth's directory
-// excludes those too". Before this, `grant.name ?? grant.sub` fell straight through to the raw sub -
-// controllers/share.ts's createInviteHandler always constructs it as `link:${minted.value.id}`, a long
-// opaque id with no human meaning, and Hannah watched it break this dialog's layout in several places. A
-// generic, short, recognizably-not-a-person label reads better here than a truncated id fragment would -
-// nobody needs the id itself to understand "this row is the invite link, not a named account".
-function displayNameFor(sub: string, name: string | null): string {
-  if (name !== null) return name;
-  return sub.startsWith("link:") ? "Invite link recipient" : sub;
-}
-
 // F3: a broken-image robustness wrapper, same pattern PreviewCard.tsx's own uploader avatar already uses -
 // on load failure, degrade to an initial/placeholder rather than the browser's broken-image icon.
 function GrantAvatar({ sub }: { sub: string }) {
@@ -290,12 +278,7 @@ export function ShareDialog({
               {state.grants.map((grant) => (
                 <li key={grant.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
                   <GrantAvatar sub={grant.sub} />
-                  <span
-                    style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                    title={grant.name ?? grant.sub}
-                  >
-                    {displayNameFor(grant.sub, grant.name)}
-                  </span>
+                  <span style={{ flex: 1, minWidth: 0 }}>{grant.name ?? grant.sub}</span>
                   {grant.canUpload && <span className="badge">Upload</span>}
                   <button
                     type="button"
@@ -352,12 +335,7 @@ export function ShareDialog({
                 candidates.map((account) => (
                   <li key={account.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
                     <GrantAvatar sub={account.sub} />
-                    <span
-                      style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                      title={account.name ?? account.sub}
-                    >
-                      {displayNameFor(account.sub, account.name)}
-                    </span>
+                    <span style={{ flex: 1, minWidth: 0 }}>{account.name ?? account.sub}</span>
                     <button
                       type="button"
                       className="btn-ghost btn-sm"

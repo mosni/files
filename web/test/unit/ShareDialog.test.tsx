@@ -207,25 +207,6 @@ describe("ShareDialog (E7/D-185)", () => {
     expect(container.textContent).not.toContain("Bob");
   });
 
-  // E7-QA1 live-testing round 2: a claimed invite's grant carries no `name` (auth's directory excludes
-  // link-bound subs, buildShareState's own B3 comment) - `grant.name ?? grant.sub` used to fall straight
-  // through to the raw `link:<uuid>` sub, a long opaque id Hannah watched break this dialog's layout.
-  it("a link-bound grant with no name shows a generic label, never the raw link:<id> sub", async () => {
-    fetchShareStateMock.mockImplementation(async () =>
-      jsonResponse({
-        ...SHAREABLE_STATE,
-        grants: [{ sub: "link:9f86d081-884c-4d1c-9be0-11223344556677", name: null, picture: null, canUpload: false }],
-      }),
-    );
-    act(() => {
-      root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
-    });
-    await flush();
-
-    expect(container.textContent).toContain("Invite link recipient");
-    expect(container.textContent).not.toContain("9f86d081");
-  });
-
   // F5: mosni-chrome's `.field` class only supplies the label-to-input gap when the label itself carries
   // `.field-label` (confirmed by reading the served mosnicat.js CSS directly) - ProtectionControl.tsx
   // already gets this right, this label was just missing the class, and Hannah saw the two sit flush.
