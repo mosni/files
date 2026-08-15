@@ -27,7 +27,12 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
 import { can, isFilesAdmin, isSuperuser, type Claims } from "../lib/roles.ts";
-import { buildCollectionPreviewUrl, buildFileUrls, buildThumbUrl } from "../lib/fileUrls.ts";
+import {
+  buildCollectionPreviewUrl,
+  buildFileUrls,
+  buildSignedDeliveryUrls,
+  buildThumbUrl,
+} from "../lib/fileUrls.ts";
 import { fileKindFor } from "../lib/fileKind.ts";
 import { isListedFor, mostRestrictive, type Protection, type VisibilityReason } from "../lib/protection.ts";
 import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../lib/browseContext.ts";
@@ -193,14 +198,37 @@ async function shapeFile(
     grants.linkAuthorizedOnly,
     grants.hostedInOwnCollection,
   );
-  const urls = buildFileUrls(config, effectiveProtection, [...pathSegments, record.name], record.linkToken);
-  const thumbUrl = buildThumbUrl(
-    config,
-    effectiveProtection,
-    [...pathSegments, record.name],
-    record.linkToken,
-    record.thumbName !== null,
-  );
+  // E7-QA1 round 3 (Hannah): "the thumbnail does not load for private files ... changing it to unlisted
+  // fixed it". A `private` file's path/token URLs resolve to routes that run authorizePrivate(), and
+  // dl.mosni.dev has no session to authorize with (D-33: no cookie on that origin, and neither an `<img>`
+  // nor the archive's cross-origin fetch() can carry a Bearer) - so both answered 401/403 and the row's
+  // thumbnail rendered as the browser's broken-image icon. The preview page already solved this with a
+  // D-84 signed URL; the listing simply never got one. Same pair, same helper, so they cannot drift.
+  //
+  // Safe to mint here: a `private` row only reaches this listing via listOwnedFilesIn, listVisibleFilesIn's
+  // identity branch, or the admin branch - a link-authorized listing excludes `private` outright (D-99) -
+  // so every viewer handed one of these is already authorized to read the bytes.
+  const signed =
+    effectiveProtection === "private"
+      ? buildSignedDeliveryUrls(config, record.id, record.thumbName !== null)
+      : null;
+  const urls =
+    signed !== null
+      ? {
+          ...buildFileUrls(config, effectiveProtection, [...pathSegments, record.name], record.linkToken),
+          directUrl: signed.directUrl,
+        }
+      : buildFileUrls(config, effectiveProtection, [...pathSegments, record.name], record.linkToken);
+  const thumbUrl =
+    signed !== null
+      ? signed.thumbUrl
+      : buildThumbUrl(
+          config,
+          effectiveProtection,
+          [...pathSegments, record.name],
+          record.linkToken,
+          record.thumbName !== null,
+        );
   return {
     id: record.id,
     name: record.name,

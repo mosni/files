@@ -226,6 +226,51 @@ describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scop
       expect(body.files.find((f) => f.id === noThumb.id)?.thumbUrl).toBeNull();
     });
 
+    // E7-QA1 round 3 (Hannah): "the thumbnail does not load for private files ... changing it to unlisted
+    // fixed it". A `private` row's path URLs reach routes that run authorizePrivate(), and dl.mosni.dev has
+    // no session to authorize with (D-33: no cookie there, and an `<img src>` cannot carry a Bearer) - so
+    // the listing's thumbnail could never load. The preview page already used a D-84 signed URL; the
+    // listing had to as well.
+    it("a private row's thumbUrl and directUrl are SIGNED, so an unauthenticated <img>/fetch can load them", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "private" });
+      const file = await seedFile({
+        collectionId: collection.id,
+        ownerSub: "user:a",
+        protection: "private",
+        withThumb: true,
+      });
+      asUser("user:a", { roles: [] });
+
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`, "t");
+      const row = (res.json() as BrowseResponse).files.find((f) => f.id === file.id)!;
+
+      expect(row.thumbUrl).toContain(`/thumb/s/${file.id}`);
+      expect(row.thumbUrl).toMatch(/[?&]exp=\d+/);
+      expect(row.thumbUrl).toMatch(/[?&]sig=/);
+      expect(row.directUrl).toContain(`/s/${file.id}`);
+      expect(row.directUrl).toMatch(/[?&]sig=/);
+    });
+
+    // The other half of the same rule: signing is for `private` ONLY. A signed URL is bearer-equivalent
+    // for its whole TTL, so handing one out where the plain path already works would widen access for no
+    // reason - and `secret`'s unguessable token must stay the credential it is designed to be.
+    it("a public row is NOT signed - the plain path still works and needs no bearer-equivalent URL", async () => {
+      const collection = await seedCollection({ ownerSub: "user:a", protection: "public" });
+      const file = await seedFile({
+        collectionId: collection.id,
+        ownerSub: "user:a",
+        protection: "public",
+        withThumb: true,
+      });
+
+      const res = await get(`/api/browse?scope=visible&collectionId=${collection.id}`);
+      const row = (res.json() as BrowseResponse).files.find((f) => f.id === file.id)!;
+
+      expect(row.thumbUrl).not.toContain("/thumb/s/");
+      expect(row.thumbUrl).not.toMatch(/[?&]sig=/);
+      expect(row.directUrl).not.toMatch(/[?&]sig=/);
+    });
+
     it("a file gated by its collection is absent from every anonymous listing even if stored public itself, and the target 404s without leaking the collection name (never-delete, D-100)", async () => {
       const collection = await seedCollection({ ownerSub: "user:a", protection: "private", name: `gated-${randomUUID()}` });
       const file = await seedFile({ collectionId: collection.id, ownerSub: "user:a", protection: "public" });

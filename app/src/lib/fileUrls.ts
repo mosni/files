@@ -8,6 +8,7 @@
 
 import type { Protection } from "./protection.ts";
 import { readablePathResolves } from "./protection.ts";
+import { signDelivery } from "./deliverySignature.ts";
 
 export type FileUrls = { previewUrl: string; directUrl: string };
 
@@ -53,6 +54,40 @@ export function buildThumbUrl(
     return `${origins.dlOrigin}/thumb/${encodeSegments(pathSegments)}`;
   }
   return `${origins.dlOrigin}/thumb/t/${linkToken}`;
+}
+
+// D-84/D-137: a `private` file's bytes are reachable ONLY through a short-lived signed URL. The
+// path/token URLs above cannot serve one, because every route they reach runs authorizePrivate(), and
+// dl.mosni.dev has no session to authorize with - D-33 forbids a cookie on that origin outright, and a
+// plain `<img src>` or a cross-origin archive fetch() cannot carry a Bearer either. So for `private` the
+// signature IS the authorization, and any surface that hands a private file's URLs to a browser has to
+// build them here.
+//
+// E7-QA1 round 3 (Hannah): "the thumbnail does not load for private files ... changing it to unlisted
+// fixed it". The preview page had this (controllers/preview.ts's withSignedDirectUrl); the browse LISTING
+// did not, so every private row pointed its `<img>` at /thumb/<path>, which answered 401/403 to a request
+// that structurally could never be authorized - the browser's broken-image icon. Shared from one place
+// now precisely so the two surfaces cannot drift apart again.
+//
+// ⚠ Minting these is granting byte access for the whole TTL: only ever call this for a viewer already
+// authorized to read the file. Both callers satisfy that - the preview builds them only in its
+// already-authorized owner context, and a `private` row reaches the listing only through
+// listOwnedFilesIn/listVisibleFilesIn's identity branch or the admin branch (a link-authorized listing
+// excludes `private` outright, D-99).
+export function buildSignedDeliveryUrls(
+  config: { dlOrigin: string; deliverySigningSecret: string; deliveryUrlTtlSeconds: number },
+  fileId: string,
+  hasThumb: boolean,
+  nowSeconds: number = Math.floor(Date.now() / 1000),
+): { directUrl: string; thumbUrl: string | null } {
+  const expiresAt = nowSeconds + config.deliveryUrlTtlSeconds;
+  const sig = signDelivery(config.deliverySigningSecret, fileId, expiresAt);
+  const query = `?exp=${expiresAt}&sig=${sig}`;
+  return {
+    directUrl: `${config.dlOrigin}/s/${fileId}${query}`,
+    // The signature covers the fileId, not anything thumbnail-specific, so the same one authorizes both.
+    thumbUrl: hasThumb ? `${config.dlOrigin}/thumb/s/${fileId}${query}` : null,
+  };
 }
 
 // D-98: a collection's own share link, same shape as a file's previewUrl - collections have no bytes of
