@@ -2,8 +2,11 @@
 // [avatar] [name]" once signed in. initHeaderIdentity() cannot rely on the normal slot mechanism (see the
 // module's own comment - mosni-chrome renders a slot exactly once, before auth state is known), so this
 // exercises the DOM it writes into directly, the same shape shareTarget.test.ts uses for window.mosni.
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { initHeaderIdentity } from "../../src/lib/headerIdentity.ts";
+import { act } from "react";
+import { initHeaderIdentity } from "../../src/lib/headerIdentity.tsx";
 
 type Listener = (user: unknown) => void;
 
@@ -33,8 +36,14 @@ function installSdk() {
   };
 }
 
+// Review session 052 round 2: the module renders through a React root now (Hannah: the front-end is
+// supposed to use React, not build DOM by hand), so flushing has to happen inside act() or React warns and
+// the assertions race the commit. The assertions themselves are unchanged - they still check the real DOM
+// the header slot ends up holding, which is the whole point of this file.
 async function flush() {
-  for (let i = 0; i < 5; i++) await Promise.resolve();
+  await act(async () => {
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+  });
 }
 
 describe("initHeaderIdentity (live-testing addition, 2026-08-06)", () => {
@@ -134,7 +143,13 @@ describe("initHeaderIdentity (live-testing addition, 2026-08-06)", () => {
 
     const target = document.querySelector(".little-link")!;
     const img = target.querySelector("img")!;
-    img.dispatchEvent(new Event("error"));
+    // Inside act(): the failure now flips React state rather than removing the node behind React's back,
+    // so the re-render has to be flushed before asserting. `error` on an <img> genuinely does not bubble,
+    // and React attaches this one directly to the element - so the event stays the shape a real broken
+    // image produces, which is the point (D-200: never assert a shape the product cannot produce).
+    await act(async () => {
+      img.dispatchEvent(new Event("error"));
+    });
 
     expect(target.querySelector("img")).toBeNull();
     expect(target.textContent).toBe("Logged in as Hannah");

@@ -6,7 +6,7 @@ import { UploadStack } from "./components/UploadStack.tsx";
 import { PreviewPage } from "./pages/Preview.tsx";
 import { restorePausedUploads } from "./lib/uploads.ts";
 import { initShareTarget } from "./lib/shareTarget.ts";
-import { initHeaderIdentity } from "./lib/headerIdentity.ts";
+import { initHeaderIdentity } from "./lib/headerIdentity.tsx";
 
 // Moved out of index.html (round 4, live-testing: Hannah found dev-rationale comments shipping verbatim
 // in the served page source - a .html entry file's comments survive `vite build` untouched, unlike a
@@ -64,7 +64,7 @@ void restorePausedUploads();
 initShareTarget();
 
 // Live-testing addition (2026-08-06): "logged in as [pic] [name]" in <mosni-header>'s right-side tagline
-// slot. See lib/headerIdentity.ts for why this cannot be a normal slotted child.
+// slot. See lib/headerIdentity.tsx for why this cannot be a normal slotted child.
 initHeaderIdentity();
 
 // F1-F5: the drop zone was the whole landing page (D-64); E4 adds the browser BELOW it (D-1, D-93) - the
