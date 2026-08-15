@@ -21,6 +21,7 @@ import { claimFileRow, commitFileRow, diskRelPath, hasAclGrant, initFilesStorage
 import { createCollection, hasCollectionAclGrant } from "../../src/storage/collections.ts";
 import { makeTestConfig } from "../helpers/testConfig.ts";
 import type { Protection } from "../../src/lib/protection.ts";
+import { INVITE_DURATION_STOPS } from "../../src/lib/inviteDuration.ts";
 
 const verifyMock = vi.mocked(verify);
 const listAccountsMock = vi.mocked(listAccounts);
@@ -473,6 +474,115 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
       });
       expect(res.statusCode).toBe(201);
       expect(await hasCollectionAclGrant(collection.id, `link:${linkId}`)).toBe(true);
+    });
+  });
+
+  // E7-QA2 §A6: the duration slider (D-203..D-208). mintInviteLink is mocked at the top of this file, so
+  // this tier can NEVER see auth's own 400 ttl_too_long - that is precisely why A3 validates in OUR
+  // controller, and why Wave 0b (raising APP_LINK_TTL_MAX on the box) is a separate, box-only check. None
+  // of the tests below prove the box-side cap works; they prove this app never relies on auth to catch a
+  // bad value.
+  describe("invite duration (E7-QA2, D-203..D-208)", () => {
+    beforeEach(() => {
+      mintInviteLinkMock.mockResolvedValue({
+        ok: true,
+        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: `lnk_${randomUUID()}`, expiresAt: "2026-08-13T00:00:00.000Z" },
+      });
+    });
+
+    it.each(INVITE_DURATION_STOPS.map((stop) => stop.seconds))(
+      "a ttl_seconds of %i reaches mintInviteLink with that exact ttlSeconds",
+      async (seconds) => {
+        const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+        asUser("user:owner");
+        const res = await req("POST", "/api/invites", {
+          token: "t",
+          body: { type: "file", id: file.id, ttl_seconds: seconds },
+        });
+        expect(res.statusCode).toBe(201);
+        expect(mintInviteLinkMock).toHaveBeenCalledWith(expect.objectContaining({ ttlSeconds: seconds }));
+      },
+    );
+
+    it("a ttl_seconds not in the stop list is rejected 400 invalid_ttl and mints nothing", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/invites", {
+        token: "t",
+        body: { type: "file", id: file.id, ttl_seconds: 12345 },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: "invalid_ttl" });
+      expect(mintInviteLinkMock).not.toHaveBeenCalled();
+    });
+
+    it("a ttl_seconds above the top stop is rejected by US, not by auth", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/invites", {
+        token: "t",
+        body: { type: "file", id: file.id, ttl_seconds: 7776001 },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: "invalid_ttl" });
+      expect(mintInviteLinkMock).not.toHaveBeenCalled();
+    });
+
+    it("an absent ttl_seconds mints at the 1h default", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/invites", { token: "t", body: { type: "file", id: file.id } });
+      expect(res.statusCode).toBe(201);
+      expect(mintInviteLinkMock).toHaveBeenCalledWith(expect.objectContaining({ ttlSeconds: 3600 }));
+    });
+
+    it.each([-1, 0, 1.5])("a numeric but off-list ttl_seconds (%s) is rejected 400 and mints nothing", async (bad) => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/invites", {
+        token: "t",
+        body: { type: "file", id: file.id, ttl_seconds: bad },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(mintInviteLinkMock).not.toHaveBeenCalled();
+    });
+
+    it("a null ttl_seconds fails schema validation with 400", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/invites", {
+        token: "t",
+        body: { type: "file", id: file.id, ttl_seconds: null as unknown as number },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(mintInviteLinkMock).not.toHaveBeenCalled();
+    });
+
+    // Fastify's default AJV runs with coerceTypes: true, so a numeric STRING that parses to one of the
+    // ten stops is coerced before this app's own isValidInviteTtl ever sees it - "3600" and 3600 are
+    // indistinguishable by the time either check runs. This is not a bypass (the coerced value still has
+    // to match the D-204 list), just a fact worth asserting explicitly rather than assuming the plan's
+    // "a string is rejected" intuition holds for every string.
+    it("a numeric-string ttl_seconds that coerces to a valid stop is ACCEPTED, not rejected", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/invites", {
+        token: "t",
+        body: { type: "file", id: file.id, ttl_seconds: "3600" as unknown as number },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(mintInviteLinkMock).toHaveBeenCalledWith(expect.objectContaining({ ttlSeconds: 3600 }));
+    });
+
+    it("a non-numeric string ttl_seconds that cannot coerce fails schema validation with 400", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/invites", {
+        token: "t",
+        body: { type: "file", id: file.id, ttl_seconds: "not-a-number" as unknown as number },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(mintInviteLinkMock).not.toHaveBeenCalled();
     });
   });
 

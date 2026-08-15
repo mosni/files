@@ -18,7 +18,6 @@ export function makeTestConfig(overrides: Partial<Config> = {}): Config {
     port: 0,
     deliverySigningSecret: "test-signing-secret",
     deliveryUrlTtlSeconds: 300,
-    inviteTtlSeconds: 86400,
     ...overrides,
   };
 }

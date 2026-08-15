@@ -842,6 +842,47 @@ const PAGES = [
     },
   },
   {
+    id: "share-dialog-duration-default",
+    label: "Share dialog - the invite duration slider at its default (1h)",
+    url: `/f/vis-${run}-deletable`,
+    note: "E7-QA2 §C2/D-204/D-205/D-207. A real <mosni-slider> over the ten D-204 stops, defaulting to " +
+      "1h, showing the notch-per-stop track, the end-only labels (30 minutes / 90 days), the readout " +
+      "naming the current stop, and the always-visible duration sentence (D-208) - today's default path " +
+      "said nothing about expiry at all. ⚠ Requires mosni-chrome's Wave 0a deployed to ui.mosni.dev; " +
+      "until then <mosni-slider> is an inert unknown tag and this shot proves nothing.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await openRowShareDialog(p, "confidential-share.txt");
+      await p.waitForSelector("mosni-slider input[type=range]", { timeout: 10_000 });
+      await p.waitForSelector("text=This link expires after 1 hour.", { timeout: 10_000 });
+      await p.waitForTimeout(200);
+    },
+  },
+  {
+    id: "share-dialog-duration-max",
+    label: "Share dialog - the slider at 90 days with the invite switch OFF (densest state)",
+    url: `/f/vis-${run}-deletable`,
+    note: "E7-QA2 §C2. The slider driven to its top stop (native range End key - never page.evaluate " +
+      "setting the attribute directly, which would prove nothing about the real element) with the " +
+      "upgradeable switch off, so the duration sentence and D-23's shared-identity consequence are " +
+      "visible together - the densest this dialog ever gets, and therefore the state most likely to clip " +
+      "(review session 049's white-space:nowrap inheritance bug, technical-baseline.md's D-8 class).",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await openRowShareDialog(p, "confidential-share.txt");
+      const rangeInput = p.locator("mosni-slider input[type=range]");
+      await rangeInput.waitFor({ state: "attached", timeout: 10_000 });
+      await rangeInput.focus();
+      await p.keyboard.press("End");
+      await p.waitForSelector("text=This link expires after 90 days.", { timeout: 10_000 });
+      const toggle = p.locator("mosni-switch").first();
+      await toggle.waitFor({ state: "attached", timeout: 10_000 });
+      await toggle.click({ timeout: 5_000 });
+      await p.waitForSelector("text=Everyone who opens this link shares one identity", { timeout: 10_000 });
+      await p.waitForTimeout(200);
+    },
+  },
+  {
     id: "share-dialog-invite-action",
     label: "Share dialog - the 'Invite someone without an account' action, clicked",
     url: `/f/vis-${run}-deletable`,

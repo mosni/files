@@ -411,4 +411,75 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
 
     expect(pageErrors, `uncaught page errors: ${pageErrors.join(", ")}`).toEqual([]);
   });
+
+  // E7-QA2 §C1 (D-203..D-208): the ONLY tier in this repo that can prove <mosni-slider> works. Every
+  // assertion in web/test/unit/ShareDialog.test.tsx and sliderChange.test.tsx runs in jsdom, where
+  // mosni-slider is an inert unknown element and the test's own fixture supplies the reflect-then-bubble
+  // behaviour under test (see sliderChange.test.tsx's header comment). This test drives the REAL, upstream-
+  // deployed element - it can only pass once mosni-chrome's Wave 0a has been deployed to ui.mosni.dev
+  // (curl https://ui.mosni.dev/mosnicat-core.js | grep -o 'mosni-slider'). Until then it is expected RED,
+  // same as every other consumer of the real design system this repo cannot control the deploy of.
+  test("the invite duration slider is a REAL upgraded <mosni-slider> and a click reaches React state (D-207)", async ({
+    page,
+    request,
+  }) => {
+    const sub = `user:e2e-slider-${randomUUID()}`;
+    const token = await mintToken(request, sub);
+    const name = `slider-ui-${randomUUID().slice(0, 8)}.txt`;
+    await withDb((conn) => seedPrivateFile(conn, { name, ownerSub: sub }));
+
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err) => pageErrors.push(err.message));
+
+    // ONLY sdk.js is blocked - mosnicat.js must load for real, which is the entire point.
+    await page.route("**/sdk.js", (route) => route.abort());
+    await page.addInitScript(`
+      window.mosni = Object.assign(window.mosni ?? {}, {
+        user: () => ({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        token: () => ${JSON.stringify(token)},
+        onChange: (cb) => cb({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        login: () => {}, logout: () => {},
+        toast: () => {},
+      });
+    `);
+
+    await page.goto(`${FILES_ORIGIN}/`);
+    await expect(page.getByText(name, { exact: true }).first()).toBeVisible({ timeout: 20_000 });
+    await page.locator("mosni-dropdown", { has: page.locator("mosni-dropdown-item") }).first().click();
+    await page.locator("mosni-dropdown-item", { hasText: "Share" }).first().click();
+    await expect(page.getByText("Add people")).toBeVisible({ timeout: 20_000 });
+
+    const slider = page.locator('mosni-modal[heading^="Share"] mosni-slider');
+    const rangeInput = slider.locator("input[type=range]");
+    // C1.1: prove the element upgraded before asserting anything about its behaviour - the internal range
+    // input is built by MosniSlider.render() itself, so it exists only if mosnicat.js ran for real.
+    await expect(rangeInput).toBeAttached({ timeout: 20_000 });
+
+    // C1.2: D-205's default, through the real element.
+    const readout = slider.locator(".slider-readout");
+    await expect(readout).toHaveText("1 hour");
+    await expect(page.getByText("This link expires after 1 hour.")).toBeVisible();
+
+    // C1.3, the real contract under test: drive it the way a user does (a focused native range input's
+    // arrow keys), never page.evaluate setting the attribute directly - that would reproduce the unit
+    // tier's fixture at a higher tier and prove nothing about the real element. If mosni-slider's
+    // reflect-then-bubble assumption (§1.2) is wrong, the element still moves visually and React never
+    // hears about it - this assertion is the only thing in the repo that can fail on that.
+    await rangeInput.focus();
+    // Index 1 ("1 hour") -> index 4 ("12 hours"): three presses.
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    await expect(readout).toHaveText("12 hours");
+    await expect(page.getByText("This link expires after 12 hours.")).toBeVisible();
+    await expect(page.getByText("This link expires after 1 hour.")).toHaveCount(0);
+
+    // C1.4: the readout must not clip - the dialog inherits white-space: nowrap from its row <td>
+    // (review 049, defect 5), and the document-level overflow guard cannot see clipping inside a <dialog>.
+    const clipped = await readout.evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+    expect(clipped, "the slider readout must wrap, never clip").toBe(false);
+
+    // C1.5.
+    expect(pageErrors, `uncaught page errors: ${pageErrors.join(", ")}`).toEqual([]);
+  });
 });

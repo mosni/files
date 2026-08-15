@@ -9,10 +9,12 @@
 
 import { useEffect, useState } from "react";
 import type { Claims } from "../../../app/src/lib/roles.ts";
+import { DEFAULT_INVITE_DURATION_INDEX, INVITE_DURATION_STOPS } from "../../../app/src/lib/inviteDuration.ts";
 import type { DirectoryAccount, InviteMinted, ShareObjectType, ShareState } from "../../../app/src/lib/shareContext.ts";
 import { toastMutationFailure } from "../lib/mutationError.ts";
 import { createInvite, fetchAccounts, fetchShareState, grantShare, revokeShare } from "../lib/share.ts";
 import { useModalClose } from "../lib/modalClose.ts";
+import { useSliderChange } from "../lib/sliderChange.ts";
 import { useSwitchChange } from "../lib/switchChange.ts";
 import { CopyLink } from "./CopyLink.tsx";
 
@@ -37,6 +39,14 @@ declare module "react" {
       // paired hook for reading the user's actual toggle back out.
       "mosni-switch": React.DetailedHTMLProps<
         React.HTMLAttributes<HTMLElement> & { checked?: boolean; disabled?: boolean; label?: string },
+        HTMLElement
+      >;
+      // E7-QA2 §1.2/D-207: mosni-chrome's generic ordered-discrete-choice slider - `stops` is pipe-
+      // delimited labels in order, `value` is the selected INDEX as a string (reflected as an attribute,
+      // same convention as mosni-switch's `checked`). lib/sliderChange.ts's useSliderChange is the paired
+      // hook for reading the user's actual selection back out.
+      "mosni-slider": React.DetailedHTMLProps<
+        React.HTMLAttributes<HTMLElement> & { stops?: string; value?: string; label?: string },
         HTMLElement
       >;
     }
@@ -133,12 +143,16 @@ export function ShareDialog({
   // F13/D-198: defaults ON, per D-23's requirement that the shared-identity consequence be visible and
   // the safer default chosen - an upgradeable link lets its claimant become a real, distinct account.
   const [allowRegister, setAllowRegister] = useState(true);
+  // E7-QA2 D-205: the default is 1h (index into INVITE_DURATION_STOPS), not a config-driven constant -
+  // INVITE_TTL_SECONDS is retired.
+  const [durationIndex, setDurationIndex] = useState(DEFAULT_INVITE_DURATION_INDEX);
   const [invite, setInvite] = useState<InviteMinted | null>(null);
   const [inviting, setInviting] = useState(false);
   const [busy, setBusy] = useState(false);
   const modalRef = useModalClose(onClose);
   const canUploadSwitchRef = useSwitchChange(setCanUpload);
   const allowRegisterSwitchRef = useSwitchChange(setAllowRegister);
+  const durationSliderRef = useSliderChange(setDurationIndex);
 
   // Reset to a fresh load every time the dialog is opened - the dialog is never re-fetchable stale state
   // across separate opens (matches the invite URL's own "gone once closed" rule below).
@@ -150,6 +164,7 @@ export function ShareDialog({
     setFilterText("");
     setCanUpload(false);
     setAllowRegister(true);
+    setDurationIndex(DEFAULT_INVITE_DURATION_INDEX);
     void fetchShareState(type, id).then(async (res) => {
       if (!res.ok) {
         await toastMutationFailure(res);
@@ -209,7 +224,13 @@ export function ShareDialog({
   async function sendInvite(): Promise<void> {
     setInviting(true);
     try {
-      const res = await createInvite(type, id, type === "collection" ? canUpload : undefined, allowRegister);
+      const res = await createInvite(
+        type,
+        id,
+        type === "collection" ? canUpload : undefined,
+        allowRegister,
+        INVITE_DURATION_STOPS[durationIndex].seconds,
+      );
       if (!res.ok) {
         await toastMutationFailure(res);
         return;
@@ -376,16 +397,31 @@ export function ShareDialog({
                 checked={allowRegister}
                 label="Let the recipient turn this into their own account"
               />
+              {/* E7-QA2 D-204/D-207: a real <mosni-slider> over the ten D-204 stops (30m -> 90d), defaulting
+                  to 1h (D-205). Generic element - it knows about stops, not about time; this app supplies
+                  the duration labels and reads back the selected INDEX. */}
+              <mosni-slider
+                ref={durationSliderRef}
+                stops={INVITE_DURATION_STOPS.map((stop) => stop.label).join("|")}
+                value={String(durationIndex)}
+                label="Link expires after"
+              />
+              {/* D-208: this sentence renders in BOTH switch positions - today's default path said nothing
+                  about expiry at all. No hardcoded "24 hours": it names the SELECTED stop. */}
+              <p className="little-link" style={{ minWidth: 0 }}>
+                This link expires after {INVITE_DURATION_STOPS[durationIndex].label}.
+              </p>
               {/* D-23's requirement, sharpened by D-196: a non-upgradeable link carrying upload rights is
                   a shared WRITE identity, not just a shared read. Shown plainly at the point of choice -
-                  not a tooltip, not behind a disclosure - whenever the switch is off. */}
+                  not a tooltip, not behind a disclosure - whenever the switch is off. D-208: the duration
+                  half of this sentence moved to the paragraph above, which is why it no longer mentions a
+                  lifetime. */}
               {!allowRegister && (
                 <p className="little-link" role="alert" style={{ minWidth: 0 }}>
                   Everyone who opens this link shares one identity.
                   {type === "collection" && canUpload
                     ? " Uploads will not be attributable to a person, and anyone with the link can delete anyone else's files."
-                    : ""}{" "}
-                  The link dies after at most 24 hours.
+                    : ""}
                 </p>
               )}
               <button
@@ -407,6 +443,12 @@ export function ShareDialog({
               <CopyLink previewUrl={invite.url} />
               <p className="little-link" style={{ minWidth: 0 }}>
                 Anyone who opens this link gets access. The first person to sign up keeps it.
+              </p>
+              {/* E7-QA2 §B4/D-208: expiresAt was already on InviteMinted (auth's real expires_at) and
+                  rendered nowhere. Formatted in the viewer's own locale via the platform Intl machinery -
+                  no new dependency. */}
+              <p className="little-link" style={{ minWidth: 0 }}>
+                Expires {new Date(invite.expiresAt).toLocaleString()}.
               </p>
             </div>
           )}

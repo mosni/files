@@ -18,6 +18,7 @@ import { listAccounts, mintInviteLink, setAccountRole } from "../auth/internalAp
 import { can, isSuperuser, type VerifiedClaims } from "../lib/roles.ts";
 import { actorLabel } from "../lib/audit.ts";
 import { buildCollectionPreviewUrl, buildFileUrls } from "../lib/fileUrls.ts";
+import { DEFAULT_INVITE_TTL_SECONDS, isValidInviteTtl } from "../lib/inviteDuration.ts";
 import type { ShareGrant, ShareObjectType, ShareState } from "../lib/shareContext.ts";
 import { emitAuditEvent } from "../storage/audit.ts";
 import {
@@ -223,13 +224,30 @@ const MINT_ERROR_PASSTHROUGH = new Set(["ttl_too_long", "not_grantable", "bad_de
 export async function createInviteHandler(request: FastifyRequest, reply: FastifyReply, config: Config): Promise<void> {
   const claims = await requireClaims(request, reply, config);
   if (claims === null) return;
-  const body = request.body as { type?: string; id?: string; canUpload?: boolean; allow_register?: boolean };
+  const body = request.body as {
+    type?: string;
+    id?: string;
+    canUpload?: boolean;
+    allow_register?: boolean;
+    ttl_seconds?: number;
+  };
   if (!isShareObjectType(body.type) || typeof body.id !== "string") {
     reply.code(400).send({ error: "bad_request" });
     return;
   }
   if (body.canUpload !== undefined && body.type === "file") {
     reply.code(400).send({ error: "bad_request" });
+    return;
+  }
+  // E7-QA2 §A3/A4: absent is a valid request (an older client, a direct API call) and defaults to 1h
+  // (D-205). A present value that is not one of the ten D-204 stops is rejected HERE, not clamped and not
+  // left for auth to reject - a value off the list did not come from this app's UI, and substituting one
+  // silently would hide that. This also means the top stop's cap is enforced twice on purpose: here
+  // against the list, and again by auth's own APP_LINK_TTL_MAX (Wave 0b) - the two must never drift, see
+  // lib/inviteDuration.ts's header comment.
+  const ttlSeconds = body.ttl_seconds === undefined ? DEFAULT_INVITE_TTL_SECONDS : body.ttl_seconds;
+  if (!isValidInviteTtl(ttlSeconds)) {
+    reply.code(400).send({ error: "invalid_ttl" });
     return;
   }
   const target = await resolveShareTarget(body.type, body.id, claims);
@@ -243,7 +261,7 @@ export async function createInviteHandler(request: FastifyRequest, reply: Fastif
   const destination = await destinationUrlFor(config, target);
   const minted = await mintInviteLink({
     roles: ["files:read"],
-    ttlSeconds: config.inviteTtlSeconds,
+    ttlSeconds,
     destination,
     // Shown to Hannah in auth's own /admin screen - names the object and nothing sensitive.
     label: `files: ${meta.name}`,
