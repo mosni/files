@@ -180,6 +180,56 @@ describe("DropZone", () => {
     expect(container.querySelector('input[type="file"]')).not.toBeNull();
   });
 
+  // Review session 049. Round 2's fix repaired the RENDER gate only, so a can_upload-only grantee saw the
+  // drop zone and could use the picker or drop directly ON it - but the two window-level ingest paths
+  // (E6's whole-page drop and clipboard paste) kept their own unconditional `can(user, "files:write")`
+  // gate and silently did nothing for exactly the persona D-196 exists to serve. The page even said "Drop
+  // anywhere to upload" while ignoring the drop. Same defect class as the one Hannah found live, in the
+  // two places that fix did not reach; invisible to every tier because round 2's own new e2e test drives
+  // the file PICKER (`setInputFiles`), not a drop or a paste.
+  it("a compact mount's WHOLE-PAGE drop uploads for a can_upload-only grantee with no files:write (F9/D-196)", async () => {
+    installMockMosni({ sub: "user:grantee", roles: [] });
+    act(() => {
+      root.render(
+        <>
+          <DropZone compact fixedCollectionId="c1" />
+          <UploadStack />
+        </>,
+      );
+    });
+
+    const droppedFile = new File(["hello"], "grantee-page-drop.txt", { type: "text/plain" });
+    dropOnto(window, { types: ["Files"], files: [droppedFile], items: undefined });
+    await flush();
+
+    expect(startBatchCalls).toHaveLength(1);
+    expect(startBatchCalls[0].files.map((f) => f.name)).toEqual(["grantee-page-drop.txt"]);
+    // The grant is scoped to ONE collection, so a whole-page drop must land there - never at the root,
+    // which holds no ACL rows at all (D-126/A2.2) and which the server would 403 (upload.ts's A2.3).
+    expect(startBatchCalls[0].options.destinationCollectionId).toBe("c1");
+  });
+
+  it("the ROOT-mounted whole-page drop still refuses a grantee with no files:write (D-126/A2.2 unchanged)", async () => {
+    installMockMosni({ sub: "user:grantee", roles: [] });
+    act(() => {
+      root.render(
+        <>
+          <DropZone />
+          <UploadStack />
+        </>,
+      );
+    });
+
+    dropOnto(window, {
+      types: ["Files"],
+      files: [new File(["hello"], "root-drop.txt", { type: "text/plain" })],
+      items: undefined,
+    });
+    await flush();
+
+    expect(startBatchCalls).toHaveLength(0);
+  });
+
   it("renders the drop zone when signed in with files:write, and calls startBatch with source picker (F1)", async () => {
     installMockMosni({ sub: "user:1", roles: ["files:write"] });
 
@@ -421,6 +471,48 @@ describe("DropZone", () => {
       const blob = new File(["img"], "clip.png", { type: "image/png" });
       const item = { kind: "file", type: "image/png", getAsFile: () => blob } as unknown as DataTransferItem;
       pasteWith({ files: [] as unknown as FileList, items: [item] as unknown as DataTransferItemList, getData: () => "" });
+
+      expect(startBatchCalls).toHaveLength(0);
+    });
+
+    // Review session 049, the paste half of the same F9/D-196 gap the whole-page-drop tests above cover:
+    // this listener's eligibility gate never learned about compact mode either.
+    it("a compact mount's paste uploads for a can_upload-only grantee with no files:write (F9/D-196)", async () => {
+      installMockMosni({ sub: "user:grantee", roles: [] });
+      act(() => {
+        root.render(
+          <>
+            <DropZone compact fixedCollectionId="c1" />
+            <UploadStack />
+          </>,
+        );
+      });
+
+      const blob = new File(["img"], "clip.png", { type: "image/png" });
+      const item = { kind: "file", type: "image/png", getAsFile: () => blob } as unknown as DataTransferItem;
+      pasteWith({ files: [] as unknown as FileList, items: [item] as unknown as DataTransferItemList, getData: () => "" });
+      await flush();
+
+      expect(startBatchCalls).toHaveLength(1);
+      expect(startBatchCalls[0].options.source).toBe("paste");
+      expect(startBatchCalls[0].options.destinationCollectionId).toBe("c1");
+    });
+
+    it("the ROOT-mounted paste still refuses a grantee with no files:write (D-126/A2.2 unchanged)", async () => {
+      installMockMosni({ sub: "user:grantee", roles: [] });
+      act(() => {
+        root.render(
+          <>
+            <DropZone />
+            <UploadStack />
+          </>,
+        );
+      });
+
+      const blob = new File(["img"], "clip.png", { type: "image/png" });
+      const item = { kind: "file", type: "image/png", getAsFile: () => blob } as unknown as DataTransferItem;
+      pasteWith({ files: [] as unknown as FileList, items: [item] as unknown as DataTransferItemList, getData: () => "" });
+      await flush();
 
       expect(startBatchCalls).toHaveLength(0);
     });

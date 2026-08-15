@@ -349,6 +349,20 @@ const signedInAsReal = (claims, token) => `
   });
 `;
 
+// Review session 049: every E7 share state used to open the dialog with four separate steps each ending
+// in `.catch(() => {})`. That swallowed the failure INSIDE the step, so session 039's abort-on-interact-
+// failure guard (see the runner below) could never fire for them - a state whose dialog never opened was
+// screenshotted and signed off anyway, which is the exact failure 039 added that guard to stop. One shared
+// helper, and it THROWS: if the dialog cannot be opened, the run aborts and says so. (It also caught a
+// stale state during this review - `share-dialog-refusal` still waited for D-186 copy that D-195 deleted.)
+async function openRowShareDialog(p, rowText) {
+  await p.waitForSelector(`[data-row-id]:has-text(${JSON.stringify(rowText)})`, { timeout: 10_000 });
+  const row = p.locator("[data-row-id]", { hasText: rowText });
+  await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 });
+  await row.locator("mosni-dropdown-item", { hasText: "Share" }).click({ timeout: 5_000 });
+  await p.waitForSelector("mosni-modal[open]", { timeout: 10_000 });
+}
+
 const uploadToken = await mintToken(WRITER.sub);
 // D-101: the admin/all-files gate needs BOTH roles - see lib/roles.ts's isFilesAdmin().
 const adminToken = await mintToken("user:visual-check-admin", "files:write,files:delete");
@@ -771,28 +785,24 @@ const PAGES = [
       "checklist in verification-concept.md for where this is proven for real).",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
-      await p.waitForSelector('[data-row-id]:has-text("confidential-share.txt")', { timeout: 10_000 }).catch(() => {});
-      const row = p.locator("[data-row-id]", { hasText: "confidential-share.txt" });
-      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
-      await row.locator("mosni-dropdown-item", { hasText: "Share" }).click({ timeout: 5_000 }).catch(() => {});
-      await p.waitForSelector("text=link:visualcheck00000001", { timeout: 10_000 }).catch(() => {});
+      await openRowShareDialog(p, "confidential-share.txt");
+      await p.waitForSelector("text=link:visualcheck00000001", { timeout: 10_000 });
       await p.waitForTimeout(200);
     },
   },
   {
-    id: "share-dialog-refusal",
-    label: "Share dialog - the refusal state (an unlisted file)",
+    id: "share-dialog-non-private-note",
+    label: "Share dialog - the informational note on a non-private file (D-195)",
     url: `/f/vis-${run}-deletable`,
-    note: "D-186: sharing is refused unless the object's EFFECTIVE protection is private. Opened on " +
-      "`top-file.txt` (unlisted). Must name the current level and point at the protection control - no " +
-      "picker, no grant list, no Invite action anywhere in this shot.",
+    note: "E7-QA1 §B1.6/D-195, REPLACING the old `share-dialog-refusal` state. D-186's refusal was " +
+      "REVERSED: sharing now succeeds at every protection level, so opening the dialog on `top-file.txt` " +
+      "(unlisted) must show the picker AND an informational note saying a view grant adds nothing here - " +
+      "never the deleted 'Only private files can be shared' copy, and never a hidden picker. The note must " +
+      "wrap rather than scroll the dialog sideways (§B1.1/F1).",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
-      await p.waitForSelector('[data-row-id]:has-text("top-file.txt")', { timeout: 10_000 }).catch(() => {});
-      const row = p.locator("[data-row-id]", { hasText: "top-file.txt" });
-      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
-      await row.locator("mosni-dropdown-item", { hasText: "Share" }).click({ timeout: 5_000 }).catch(() => {});
-      await p.waitForSelector("text=Only private files can be shared", { timeout: 10_000 }).catch(() => {});
+      await openRowShareDialog(p, "top-file.txt");
+      await p.waitForSelector("text=so anyone with the link can already open it", { timeout: 10_000 });
       await p.waitForTimeout(200);
     },
   },
@@ -802,15 +812,32 @@ const PAGES = [
     url: `/f/vis-${run}-deletable`,
     note: "The 'Add people' filter input with text typed into it. Same structural sandbox gap as the " +
       "grants state above - the candidate list below the filter will be empty here (no reachable `auth` " +
-      "container), but the input itself, its label and placement are what this shot is for.",
+      "container), but the input itself, its label and its spacing (F5's `.field-label` gap) are what this " +
+      "shot is for.",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
-      await p.waitForSelector('[data-row-id]:has-text("confidential-share.txt")', { timeout: 10_000 }).catch(() => {});
-      const row = p.locator("[data-row-id]", { hasText: "confidential-share.txt" });
-      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
-      await row.locator("mosni-dropdown-item", { hasText: "Share" }).click({ timeout: 5_000 }).catch(() => {});
-      await p.waitForSelector('input[id^="share-picker-filter-"]', { timeout: 10_000 }).catch(() => {});
-      await p.locator('input[id^="share-picker-filter-"]').fill("ali").catch(() => {});
+      await openRowShareDialog(p, "confidential-share.txt");
+      await p.waitForSelector('input[id^="share-picker-filter-"]', { timeout: 10_000 });
+      await p.locator('input[id^="share-picker-filter-"]').fill("ali");
+      await p.waitForTimeout(200);
+    },
+  },
+  {
+    id: "share-dialog-invite-switch-off",
+    label: "Share dialog - the invite switch turned OFF, with D-23's consequence line",
+    url: `/f/vis-${run}-deletable`,
+    note: "E7-QA1 §B1.7/D-198/F13. The 'Let the recipient turn this into their own account' control must " +
+      "render as a REAL <mosni-switch> (F4 - not a bare checkbox), default ON, and turning it off must " +
+      "surface D-23's shared-identity consequence plainly at the point of choice - not in a tooltip, not " +
+      "behind a disclosure. This shot is the only tier that shows the real design-system switch; the unit " +
+      "test drives a hand-written double of it.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await openRowShareDialog(p, "confidential-share.txt");
+      const toggle = p.locator("mosni-switch").first();
+      await toggle.waitFor({ state: "attached", timeout: 10_000 });
+      await toggle.click({ timeout: 5_000 });
+      await p.waitForSelector("text=Everyone who opens this link shares one identity", { timeout: 10_000 });
       await p.waitForTimeout(200);
     },
   },
@@ -827,13 +854,26 @@ const PAGES = [
       "REAL box run captures the real minted-URL state.",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
-      await p.waitForSelector('[data-row-id]:has-text("confidential-share.txt")', { timeout: 10_000 }).catch(() => {});
-      const row = p.locator("[data-row-id]", { hasText: "confidential-share.txt" });
-      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
-      await row.locator("mosni-dropdown-item", { hasText: "Share" }).click({ timeout: 5_000 }).catch(() => {});
-      await p.waitForSelector("text=Invite someone without an account", { timeout: 10_000 }).catch(() => {});
-      await p.locator("button", { hasText: "Invite someone without an account" }).click({ timeout: 5_000 }).catch(() => {});
+      await openRowShareDialog(p, "confidential-share.txt");
+      await p.waitForSelector("text=Invite someone without an account", { timeout: 10_000 });
+      await p.locator("button", { hasText: "Invite someone without an account" }).click({ timeout: 5_000 });
       await p.waitForTimeout(500);
+    },
+  },
+  {
+    id: "share-dialog-from-collection-header",
+    label: "Collection page - Share the collection you are looking at (C1/F6)",
+    url: `/f/vis-${run}-deletable`,
+    note: "E7-QA1 §C1/F6: before this round there was no way to share the collection currently open - the " +
+      "dialog was reachable only from a row's overflow menu and from a file's preview page. The header's " +
+      "own Share control opens the SAME dialog with type=collection, and it renders for the owner or a " +
+      "superuser only (D-187: a grantee never shares). A collection dialog additionally carries the " +
+      "'Can upload into this collection' switch a file's does not.",
+    init: signedInAsReal(WRITER, uploadToken),
+    interact: async (p) => {
+      await p.getByRole("button", { name: /^Share$/ }).click({ timeout: 10_000 });
+      await p.waitForSelector("mosni-modal[open]", { timeout: 10_000 });
+      await p.waitForTimeout(200);
     },
   },
   {

@@ -158,6 +158,17 @@ export function DropZone({
   const windowDropRef = useRef<(dataTransfer: DataTransfer) => void>(() => {});
   const [zoneHover, setZoneHover] = useState(false); // a file drag is over the drop zone itself
 
+  // E7-QA1 / review session 049 (F9/D-196): the ONE eligibility rule, shared by the render gate below and
+  // by both window-level ingest listeners (whole-page drop, clipboard paste). It used to exist as three
+  // separate copies of `can(user, "files:write")`, and round 2's live-testing fix taught only the render
+  // one about compact mode - so a can_upload-only grantee saw the drop zone, could use the picker and
+  // could drop ON the zone, while a whole-page drop and a paste silently did nothing (the page meanwhile
+  // promising "Drop anywhere to upload"). A compact mount is ONLY ever rendered after the SERVER said this
+  // viewer may upload here (FileBrowser's `data.canUpload`, D-116), and a can_upload-only grantee has no
+  // role by design (D-182). The root-mounted case keeps the role requirement: D-126/A2.2, the pseudo-root
+  // holds no ACL rows, so files:write is the only right that can exist there.
+  const mayIngest = (u: MosniUser): boolean => u !== null && (compact || can(u, "files:write"));
+
   // G1/G2 (D-42, D-86): the destination picker. Collapsed by default and never fetched until opened -
   // D-1's three-action path (open → drop → copy) must never grow a step for anyone who leaves it alone.
   const [collections, setCollections] = useState<CollectionOption[]>([]);
@@ -212,7 +223,7 @@ export function DropZone({
   // visitor who cannot upload must do nothing, not start an upload that 401s into the job stack.
   useEffect(() => {
     windowDropRef.current = (dataTransfer: DataTransfer) => {
-      if (user === null || !can(user, "files:write")) return;
+      if (!mayIngest(user)) return;
       void ingestDropped(dataTransfer, "drop");
     };
   });
@@ -237,7 +248,7 @@ export function DropZone({
   // E6 D2: a window-level paste listener. Registered per user change (mirroring the collections-loading
   // effect below) so the gate below always reads the CURRENT sign-in state rather than a stale closure.
   useEffect(() => {
-    if (user === null || !can(user, "files:write")) return;
+    if (!mayIngest(user)) return;
 
     function onPaste(event: ClipboardEvent) {
       const target = event.target as HTMLElement | null;
@@ -385,15 +396,10 @@ export function DropZone({
     );
   }
 
-  // E7-QA1 (F9/D-196): a compact mount is ONLY ever rendered by a caller that already asked the SERVER
-  // whether this viewer may upload here (FileBrowser.tsx's `isCollectionRoute && data.canUpload`, D-116's
-  // "server decides" rule) - can_upload-only grantees have no files:write role by design since D-182 (the
-  // ACL row IS the grant, no role is added). Re-checking a role this component was never told to require
-  // here undid F9's entire point: a fresh invite claimant with a can_upload grant and no role hit this exact
-  // gate and got turned away. The root-mounted case (no fixedCollectionId) keeps the role requirement -
-  // D-126/A2.2: the pseudo-root holds no ACL rows at all, so files:write is the only right that can exist
-  // there.
-  if (!compact && !can(user, "files:write")) {
+  // E7-QA1 (F9/D-196): the render half of `mayIngest` (declared at the top of this component, with the
+  // full reasoning) - a compact mount is only ever rendered by a caller that already asked the SERVER
+  // whether this viewer may upload here, so re-checking a role here turned a fresh invite claimant away.
+  if (!mayIngest(user)) {
     return (
       <div className="panel">
         <h1 style={{ marginTop: 0 }}>No upload access</h1>

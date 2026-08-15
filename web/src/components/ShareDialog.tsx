@@ -247,7 +247,19 @@ export function ShareDialog({
       {/* F1: constrain the whole dialog body so it can never scroll horizontally - maxWidth/overflowWrap
           here, minWidth: 0 on every flex child below that holds text (a flex item's default `min-width:
           auto` is what actually prevents wrapping; overflowWrap alone does nothing without it). */}
-      <div style={{ maxWidth: "100%", overflowWrap: "anywhere" }}>
+      {/* `whiteSpace: "normal"` is the load-bearing one here, and it took a real browser to find (review
+          session 049, measured — `minWidth`/`overflowWrap` changes did nothing because neither was the
+          cause). `mosni-modal` is `display: contents`, so the <dialog> it builds stays a DOM DESCENDANT of
+          wherever the element was mounted even though `position: fixed` takes it out of flow — and this
+          dialog is mounted inside a file-browser row's `<td>`, which mosni-chrome styles
+          `white-space: nowrap`. That inherits straight through `display: contents` into the dialog, so
+          every paragraph in here rendered as ONE unwrapped line and was clipped by `.modal`'s definite
+          `width: min(28rem, ...)`. It cost D-195's informational note and, worse, D-23's shared-identity
+          consequence line, which the hand-off requires to be legible at the point of choice — it read
+          "The link dies aft". `overflowWrap: anywhere` stays for the other case: a raw `link:<uuid>` sub,
+          which is one long unbreakable word. Every `<mosni-modal>` mounted inside a table row has this
+          inheritance; see `issues.md` → `CHROME-MODAL-INHERITS-NOWRAP` for the upstream fix. */}
+      <div style={{ maxWidth: "100%", overflowWrap: "anywhere", whiteSpace: "normal" }}>
       {state === null ? (
         <span className="spinner" role="status" aria-label="Loading" />
       ) : (
@@ -353,7 +365,11 @@ export function ShareDialog({
           <hr />
 
           {invite === null ? (
-            <div style={{ display: "grid", gap: "0.5rem" }}>
+            // `minWidth: 0` is B1.1's rule applied to a grid item (a grid item defaults to
+            // `min-width: auto` exactly as a flex item does). Defensive only - it was NOT what fixed
+            // D-23's clipped consequence line below; see the wrapper's comment above for what actually
+            // was, and do not let this line's presence suggest otherwise to the next reader.
+            <div style={{ display: "grid", gap: "0.5rem", minWidth: 0 }}>
               {/* F13/D-198: the upgradeable switch, pulled forward from E8 - a real <mosni-switch>. */}
               <mosni-switch
                 ref={allowRegisterSwitchRef}
@@ -385,7 +401,9 @@ export function ShareDialog({
           ) : (
             // The URL is shown ONCE - it is never re-fetchable; closing the dialog loses it and a new one
             // must be minted (auth stores only its hash). D-23's consequence-at-the-point-of-choice rule.
-            <div style={{ display: "grid", gap: "0.5rem" }}>
+            // `minWidth: 0` for the same defensive reason as the sibling branch above - this block holds
+            // a minted URL, the longest unbroken string the dialog ever renders.
+            <div style={{ display: "grid", gap: "0.5rem", minWidth: 0 }}>
               <CopyLink previewUrl={invite.url} />
               <p className="little-link" style={{ minWidth: 0 }}>
                 Anyone who opens this link gets access. The first person to sign up keeps it.

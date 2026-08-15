@@ -338,4 +338,77 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
     await expect(page.locator("nav[aria-label=Breadcrumb]")).toBeVisible({ timeout: 20_000 });
     await expect(page.getByText("This file doesn't exist")).toHaveCount(0);
   });
+
+  // Review session 049, closing the second half of the QA1 hand-off's §0.3 rule ("every new component
+  // wrapping a mosni-* element needs BOTH tiers"). Round 2 added a wrapper for a brand-new element,
+  // `<mosni-switch>`, and shipped only the unit tier.
+  //
+  // That unit test (web/test/unit/switchChange.test.tsx) is a textbook case of the harness removing the
+  // only risk it exists to catch: `useSwitchChange` reads the HOST's own `checked` attribute on a bubbling
+  // `change`, which is correct ONLY IF the real mosni-switch reflects the user's click onto that attribute
+  // BEFORE the event reaches an ancestor. The unit fixture makes that true by hand
+  // (`el.setAttribute("checked", ""); el.dispatchEvent(...)`) - i.e. the test author supplies the exact
+  // behaviour under test, so it stays green no matter what the real element does. Same shape as the
+  // round-trip collation tests and the fabricated Authorization header this whole round exists to fix.
+  //
+  // It is not cosmetic: this switch is `allow_register`, and turning it off is D-23's shared WRITE
+  // identity. A switch that silently reports a stale value sends the wrong `allow_register` to auth.
+  test("the invite switch is a REAL upgraded <mosni-switch> and its click reaches React state (F4/F13, D-198)", async ({
+    page,
+    request,
+  }) => {
+    const sub = `user:e2e-switch-${randomUUID()}`;
+    const token = await mintToken(request, sub);
+    const name = `switch-ui-${randomUUID().slice(0, 8)}.txt`;
+    await withDb((conn) => seedPrivateFile(conn, { name, ownerSub: sub }));
+
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err) => pageErrors.push(err.message));
+
+    await page.route("**/sdk.js", (route) => route.abort());
+    await page.addInitScript(`
+      window.mosni = Object.assign(window.mosni ?? {}, {
+        user: () => ({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        token: () => ${JSON.stringify(token)},
+        onChange: (cb) => cb({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        login: () => {}, logout: () => {},
+        toast: () => {},
+      });
+    `);
+
+    await page.goto(`${FILES_ORIGIN}/`);
+    await expect(page.getByText(name, { exact: true }).first()).toBeVisible({ timeout: 20_000 });
+    await page.locator("mosni-dropdown", { has: page.locator("mosni-dropdown-item") }).first().click();
+    await page.locator("mosni-dropdown-item", { hasText: "Share" }).first().click();
+    await expect(page.getByText("Add people")).toBeVisible({ timeout: 20_000 });
+
+    // Prove the element genuinely UPGRADED before asserting anything about its behaviour - an inert
+    // unknown tag would render nothing and every assertion below would be about the wrong thing. The
+    // internal checkbox is built by mosni-switch's own render(), so it exists only if mosnicat.js ran.
+    const toggle = page.locator("mosni-modal[heading^=\"Share\"] mosni-switch").first();
+    await expect(toggle).toBeAttached({ timeout: 20_000 });
+    await expect(toggle.locator("input[type=checkbox]")).toBeAttached({ timeout: 20_000 });
+
+    // Defaults ON (D-198), and the consequence line is absent while it is.
+    await expect(toggle).toHaveAttribute("checked", /.*/);
+    await expect(page.getByText("Everyone who opens this link shares one identity")).toHaveCount(0);
+
+    // The actual contract under test: a real click on the real element must reach React state. If the
+    // hook's attribute-timing assumption is wrong, the click still toggles the element visually and this
+    // line never appears - which is exactly the failure no unit test in this repo can see.
+    await toggle.click();
+    const consequence = page.getByText("Everyone who opens this link shares one identity");
+    await expect(consequence).toBeVisible({ timeout: 10_000 });
+
+    // D-23 requires this text to be LEGIBLE at the point of choice, not merely present - and "present but
+    // clipped mid-word" is exactly how it shipped (review session 049, found in the D-79 screenshots: the
+    // invite block was a grid item at its default `min-width: auto`, so it outgrew the modal and the line
+    // rendered as "The link dies aft"). `scripts/visual-check.mjs`'s own overflow guard is blind to this,
+    // because it compares the DOCUMENT's scrollWidth to its clientWidth and a <dialog> clips its own
+    // content without widening the page. So the assertion has to be on the element itself.
+    const clipped = await consequence.evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+    expect(clipped, "D-23's consequence line must wrap, never clip").toBe(false);
+
+    expect(pageErrors, `uncaught page errors: ${pageErrors.join(", ")}`).toEqual([]);
+  });
 });
