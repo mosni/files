@@ -15,6 +15,7 @@ vi.mock("../../src/lib/share.ts", () => ({
 import { ShareDialog } from "../../src/components/ShareDialog.tsx";
 import { createInvite, fetchAccounts, fetchShareState, grantShare, revokeShare } from "../../src/lib/share.ts";
 import type { DirectoryAccount, InviteMinted, ShareState } from "../../../app/src/lib/shareContext.ts";
+import { INVITE_DURATION_STOPS } from "../../../app/src/lib/inviteDuration.ts";
 
 const fetchShareStateMock = vi.mocked(fetchShareState);
 const fetchAccountsMock = vi.mocked(fetchAccounts);
@@ -63,6 +64,15 @@ function toggleMosniSwitch(el: Element): void {
   el.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
+// E7-QA2 §B5: mosni-slider mirrors mosni-switch's reflect-then-bubble contract (D-207 - see
+// toggleMosniSwitch's comment above and sliderChange.ts's header). jsdom never registers the element so
+// there is nothing real to drive; this fixture reproduces the contract by hand: set the host's own
+// `value` attribute to the chosen stop INDEX, then dispatch a plain, bubbling `change`.
+function setMosniSlider(el: Element, index: number): void {
+  el.setAttribute("value", String(index));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
 describe("ShareDialog (E7/D-185)", () => {
   beforeEach(() => {
     container = document.createElement("div");
@@ -74,7 +84,12 @@ describe("ShareDialog (E7/D-185)", () => {
     revokeShareMock.mockReset().mockImplementation(async () => jsonResponse(SHAREABLE_STATE));
     createInviteMock
       .mockReset()
-      .mockImplementation(async () => jsonResponse({ url: "https://auth.mosni.dev/i/default", expiresAt: "x", sub: "link:x" }, 201));
+      .mockImplementation(async () =>
+        // E7-QA2 §B5 warning: "x" is not a parseable date - B4 now RENDERS expiresAt, so a junk default
+        // would make every test that doesn't override this mock assert against an "Invalid Date" rendering
+        // bug rather than the feature. A real ISO timestamp keeps that surface honest by default.
+        jsonResponse({ url: "https://auth.mosni.dev/i/default", expiresAt: "2026-08-13T00:00:00.000Z", sub: "link:x" }, 201),
+      );
     (window as unknown as { mosni: unknown }).mosni = {
       token: () => "test-token",
       onChange: (cb: (user: { sub: string } | null) => void) => cb({ sub: "google:viewer" }),
@@ -299,7 +314,7 @@ describe("ShareDialog (E7/D-185)", () => {
       inviteButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flush();
     });
-    expect(createInviteMock).toHaveBeenCalledWith("file", "f1", undefined, true);
+    expect(createInviteMock).toHaveBeenCalledWith("file", "f1", undefined, true, 3600);
   });
 
   it("turning the switch off shows D-23's consequence line and sends allowRegister: false", async () => {
@@ -313,7 +328,9 @@ describe("ShareDialog (E7/D-185)", () => {
       await flush();
     });
     expect(container.textContent).toContain("Everyone who opens this link shares one identity");
-    expect(container.textContent).toContain("The link dies after at most 24 hours");
+    // D-208: the lifetime moved out of this sentence into the always-visible duration sentence below.
+    expect(container.textContent).not.toContain("The link dies after at most 24 hours");
+    expect(container.textContent).toContain("This link expires after 1 hour.");
 
     const inviteButton = Array.from(container.querySelectorAll("button")).find((b) =>
       b.textContent?.includes("Invite someone without an account"),
@@ -322,7 +339,7 @@ describe("ShareDialog (E7/D-185)", () => {
       inviteButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flush();
     });
-    expect(createInviteMock).toHaveBeenCalledWith("file", "f1", undefined, false);
+    expect(createInviteMock).toHaveBeenCalledWith("file", "f1", undefined, false, 3600);
   });
 
   it("the invite URL renders once with the consequence line", async () => {
@@ -344,6 +361,115 @@ describe("ShareDialog (E7/D-185)", () => {
     const urlInput = container.querySelector(".copy-field-primary input") as HTMLInputElement;
     expect(urlInput.value).toBe("https://auth.mosni.dev/i/secretTok");
     expect(container.textContent).toContain("Anyone who opens this link gets access. The first person to sign up keeps it.");
+  });
+
+  // E7-QA2 §B5 (D-203..D-208): the invite duration slider.
+  describe("invite duration slider (E7-QA2)", () => {
+    it("defaults to 1 hour and sends ttlSeconds 3600 without touching the slider", async () => {
+      act(() => {
+        root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
+      });
+      await flush();
+
+      const slider = container.querySelector("mosni-slider")!;
+      expect(slider.getAttribute("value")).toBe("1");
+
+      const inviteButton = Array.from(container.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("Invite someone without an account"),
+      )!;
+      await act(async () => {
+        inviteButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await flush();
+      });
+      expect(createInviteMock).toHaveBeenCalledWith("file", "f1", undefined, true, 3600);
+    });
+
+    it("moving the slider to the last stop sends 7776000", async () => {
+      act(() => {
+        root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
+      });
+      await flush();
+
+      const slider = container.querySelector("mosni-slider")!;
+      await act(async () => {
+        setMosniSlider(slider, INVITE_DURATION_STOPS.length - 1);
+        await flush();
+      });
+
+      const inviteButton = Array.from(container.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("Invite someone without an account"),
+      )!;
+      await act(async () => {
+        inviteButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await flush();
+      });
+      expect(createInviteMock).toHaveBeenCalledWith("file", "f1", undefined, true, 7776000);
+    });
+
+    it("the duration sentence renders with the switch ON - the case that said nothing today", async () => {
+      act(() => {
+        root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
+      });
+      await flush();
+      const allowRegisterSwitch = container.querySelector("mosni-switch")!;
+      expect(allowRegisterSwitch.hasAttribute("checked")).toBe(true);
+      expect(container.textContent).toContain("This link expires after 1 hour.");
+    });
+
+    it("the duration sentence names the SELECTED stop, not a hardcoded 24 hours", async () => {
+      act(() => {
+        root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
+      });
+      await flush();
+
+      const slider = container.querySelector("mosni-slider")!;
+      const sixHoursIndex = INVITE_DURATION_STOPS.findIndex((stop) => stop.label === "6 hours");
+      await act(async () => {
+        setMosniSlider(slider, sixHoursIndex);
+        await flush();
+      });
+
+      expect(container.textContent).toContain("This link expires after 6 hours.");
+      expect(container.textContent).not.toContain("24 hours");
+    });
+
+    it("the shared-identity sentence still appears only when the switch is off (D-23 unchanged)", async () => {
+      act(() => {
+        root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
+      });
+      await flush();
+      expect(container.textContent).not.toContain("Everyone who opens this link shares one identity");
+
+      const allowRegisterSwitch = container.querySelector("mosni-switch")!;
+      await act(async () => {
+        toggleMosniSwitch(allowRegisterSwitch);
+        await flush();
+      });
+      expect(container.textContent).toContain("Everyone who opens this link shares one identity");
+    });
+
+    it("the minted panel shows the expiry the server returned", async () => {
+      const minted: InviteMinted = {
+        url: "https://auth.mosni.dev/i/expTok",
+        expiresAt: "2026-09-01T12:00:00.000Z",
+        sub: "link:exp",
+      };
+      createInviteMock.mockImplementation(async () => jsonResponse(minted, 201));
+      act(() => {
+        root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
+      });
+      await flush();
+
+      const inviteButton = Array.from(container.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("Invite someone without an account"),
+      )!;
+      await act(async () => {
+        inviteButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await flush();
+      });
+
+      expect(container.textContent).toContain(new Date(minted.expiresAt).toLocaleString());
+    });
   });
 
   it("closing and reopening the dialog does not resurface a previous invite URL", async () => {

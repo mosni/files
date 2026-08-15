@@ -39,6 +39,7 @@ export async function createInvite(
   id: string,
   canUpload?: boolean,
   allowRegister?: boolean,
+  ttlSeconds?: number,
 ): Promise<Response> {
   return fetch("/api/invites", {
     method: "POST",
@@ -48,6 +49,7 @@ export async function createInvite(
       id,
       ...(canUpload !== undefined ? { canUpload } : {}),
       ...(allowRegister !== undefined ? { allow_register: allowRegister } : {}),
+      ...(ttlSeconds !== undefined ? { ttl_seconds: ttlSeconds } : {}),
     }),
   });
 }

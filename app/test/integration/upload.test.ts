@@ -63,7 +63,6 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
       port: 0,
       deliverySigningSecret: "upload-test-secret",
       deliveryUrlTtlSeconds: 300,
-      inviteTtlSeconds: 86400,
     };
 
     app = Fastify({ logger: false });
