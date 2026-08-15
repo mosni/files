@@ -10,6 +10,7 @@ import { formatUploadDateTimeLocal } from "../../../app/src/lib/previewContext.t
 import type { Protection } from "../../../app/src/lib/protection.ts";
 import { languageFor, TEXT_FULL_MAX_BYTES } from "../../../app/src/lib/textPreview.ts";
 import { CopyLink } from "./CopyLink.tsx";
+import { TRUNCATION_STYLE, truncateDisplayName } from "../lib/displayName.ts";
 import { IconConfirmCancel } from "./InlineRename.tsx";
 import { authHeaders, patchFile, updatedContext } from "../lib/filePatch.ts";
 import { ManageControls } from "./ManageControls.tsx";
@@ -417,7 +418,16 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
             showAvatar/showByLine below fold the CLIENT-side load failure into the same gate. */}
         <p
           className="little-link"
-          style={{ display: "flex", alignItems: "center", gap: INLINE_ICON_GAP, margin: `${STACK_GAP} 0 0`, marginLeft: 0 }}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: INLINE_ICON_GAP,
+            margin: `${STACK_GAP} 0 0`,
+            marginLeft: 0,
+            // E7-QA1 round 3: without this the row cannot shrink, so the uploader name's own ellipsis
+            // never engages - a flex item's automatic minimum size is its content.
+            minWidth: 0,
+          }}
         >
           <span>uploaded {formatUploadDateTimeLocal(ctx.createdAt)}</span>
           {showByLine && (
@@ -433,7 +443,13 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
                   onError={() => setAvatarFailedUrl(ctx.uploaderAvatarUrl)}
                 />
               )}
-              {ctx.uploaderName !== null && <span>{ctx.uploaderName}</span>}
+              {/* E7-QA1 round 3: uploaderName is `name ?? sub` (D-168), so for a link account it is the raw
+                  37-character `link:<32 hex>` sub - unbreakable, and it stretched this line out of shape. */}
+              {ctx.uploaderName !== null && (
+                <span style={TRUNCATION_STYLE} title={ctx.uploaderName}>
+                  {truncateDisplayName(ctx.uploaderName)}
+                </span>
+              )}
             </>
           )}
         </p>

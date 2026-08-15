@@ -84,6 +84,24 @@ describe("initHeaderIdentity (live-testing addition, 2026-08-06)", () => {
     expect(target.textContent).toBe("Logged in as google:123");
   });
 
+  // E7-QA1 round 3 (Hannah): the sub fallback above is exactly the case that broke the header - a link
+  // account's sub is `link:` + a 32-char hex id, 37 unbreakable characters in a fixed-height bar. The CSS
+  // half of the fix is upstream in mosni-chrome (`.header > .little-link`); this is the string bound.
+  it("bounds a long link sub and keeps the full value on hover", async () => {
+    const sdk = installSdk();
+    initHeaderIdentity();
+    await flush();
+
+    const linkSub = "link:9f86d081884c4d1c9be011223344556677";
+    sdk.signIn({ sub: linkSub });
+    await flush();
+
+    const target = document.querySelector(".little-link")!;
+    expect(target.textContent).not.toContain(linkSub);
+    expect(target.textContent).toContain("\u2026");
+    expect(target.querySelector("span")!.title).toBe(linkSub);
+  });
+
   it("clears back to empty on sign-out", async () => {
     const sdk = installSdk();
     initHeaderIdentity();

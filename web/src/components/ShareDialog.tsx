@@ -15,6 +15,7 @@ import { createInvite, fetchAccounts, fetchShareState, grantShare, revokeShare }
 import { useModalClose } from "../lib/modalClose.ts";
 import { useSwitchChange } from "../lib/switchChange.ts";
 import { CopyLink } from "./CopyLink.tsx";
+import { TRUNCATION_STYLE, avatarInitial, truncateDisplayName } from "../lib/displayName.ts";
 
 declare module "react" {
   namespace JSX {
@@ -78,7 +79,14 @@ function avatarUrlFor(sub: string): string {
 
 // F3: a broken-image robustness wrapper, same pattern PreviewCard.tsx's own uploader avatar already uses -
 // on load failure, degrade to an initial/placeholder rather than the browser's broken-image icon.
-function GrantAvatar({ sub }: { sub: string }) {
+//
+// E7-QA1 round 3: this fallback was what Hannah was actually seeing - "a solid white or light gray circle"
+// for every avatar in the dialog. Two independent defects fed it. The image was blocked before it could
+// load (auth's /avatar/<sub> answered a 302 to Google's CDN, which this app's own CSP img-src does not
+// allow; fixed in mosni/auth by proxying the bytes), and the fallback itself named a token that does not
+// exist - mosni-chrome defines --mosni-surface/-body/-input/-hover/-selected, never --mosni-surface-2 - so
+// it painted its literal #eee fallback: a near-white circle on a #444 dark-theme surface.
+function GrantAvatar({ sub, name }: { sub: string; name: string | null }) {
   const [failed, setFailed] = useState(false);
   if (failed) {
     return (
@@ -88,7 +96,8 @@ function GrantAvatar({ sub }: { sub: string }) {
           width: 20,
           height: 20,
           borderRadius: "50%",
-          background: "var(--mosni-surface-2, #eee)",
+          background: "var(--mosni-surface-hover)",
+          color: "var(--mosni-text-soft)",
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
@@ -96,7 +105,7 @@ function GrantAvatar({ sub }: { sub: string }) {
           flexShrink: 0,
         }}
       >
-        {sub.slice(-1).toUpperCase()}
+        {avatarInitial(name ?? sub)}
       </span>
     );
   }
@@ -277,8 +286,10 @@ export function ShareDialog({
             <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "0.5rem" }}>
               {state.grants.map((grant) => (
                 <li key={grant.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
-                  <GrantAvatar sub={grant.sub} />
-                  <span style={{ flex: 1, minWidth: 0 }}>{grant.name ?? grant.sub}</span>
+                  <GrantAvatar sub={grant.sub} name={grant.name} />
+                  <span style={{ flex: 1, ...TRUNCATION_STYLE }} title={grant.name ?? grant.sub}>
+                    {truncateDisplayName(grant.name ?? grant.sub)}
+                  </span>
                   {grant.canUpload && <span className="badge">Upload</span>}
                   <button
                     type="button"
@@ -334,8 +345,10 @@ export function ShareDialog({
               ) : (
                 candidates.map((account) => (
                   <li key={account.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
-                    <GrantAvatar sub={account.sub} />
-                    <span style={{ flex: 1, minWidth: 0 }}>{account.name ?? account.sub}</span>
+                    <GrantAvatar sub={account.sub} name={account.name} />
+                    <span style={{ flex: 1, ...TRUNCATION_STYLE }} title={account.name ?? account.sub}>
+                      {truncateDisplayName(account.name ?? account.sub)}
+                    </span>
                     <button
                       type="button"
                       className="btn-ghost btn-sm"

@@ -207,6 +207,61 @@ describe("ShareDialog (E7/D-185)", () => {
     expect(container.textContent).not.toContain("Bob");
   });
 
+  // E7-QA1 round 3 (Hannah): "the username for link accounts is too long and breaks the layout in several
+  // places". A claimed invite's grant carries no `name` - auth's directory excludes link-bound subs (D-86),
+  // as buildShareState's own B3 comment says - so `grant.name ?? grant.sub` renders the raw
+  // `link:<32 hex>` sub: 37 characters with no wrap opportunity anywhere in it.
+  it("truncates a raw link sub in the grants list and keeps the full value on hover", async () => {
+    const linkSub = "link:9f86d081884c4d1c9be011223344556677";
+    fetchShareStateMock.mockImplementation(async () =>
+      jsonResponse({
+        ...SHAREABLE_STATE,
+        grants: [{ sub: linkSub, name: null, picture: null, canUpload: false }],
+      }),
+    );
+    act(() => {
+      root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
+    });
+    await flush();
+
+    const label = [...container.querySelectorAll("span")].find((el) => el.textContent?.startsWith("link:"))!;
+    expect(label).toBeDefined();
+    expect(label.textContent).not.toBe(linkSub);
+    expect(label.textContent!.endsWith("\u2026")).toBe(true);
+    // The untruncated sub stays reachable, and the ellipsis is real CSS rather than only a string cut.
+    expect(label.title).toBe(linkSub);
+    expect(label.style.textOverflow).toBe("ellipsis");
+    expect(label.style.minWidth).toBe("0px");
+  });
+
+  // The fallback circle Hannah actually saw: "a solid white or light gray circle". It named
+  // --mosni-surface-2, which mosni-chrome does not define (it has surface/-body/-input/-hover/-selected),
+  // so it painted its literal #eee fallback onto a #444 dark surface.
+  it("the broken-image fallback uses a real chrome token, not a nonexistent one", async () => {
+    fetchShareStateMock.mockImplementation(async () =>
+      jsonResponse({
+        ...SHAREABLE_STATE,
+        grants: [{ sub: "google:alice", name: "Alice", picture: null, canUpload: false }],
+      }),
+    );
+    act(() => {
+      root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
+    });
+    await flush();
+
+    const img = container.querySelector("img")!;
+    act(() => {
+      img.dispatchEvent(new Event("error"));
+    });
+
+    const circle = [...container.querySelectorAll("span")].find((el) => el.getAttribute("aria-hidden") === "true")!;
+    expect(circle).toBeDefined();
+    expect(circle.style.background).not.toContain("--mosni-surface-2");
+    expect(circle.style.background).toContain("--mosni-surface-hover");
+    // Taken from the front of the NAME, not the sub's trailing character.
+    expect(circle.textContent).toBe("A");
+  });
+
   // F5: mosni-chrome's `.field` class only supplies the label-to-input gap when the label itself carries
   // `.field-label` (confirmed by reading the served mosnicat.js CSS directly) - ProtectionControl.tsx
   // already gets this right, this label was just missing the class, and Hannah saw the two sit flush.

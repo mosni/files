@@ -17,6 +17,7 @@
 // the cleaner long-term fix if this grows past one line of text and an avatar.
 
 import type { VerifiedClaims } from "../../../app/src/lib/roles.ts";
+import { truncateDisplayName } from "./displayName.ts";
 
 const AUTH_ORIGIN = "https://auth.mosni.dev"; // matches lib/csp.ts's imgSrc entry and D-169's direct avatar link
 
@@ -55,7 +56,16 @@ function renderIdentity(target: HTMLElement, user: VerifiedClaims | null): void 
   avatar.addEventListener("error", () => avatar.remove(), { once: true });
   target.append(avatar);
 
-  target.append(displayNameFor(user));
+  // E7-QA1 round 3: displayNameFor falls back to the sub, which for a link account is `link:` + a 32-char
+  // hex id - 37 characters with no wrap opportunity, sitting in a fixed-height header. The CSS half of the
+  // fix lives upstream in mosni-chrome (`.header > .little-link` now has min-width:0 + ellipsis), since
+  // this slot's box is the chrome's to own; the cap here bounds the string itself. The untruncated name
+  // stays reachable on hover.
+  const name = displayNameFor(user);
+  const label = document.createElement("span");
+  label.textContent = truncateDisplayName(name);
+  label.title = name;
+  target.append(label);
 }
 
 /** Wires <mosni-header>'s right-side tagline slot to the signed-in identity. Never throws into main.tsx's
