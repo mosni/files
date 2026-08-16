@@ -146,6 +146,14 @@ const conn = await mysql.createConnection({
 
 const WRITER = { sub: "user:visual-check", name: "Hannah", roles: ["files:write"] };
 const NO_ROLE = { sub: "user:visual-check", name: "Hannah", roles: [] };
+// Review session 052 round 3, and the reason this constant has to exist. EVERY state in this file signed
+// in as "Hannah" or "Admin" - short, friendly names - so the header's identity slot never once rendered a
+// LONG one, and a 40-character `link:<uuid>` wrecking the top bar on a phone was invisible to all 86
+// screenshots while the check reported zero overflow. It is invisible for a second reason too: the
+// overflow guard compares the DOCUMENT's scrollWidth to its clientWidth, and a header that WRAPS to two
+// lines and clips vertically never widens the page at all. A claimed invite has no directory name, so
+// D-168's fallback renders the raw sub - this is what a real invitee actually sees on every page.
+const LINK_ACCOUNT = { sub: "link:5aec94e63ca99fe854cf493845d482a1b2c3d4e5f6", roles: [] };
 
 // Every page state session 010 touched, plus the ones D-70 and E3 introduced.
 const image = await seed(conn, {
@@ -385,6 +393,24 @@ const PAGES = [
     url: "/",
     note: "F5's third gating branch",
     init: signedInAs(NO_ROLE),
+  },
+  {
+    id: "header-identity-long-sub",
+    label: "Header - signed in as a link account (the longest identity the app can render)",
+    url: "/",
+    note: "E7-QA2 review round 3 (Hannah, from the deployed box). D-168 renders the raw `sub` when no name " +
+      "was captured, and since D-196 a claimed invite can be an uploader too - so the top bar shows a " +
+      "~40-character `link:<uuid>` on EVERY page. Check the whole HEADER, not just the text: the logo/title " +
+      "must not wrap or clip, the identity must stay on one line with an ellipsis, and the bar must be the " +
+      "same height it is in every other state. **Mobile is the state that matters** - this fitted fine at " +
+      "1280px and destroyed the header at 390px. Round 4 settled what the header does when it runs out of " +
+      "room, and each of these was a separate wrong answer before it was the right one: the header is ONE " +
+      "row at every width (it used to wrap and print the second row over its own purple border); the BRAND " +
+      "is never truncated (`HANNAH'S F...` is not an acceptable trade); the tagline is the only thing that " +
+      "shrinks and it stays hard RIGHT with a gap (when it shrank to nothing it butted against the brand " +
+      "and read as left-aligned); and below 480px the words `Logged in as` are dropped so the avatar and " +
+      "the name survive rather than the label eating them. Judge all four, not just the height.",
+    init: signedInAs(LINK_ACCOUNT),
   },
   { id: "preview-image", label: "Preview - image", url: `/f/${image.relPath}`, note: "<title> fix: must show the filename, not the bare site name" },
   {

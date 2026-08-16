@@ -168,7 +168,13 @@ test("a real authorized tus upload lands the bytes, and the returned link serves
   // X-Accel-Redirect hop. Under D-82 the disk name is the ORIGINAL filename, pinned forever, so a later
   // rename makes the two disagree permanently - the renameFile case below is what actually proves which
   // of the two is winning.
-  expect(direct.headers()["content-type"]).toBe("text/plain");
+  //
+  // ⚠ `; charset=utf-8` is part of the contract, not incidental: `contentTypeForRecord()` returns the
+  // literal `text/plain; charset=utf-8` for any is-text record, and the charset is what stops a browser
+  // from guessing an encoding for bytes it has been told not to interpret. Asserted in full for the same
+  // reason the ACAO above is - a looser check (`toContain("text/plain")`) would also pass on a bare
+  // `text/plain`, which is the value this stopped being five days before anyone noticed.
+  expect(direct.headers()["content-type"]).toBe("text/plain; charset=utf-8");
 });
 
 test("delivery's Content-Type follows the DISPLAY name after a rename, not the pinned disk name (AC5/D-90)", async ({
@@ -176,18 +182,29 @@ test("delivery's Content-Type follows the DISPLAY name after a rename, not the p
 }) => {
   const sub = `user:e2e-${randomUUID()}`;
   const token = await mintToken(request, sub);
-  const filename = `ct-${randomUUID()}.txt`;
-  const body = Buffer.from("content-type follows the display name");
+  const filename = `ct-${randomUUID()}.bin`;
+  // ⚠ BINARY bytes, and that is the whole reason this fixture exists. This test used to upload a `.txt`
+  // and rename it to an unknown extension, which stopped proving anything on 2026-08-11 (edf6158):
+  // `contentTypeForRecord()` now checks `record.isText` FIRST and returns `text/plain; charset=utf-8`
+  // unconditionally for a text-detected file, deliberately, so a rename can never talk the app into
+  // handing a renderable type to bytes a browser might interpret. An is-text record therefore answers
+  // `text/plain` no matter what it is called - the display name cannot decide anything, so a text fixture
+  // can no longer demonstrate D-90 at all. `isText` comes from the BYTES (lib/textDetect.ts), never the
+  // filename, so a leading NUL is what makes this record non-text and puts the display name back in
+  // charge. (The e2e tier is run at the end of a session rather than in `npm run verify`, which is how
+  // this sat red for five days: the security change was right, the test was simply left behind.)
+  const body = Buffer.from([0x00, 0x01, 0x02, 0x03, 0xff, 0xfe, 0x00, 0x42]);
 
   const { previewUrl, directUrl } = await completeUpload(request, token, filename, body);
 
-  // Uploaded as .txt -> text/plain, from both the app and the disk name. Nothing distinguishes them yet.
+  // `.bin` is not on mime.ts's allowlist, so the fallback type - and the disk name is `.bin` too, pinned
+  // forever by D-82. Nothing distinguishes app-decided from nginx-inferred yet.
   const before = await request.get(`https://dl.mosni.dev/${new URL(directUrl).pathname.replace(/^\//, "")}`);
   expect(before.status()).toBe(200);
-  expect(before.headers()["content-type"]).toBe("text/plain");
+  expect(before.headers()["content-type"]).toBe("application/octet-stream");
 
-  // Rename to an extension mime.ts does NOT know. The bytes never move (D-82), so the on-disk name is
-  // still ".txt" - if nginx were still the one deciding, this would stay text/plain.
+  // Rename to an extension mime.ts DOES know. The bytes never move (D-82), so the on-disk name is still
+  // `.bin` - if nginx were the one deciding from the file on disk, this would stay octet-stream.
   const ctx = await (
     await request.get(`${FILES_ORIGIN}/api/preview${new URL(previewUrl).pathname}`, {
       headers: { host: FILES_HOST, authorization: `Bearer ${token}` },
@@ -195,7 +212,7 @@ test("delivery's Content-Type follows the DISPLAY name after a rename, not the p
   ).json();
   const patched = await request.patch(`${FILES_ORIGIN}/api/files/${ctx.id}`, {
     headers: { host: FILES_HOST, authorization: `Bearer ${token}` },
-    data: { name: `ct-${randomUUID()}.unknownext` },
+    data: { name: `ct-${randomUUID()}.png` },
   });
   expect(patched.status()).toBe(200);
 
@@ -203,7 +220,10 @@ test("delivery's Content-Type follows the DISPLAY name after a rename, not the p
     `https://dl.mosni.dev/${new URL((await patched.json()).directUrl).pathname.replace(/^\//, "")}`,
   );
   expect(after.status()).toBe(200);
-  expect(after.headers()["content-type"]).toBe("application/octet-stream");
+  // A named type rather than the fallback, so this asserts the display name actually DECIDED rather than
+  // merely that the answer changed - `application/octet-stream` is what a lookup returns when it fails,
+  // and a test whose "after" value is the failure value cannot tell the two apart.
+  expect(after.headers()["content-type"]).toBe("image/png");
 });
 
 test("an upload larger than nginx's default body limit succeeds (the 413 regression Hannah hit)", async ({

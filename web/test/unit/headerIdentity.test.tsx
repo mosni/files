@@ -46,10 +46,23 @@ async function flush() {
   });
 }
 
+// jsdom ships no matchMedia, and the module treats "unknown" as the wide case on purpose - so without a
+// stub every test here would silently exercise only one of the two labels. Controlling it explicitly is
+// what lets both branches be asserted; `false` is the default so the pre-existing expectations, which all
+// read "Logged in as ...", keep meaning what they did.
+let matchMediaMatches = false;
+
 describe("initHeaderIdentity (live-testing addition, 2026-08-06)", () => {
   beforeEach(() => {
     document.body.innerHTML = '<mosni-header><div class="little-link"></div></mosni-header>';
     delete (window as unknown as { mosni?: unknown }).mosni;
+    matchMediaMatches = false;
+    (window as unknown as { matchMedia: unknown }).matchMedia = (query: string) => ({
+      matches: matchMediaMatches,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    });
   });
 
   afterEach(() => {
@@ -115,9 +128,48 @@ describe("initHeaderIdentity (live-testing addition, 2026-08-06)", () => {
     expect(nameEl!.style.textOverflow).toBe("ellipsis");
     expect(nameEl!.style.whiteSpace).toBe("nowrap");
     expect(nameEl!.style.overflow).toBe("hidden");
-    // text-overflow does nothing on an inline box with no width constraint.
-    expect(nameEl!.style.display).toBe("inline-block");
-    expect(nameEl!.style.maxWidth).not.toBe("");
+    // Review session 052 round 4. text-overflow does nothing on a box that cannot be squeezed below its
+    // own text, and a flex item's automatic minimum size IS its text - so `min-width: 0` is the single
+    // declaration that makes every other one above take effect. It is also the one a later edit is most
+    // likely to drop, because nothing looks wrong in the markup without it.
+    expect(nameEl!.style.minWidth).toBe("0px");
+    // The cap must not be viewport-relative any more, and this is not a cosmetic swap. Round 3 used
+    // `min(14rem, 34vw)` to guess the space left over; the header now shrinks the tagline for real, so
+    // the name truncates against what the brand actually left, and a vw guess fights that - at 360px it
+    // resolved wider than the container, so the container clipped first and ate the name whole, leaving
+    // a bare "Logged in as …". The remaining cap is only to stop a 40-char sub dominating a wide header.
+    expect(nameEl!.style.maxWidth).toBe("14rem");
+  });
+
+  // Review session 052 round 4 (Hannah: "it must not be a two line header", "the brand must never be
+  // truncated"). The header is one row at every width and the brand lockup does not shrink, so at 360px
+  // the tagline gets ~110px total - and "Logged in as " is ~85px of it. Rendering the words there costs
+  // the avatar and the name, i.e. all of the content. Below $bp-phone they are dropped.
+  it("drops the 'Logged in as' words at phone width, keeping the avatar and the name", async () => {
+    matchMediaMatches = true;
+    const sdk = installSdk();
+    initHeaderIdentity();
+    await flush();
+
+    sdk.signIn({ sub: "google:123", name: "Hannah" });
+    await flush();
+
+    const target = document.querySelector(".little-link")!;
+    expect(target.textContent).toBe("Hannah");
+    expect(target.querySelector("img"), "the avatar is content, not decoration - it must survive").not.toBeNull();
+    expect(target.querySelector<HTMLElement>("[data-identity-name]")!.textContent).toBe("Hannah");
+  });
+
+  it("keeps the 'Logged in as' words above the phone breakpoint", async () => {
+    matchMediaMatches = false;
+    const sdk = installSdk();
+    initHeaderIdentity();
+    await flush();
+
+    sdk.signIn({ sub: "google:123", name: "Hannah" });
+    await flush();
+
+    expect(document.querySelector(".little-link")!.textContent).toBe("Logged in as Hannah");
   });
 
   it("clears back to empty on sign-out", async () => {
