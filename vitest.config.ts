@@ -8,6 +8,9 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: "jsdom",
+    // E7.5: polyfills HTMLDialogElement.showModal()/close(), which jsdom does not implement - see the
+    // file's own header comment for why. Every @mosni/react <Modal> render needs this.
+    setupFiles: ["web/test/setup.ts"],
     // e2e/ holds Playwright specs (*.spec.ts), which register their own `test()` global via
     // @playwright/test - Vitest's default include pattern matches *.spec.ts too and tries to load them
     // as its own tests, which conflicts with Playwright's runner. Playwright tests run only via

@@ -54,23 +54,37 @@ async function flush() {
   });
 }
 
-// F4/F13: <mosni-switch> is an inert, unregistered custom element in jsdom - it never builds its own
-// internal checkbox, so there is nothing to `.click()`. This reproduces exactly the contract
-// lib/switchChange.ts's useSwitchChange hook relies on (see its own header comment): flip the host's OWN
-// `checked` attribute, then dispatch a plain, bubbling `change` - the same order a real mosni-switch
-// leaves things in by the time its bubble phase reaches an ancestor listener.
-function toggleMosniSwitch(el: Element): void {
-  el.toggleAttribute("checked", !el.hasAttribute("checked"));
-  el.dispatchEvent(new Event("change", { bubbles: true }));
+// E7.5 Wave D: <Modal> (@mosni/react) portals a real <dialog class="modal"> to document.body - it is
+// never a DOM descendant of the render `container`, so every assertion below that used to query
+// `container` now queries `document.body`. `<Switch>`/`<Slider>` render real DOM too (a real
+// <input type="checkbox">/<input type="range">), so they are driven the same way a real browser would:
+// `.click()` for a switch, setting the native `.value` setter + dispatching `change` for the slider.
+function modalDialog(): HTMLDialogElement | null {
+  return document.body.querySelector("dialog.modal");
 }
 
-// E7-QA2 §B5: mosni-slider mirrors mosni-switch's reflect-then-bubble contract (D-207 - see
-// toggleMosniSwitch's comment above and sliderChange.ts's header). jsdom never registers the element so
-// there is nothing real to drive; this fixture reproduces the contract by hand: set the host's own
-// `value` attribute to the chosen stop INDEX, then dispatch a plain, bubbling `change`.
-function setMosniSlider(el: Element, index: number): void {
-  el.setAttribute("value", String(index));
-  el.dispatchEvent(new Event("change", { bubbles: true }));
+function switchByLabel(label: string): HTMLInputElement {
+  const labelEl = Array.from(document.body.querySelectorAll("label.switch")).find((l) => l.textContent === label);
+  return labelEl!.querySelector('input[type="checkbox"]') as HTMLInputElement;
+}
+
+function canUploadSwitch(): HTMLInputElement {
+  return switchByLabel("Can upload into this collection");
+}
+
+function allowRegisterSwitch(): HTMLInputElement {
+  return switchByLabel("Let the recipient turn this into their own account");
+}
+
+function sliderInput(): HTMLInputElement {
+  return document.body.querySelector('input[type="range"]') as HTMLInputElement;
+}
+
+function setSlider(index: number): void {
+  const input = sliderInput();
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  setter.call(input, String(index));
+  input.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
 describe("ShareDialog (E7/D-185)", () => {
@@ -107,11 +121,11 @@ describe("ShareDialog (E7/D-185)", () => {
     act(() => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open={false} onClose={vi.fn()} />);
     });
-    const modal = container.querySelector("mosni-modal");
+    const modal = modalDialog();
     expect(modal).not.toBeNull();
-    // The footer Close button is real content projected into the modal's own DOM subtree, present
-    // regardless of `open` - the D-8 containment check, not an attribute-string comparison.
-    const closeButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Close");
+    // The footer Close button is real content, present regardless of `open` - the D-8 containment check,
+    // not an attribute-string comparison. @mosni/react's <Modal> renders it in a real `.modal-footer` div.
+    const closeButton = Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "Close");
     expect(closeButton).not.toBeUndefined();
     expect(modal!.contains(closeButton!)).toBe(true);
   });
@@ -124,10 +138,10 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
     });
     await flush();
-    expect(container.textContent).toContain("unlisted");
-    expect(container.textContent).toContain("anyone with the link can already open it");
-    expect(container.textContent).toContain("adds nothing"); // file wording: no upload half to mention
-    expect(container.querySelector("#share-picker-filter-f1")).not.toBeNull();
+    expect(document.body.textContent).toContain("unlisted");
+    expect(document.body.textContent).toContain("anyone with the link can already open it");
+    expect(document.body.textContent).toContain("adds nothing"); // file wording: no upload half to mention
+    expect(document.body.querySelector("#share-picker-filter-f1")).not.toBeNull();
     expect(fetchAccountsMock).toHaveBeenCalled();
   });
 
@@ -139,8 +153,8 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="collection" id="c1" objectLabel="Vacation" open onClose={vi.fn()} />);
     });
     await flush();
-    expect(container.textContent).toContain("public");
-    expect(container.textContent).toContain("only controls who can upload");
+    expect(document.body.textContent).toContain("public");
+    expect(document.body.textContent).toContain("only controls who can upload");
   });
 
   it("a PRIVATE object shows no informational note", async () => {
@@ -148,7 +162,7 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
     });
     await flush();
-    expect(container.textContent).not.toContain("anyone with the link can already open it");
+    expect(document.body.textContent).not.toContain("anyone with the link can already open it");
   });
 
   it("grant avatars render from auth.mosni.dev/avatar/<sub>, not a raw picture URL (F3)", async () => {
@@ -159,7 +173,7 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
     });
     await flush();
-    const img = container.querySelector("li img") as HTMLImageElement;
+    const img = document.body.querySelector("li img") as HTMLImageElement;
     expect(img).not.toBeNull();
     expect(img.src).toBe("https://auth.mosni.dev/avatar/google%3Abob");
     expect(img.src).not.toContain("googleusercontent");
@@ -174,14 +188,14 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
     });
     await flush();
-    const img = container.querySelector('img[src*="google%3Abob"]') as HTMLImageElement;
+    const img = document.body.querySelector('img[src*="google%3Abob"]') as HTMLImageElement;
     expect(img).not.toBeNull();
     await act(async () => {
       img.dispatchEvent(new Event("error"));
       await flush();
     });
-    expect(container.querySelector('img[src*="google%3Abob"]')).toBeNull();
-    expect(container.textContent).toContain("B"); // the placeholder's initial
+    expect(document.body.querySelector('img[src*="google%3Abob"]')).toBeNull();
+    expect(document.body.textContent).toContain("B"); // the placeholder's initial
   });
 
   it("shareable: true shows the picker and excludes the caller's own sub and already-granted subs", async () => {
@@ -195,7 +209,7 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
     });
     await flush();
-    const text = container.textContent ?? "";
+    const text = document.body.textContent ?? "";
     expect(text).toContain("Alice"); // candidate, not excluded
     expect(text).not.toContain("Me"); // the caller's own sub is excluded
     // Bob is already granted, so he must not appear a second time in the picker's candidate list -
@@ -208,18 +222,18 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
     });
     await flush();
-    expect(container.textContent).toContain("Alice");
-    expect(container.textContent).toContain("Bob");
+    expect(document.body.textContent).toContain("Alice");
+    expect(document.body.textContent).toContain("Bob");
 
-    const input = container.querySelector("#share-picker-filter-f1") as HTMLInputElement;
+    const input = document.body.querySelector("#share-picker-filter-f1") as HTMLInputElement;
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
       setter.call(input, "ali");
       input.dispatchEvent(new Event("input", { bubbles: true }));
       await flush();
     });
-    expect(container.textContent).toContain("Alice");
-    expect(container.textContent).not.toContain("Bob");
+    expect(document.body.textContent).toContain("Alice");
+    expect(document.body.textContent).not.toContain("Bob");
   });
 
   // F5: mosni-chrome's `.field` class only supplies the label-to-input gap when the label itself carries
@@ -231,7 +245,7 @@ describe("ShareDialog (E7/D-185)", () => {
     });
     await flush();
 
-    const label = Array.from(container.querySelectorAll("label")).find((l) => l.textContent === "Add people");
+    const label = Array.from(document.body.querySelectorAll("label")).find((l) => l.textContent === "Add people");
     expect(label?.className).toBe("field-label");
   });
 
@@ -244,16 +258,16 @@ describe("ShareDialog (E7/D-185)", () => {
     });
     await flush();
 
-    const addButtons = Array.from(container.querySelectorAll("button")).filter((b) => b.textContent === "Add");
+    const addButtons = Array.from(document.body.querySelectorAll("button")).filter((b) => b.textContent === "Add");
     await act(async () => {
       addButtons[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flush();
     });
     expect(grantShareMock).toHaveBeenCalledWith("file", "f1", "google:alice", undefined);
-    expect(container.textContent).toContain("Alice");
+    expect(document.body.textContent).toContain("Alice");
 
     revokeShareMock.mockImplementation(async () => jsonResponse({ ...SHAREABLE_STATE, grants: [] }));
-    const removeButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Remove")!;
+    const removeButton = Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "Remove")!;
     await act(async () => {
       removeButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flush();
@@ -269,13 +283,12 @@ describe("ShareDialog (E7/D-185)", () => {
     });
     await flush();
 
-    const canUploadSwitch = container.querySelector("mosni-switch")!;
     await act(async () => {
-      toggleMosniSwitch(canUploadSwitch);
+      canUploadSwitch().click();
       await flush();
     });
 
-    const addButtons = Array.from(container.querySelectorAll("button")).filter((b) => b.textContent === "Add");
+    const addButtons = Array.from(document.body.querySelectorAll("button")).filter((b) => b.textContent === "Add");
     await act(async () => {
       addButtons[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flush();
@@ -289,7 +302,7 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
     });
     await flush();
-    const addButtons = Array.from(container.querySelectorAll("button")).filter((b) => b.textContent === "Add");
+    const addButtons = Array.from(document.body.querySelectorAll("button")).filter((b) => b.textContent === "Add");
     await act(async () => {
       addButtons[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flush();
@@ -303,11 +316,10 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
     });
     await flush();
-    const allowRegisterSwitch = container.querySelector("mosni-switch")!;
-    expect(allowRegisterSwitch.hasAttribute("checked")).toBe(true);
-    expect(container.textContent).not.toContain("Everyone who opens this link shares one identity");
+    expect(allowRegisterSwitch().checked).toBe(true);
+    expect(document.body.textContent).not.toContain("Everyone who opens this link shares one identity");
 
-    const inviteButton = Array.from(container.querySelectorAll("button")).find((b) =>
+    const inviteButton = Array.from(document.body.querySelectorAll("button")).find((b) =>
       b.textContent?.includes("Invite someone without an account"),
     )!;
     await act(async () => {
@@ -322,17 +334,16 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
     });
     await flush();
-    const allowRegisterSwitch = container.querySelector("mosni-switch")!;
     await act(async () => {
-      toggleMosniSwitch(allowRegisterSwitch);
+      allowRegisterSwitch().click();
       await flush();
     });
-    expect(container.textContent).toContain("Everyone who opens this link shares one identity");
+    expect(document.body.textContent).toContain("Everyone who opens this link shares one identity");
     // D-208: the lifetime moved out of this sentence into the always-visible duration sentence below.
-    expect(container.textContent).not.toContain("The link dies after at most 24 hours");
-    expect(container.textContent).toContain("This link expires after 1 hour.");
+    expect(document.body.textContent).not.toContain("The link dies after at most 24 hours");
+    expect(document.body.textContent).toContain("This link expires after 1 hour.");
 
-    const inviteButton = Array.from(container.querySelectorAll("button")).find((b) =>
+    const inviteButton = Array.from(document.body.querySelectorAll("button")).find((b) =>
       b.textContent?.includes("Invite someone without an account"),
     )!;
     await act(async () => {
@@ -350,7 +361,7 @@ describe("ShareDialog (E7/D-185)", () => {
     });
     await flush();
 
-    const inviteButton = Array.from(container.querySelectorAll("button")).find((b) =>
+    const inviteButton = Array.from(document.body.querySelectorAll("button")).find((b) =>
       b.textContent?.includes("Invite someone without an account"),
     )!;
     await act(async () => {
@@ -358,9 +369,9 @@ describe("ShareDialog (E7/D-185)", () => {
       await flush();
     });
 
-    const urlInput = container.querySelector(".copy-field-primary input") as HTMLInputElement;
+    const urlInput = document.body.querySelector(".copy-field-primary input") as HTMLInputElement;
     expect(urlInput.value).toBe("https://auth.mosni.dev/i/secretTok");
-    expect(container.textContent).toContain("Anyone who opens this link gets access. The first person to sign up keeps it.");
+    expect(document.body.textContent).toContain("Anyone who opens this link gets access. The first person to sign up keeps it.");
   });
 
   // E7-QA2 §B5 (D-203..D-208): the invite duration slider.
@@ -371,10 +382,9 @@ describe("ShareDialog (E7/D-185)", () => {
       });
       await flush();
 
-      const slider = container.querySelector("mosni-slider")!;
-      expect(slider.getAttribute("value")).toBe("1");
+      expect(sliderInput().value).toBe("1");
 
-      const inviteButton = Array.from(container.querySelectorAll("button")).find((b) =>
+      const inviteButton = Array.from(document.body.querySelectorAll("button")).find((b) =>
         b.textContent?.includes("Invite someone without an account"),
       )!;
       await act(async () => {
@@ -390,13 +400,12 @@ describe("ShareDialog (E7/D-185)", () => {
       });
       await flush();
 
-      const slider = container.querySelector("mosni-slider")!;
       await act(async () => {
-        setMosniSlider(slider, INVITE_DURATION_STOPS.length - 1);
+        setSlider(INVITE_DURATION_STOPS.length - 1);
         await flush();
       });
 
-      const inviteButton = Array.from(container.querySelectorAll("button")).find((b) =>
+      const inviteButton = Array.from(document.body.querySelectorAll("button")).find((b) =>
         b.textContent?.includes("Invite someone without an account"),
       )!;
       await act(async () => {
@@ -406,30 +415,31 @@ describe("ShareDialog (E7/D-185)", () => {
       expect(createInviteMock).toHaveBeenCalledWith("file", "f1", undefined, true, 7776000);
     });
 
-    // Review session 052, defence in depth for the same trust boundary sliderChange.test.tsx guards. The
-    // hook now refuses to report a garbage index, so this should be unreachable through the hook - but the
-    // consequence of being wrong is a TypeError in React's RENDER phase, which unmounts the entire root
-    // (the white-screen class, three times over: D-8, session 021's mosni-tab, session 045's F0). A
-    // component whose failure mode is "the whole app disappears" does not get to rely on one caller
-    // upstream being careful, especially when `<mosni-slider>` is generic and its stop count and this
-    // app's array are two separate things that must agree forever.
-    it("an out-of-range duration index does not tear down the React root", async () => {
+    // Review session 052's original concern (an unvalidated string attribute silently selecting a wrong
+    // stop) cannot be reproduced through <Slider> at all any more: a native range input clamps its own
+    // value to [min, max] before React ever sees a change event, and <Slider>'s own `clampIndex` clamps
+    // again defensively. This asserts that double lock holds - driving the input past its max still leaves
+    // the dialog open and usable, never a torn-down root (D-8, session 021's mosni-tab, session 045's F0).
+    it("driving the range input past its max clamps rather than tearing down the React root", async () => {
       act(() => {
         root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
       });
       await flush();
 
-      const slider = container.querySelector("mosni-slider")!;
+      const input = sliderInput();
+      const max = Number(input.max);
       await act(async () => {
-        // Past the end of the stop list - what a drifted `stops` string would produce.
-        setMosniSlider(slider, INVITE_DURATION_STOPS.length + 5);
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+        setter.call(input, String(max + 50)); // the browser itself clamps this to `max`
+        input.dispatchEvent(new Event("change", { bubbles: true }));
         await flush();
       });
 
+      expect(Number(input.value)).toBeLessThanOrEqual(max);
       // The root survived and the dialog is still usable: the modal is still mounted and the picker is
-      // still there. A thrown render would have left `container` empty.
-      expect(container.querySelector("mosni-modal")).not.toBeNull();
-      expect(container.textContent).toContain("Add people");
+      // still there. A thrown render would have left `document.body` without either.
+      expect(modalDialog()).not.toBeNull();
+      expect(document.body.textContent).toContain("Add people");
     });
 
     it("the duration sentence renders with the switch ON - the case that said nothing today", async () => {
@@ -437,9 +447,8 @@ describe("ShareDialog (E7/D-185)", () => {
         root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
       });
       await flush();
-      const allowRegisterSwitch = container.querySelector("mosni-switch")!;
-      expect(allowRegisterSwitch.hasAttribute("checked")).toBe(true);
-      expect(container.textContent).toContain("This link expires after 1 hour.");
+      expect(allowRegisterSwitch().checked).toBe(true);
+      expect(document.body.textContent).toContain("This link expires after 1 hour.");
     });
 
     it("the duration sentence names the SELECTED stop, not a hardcoded 24 hours", async () => {
@@ -448,15 +457,14 @@ describe("ShareDialog (E7/D-185)", () => {
       });
       await flush();
 
-      const slider = container.querySelector("mosni-slider")!;
       const sixHoursIndex = INVITE_DURATION_STOPS.findIndex((stop) => stop.label === "6 hours");
       await act(async () => {
-        setMosniSlider(slider, sixHoursIndex);
+        setSlider(sixHoursIndex);
         await flush();
       });
 
-      expect(container.textContent).toContain("This link expires after 6 hours.");
-      expect(container.textContent).not.toContain("24 hours");
+      expect(document.body.textContent).toContain("This link expires after 6 hours.");
+      expect(document.body.textContent).not.toContain("24 hours");
     });
 
     it("the shared-identity sentence still appears only when the switch is off (D-23 unchanged)", async () => {
@@ -464,14 +472,13 @@ describe("ShareDialog (E7/D-185)", () => {
         root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
       });
       await flush();
-      expect(container.textContent).not.toContain("Everyone who opens this link shares one identity");
+      expect(document.body.textContent).not.toContain("Everyone who opens this link shares one identity");
 
-      const allowRegisterSwitch = container.querySelector("mosni-switch")!;
       await act(async () => {
-        toggleMosniSwitch(allowRegisterSwitch);
+        allowRegisterSwitch().click();
         await flush();
       });
-      expect(container.textContent).toContain("Everyone who opens this link shares one identity");
+      expect(document.body.textContent).toContain("Everyone who opens this link shares one identity");
     });
 
     it("the minted panel shows the expiry the server returned", async () => {
@@ -486,7 +493,7 @@ describe("ShareDialog (E7/D-185)", () => {
       });
       await flush();
 
-      const inviteButton = Array.from(container.querySelectorAll("button")).find((b) =>
+      const inviteButton = Array.from(document.body.querySelectorAll("button")).find((b) =>
         b.textContent?.includes("Invite someone without an account"),
       )!;
       await act(async () => {
@@ -494,7 +501,7 @@ describe("ShareDialog (E7/D-185)", () => {
         await flush();
       });
 
-      expect(container.textContent).toContain(new Date(minted.expiresAt).toLocaleString());
+      expect(document.body.textContent).toContain(new Date(minted.expiresAt).toLocaleString());
     });
   });
 
@@ -508,12 +515,12 @@ describe("ShareDialog (E7/D-185)", () => {
     });
     await flush();
     const inviteButton = () =>
-      Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Invite someone"))!;
+      Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent?.includes("Invite someone"))!;
     await act(async () => {
       inviteButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await flush();
     });
-    expect((container.querySelector(".copy-field-primary input") as HTMLInputElement).value).toContain("firstTok");
+    expect((document.body.querySelector(".copy-field-primary input") as HTMLInputElement).value).toContain("firstTok");
 
     act(() => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open={false} onClose={vi.fn()} />);
@@ -522,22 +529,21 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={vi.fn()} />);
     });
     await flush();
-    expect(container.querySelector(".copy-field-primary input")).toBeNull();
+    expect(document.body.querySelector(".copy-field-primary input")).toBeNull();
   });
 
-  // E7-QA1 §C2/F7: the same self-close hazard as FileBrowser's Delete/Move modals - a real mosni-modal can
-  // close itself (backdrop/ESC/its own control), leaving React's `open` prop stuck true. React serialises
-  // `open={true}` as an empty-string `open` attribute and `open={false}` as no attribute at all (verified
-  // against this exact custom-element declaration), so `hasAttribute("open")` is the DOM-level ground
-  // truth here, independent of jsdom's lack of a real MosniModal. Proven red-then-green: reverting
-  // ShareDialog's `ref={modalRef}` wiring makes this fail, since nothing listens for the dispatched event.
-  it("reopens after closing itself (dispatching `close` on the element, F7)", async () => {
+  // E7-QA1 §C2/F7: the same self-close hazard as FileBrowser's Delete/Move modals - a real dialog can
+  // close itself (backdrop click, ESC, its own close button), leaving React's `open` prop stuck true.
+  // @mosni/react's <Modal> wires its own `onClose` straight to the dialog's native `close` event, so
+  // dispatching that event directly reproduces exactly what a self-close does. Proven red-then-green:
+  // reverting ShareDialog's `onClose={onClose}` wiring on <Modal> makes this fail.
+  it("reopens after closing itself (dispatching `close` on the dialog, F7)", async () => {
     const onClose = vi.fn();
     act(() => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={onClose} />);
     });
     await flush();
-    const modal = container.querySelector("mosni-modal")!;
+    const modal = modalDialog()!;
     expect(modal.hasAttribute("open")).toBe(true);
 
     await act(async () => {
@@ -555,11 +561,13 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog type="file" id="f1" objectLabel="photo.jpg" open onClose={onClose} />);
     });
     await flush();
-    expect(container.querySelector("mosni-modal")!.hasAttribute("open")).toBe(true);
+    expect(modalDialog()!.hasAttribute("open")).toBe(true);
   });
 
   // H7 (working-conventions.md §8): a wrapper around a mosni-* element must force a re-render with
-  // unchanged props and re-assert - the element still present, still populated, still sized.
+  // unchanged props and re-assert - the element still present, still populated, still sized. E7.5: this
+  // now guards <Modal> itself, a first-party dependency rather than a project-side wrapper, but the same
+  // re-render lifecycle risk applies to any element driven by an effect (D-164's exact family).
   it("H7: a second render with unchanged props leaves the modal element present and populated", async () => {
     const props = { type: "file" as const, id: "f1", objectLabel: "photo.jpg", open: true, onClose: vi.fn() };
     act(() => {
@@ -570,9 +578,9 @@ describe("ShareDialog (E7/D-185)", () => {
       root.render(<ShareDialog {...props} />);
     });
     await flush();
-    const modal = container.querySelector("mosni-modal");
+    const modal = modalDialog();
     expect(modal).not.toBeNull();
-    expect(modal?.getAttribute("heading")).toBe('Share "photo.jpg"');
-    expect(container.textContent).toContain("Alice");
+    expect(document.body.querySelector(".modal-heading")?.textContent).toBe('Share "photo.jpg"');
+    expect(document.body.textContent).toContain("Alice");
   });
 });

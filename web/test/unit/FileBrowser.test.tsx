@@ -65,6 +65,16 @@ function rowActionTrigger(row: Element): Element | null {
   return row.querySelector('[aria-haspopup="menu"]');
 }
 
+// E7.5 Wave D: <Modal> (@mosni/react) portals a real <dialog class="modal"> to document.body - it is
+// never a DOM descendant of the row that opened it (every row's Delete/Move modal is always mounted,
+// per the D-8 class rule, so several dialogs can coexist in the document at once). Found by its heading
+// text, the same way the row actions above are found by their visible text rather than an attribute.
+function modalByHeading(prefix: string): HTMLDialogElement | undefined {
+  return Array.from(document.body.querySelectorAll("dialog.modal")).find((d) =>
+    d.querySelector(".modal-heading")?.textContent?.startsWith(prefix),
+  ) as HTMLDialogElement | undefined;
+}
+
 // E4.1 Wave E findings (C3): a real MouseEvent so isPlainLeftClick's modifier/button checks have
 // something to read - jsdom's synthetic click() doesn't set these unless asked to.
 function clickWith(el: Element, init: Partial<MouseEventInit> = {}) {
@@ -697,10 +707,12 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       expect.anything(),
     );
     // D-88's pluralization fix: 3 collections total means 2 OTHER nested ones, correctly plural.
-    expect(container.textContent).toContain("2 nested collections");
-    expect(container.textContent).toContain("5 files");
+    // E7.5 Wave D: <Modal> portals to document.body, so its content is no longer a DOM descendant of the
+    // row that opened it.
+    expect(document.body.textContent).toContain("2 nested collections");
+    expect(document.body.textContent).toContain("5 files");
 
-    const confirmButton = Array.from(row.querySelectorAll("button")).find((b) => b.textContent === "Yes, delete") as HTMLButtonElement;
+    const confirmButton = Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "Yes, delete") as HTMLButtonElement;
     await act(async () => {
       confirmButton.click();
       await flush();
@@ -730,10 +742,10 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     await selectRowAction(row, "delete");
 
     // collectionCount 2 total = 1 OTHER nested collection (singular), fileCount 1 (singular).
-    expect(container.textContent).toContain("1 nested collection ");
-    expect(container.textContent).not.toContain("1 nested collections");
-    expect(container.textContent).toContain("1 file ");
-    expect(container.textContent).not.toContain("1 files");
+    expect(document.body.textContent).toContain("1 nested collection ");
+    expect(document.body.textContent).not.toContain("1 nested collections");
+    expect(document.body.textContent).toContain("1 file ");
+    expect(document.body.textContent).not.toContain("1 files");
   });
 
   it("clicking the Browse tab switches scope and resets to the root", async () => {
@@ -1509,11 +1521,13 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       expect(rowActionValues(strangerRow)).not.toContain("move");
     });
 
-    // Finding 11 / D-8: MoveModal used to render NO children while closed and only add them once `open`
-    // flips true - the same class of bug as mosni-code wiping JSX children and the mosni-tab crash. The
-    // fix renders the modal's children unconditionally and toggles only the `open` attribute, exactly as
-    // the Delete modal beside it already does.
-    it("the Move modal's destination select is a DOM descendant of the mosni-modal element (finding 11, D-8)", async () => {
+    // Finding 11 / D-8, superseded by E7.5 Wave D: MoveModal used to render NO children while closed and
+    // only add them once `open` flipped true - the same class of bug as mosni-code wiping JSX children and
+    // the mosni-tab crash. <Modal> (@mosni/react) makes the whole class moot for this call site (it renders
+    // a real <dialog> React itself owns and portals to document.body), but the containment guarantee this
+    // test protects - the destination select renders INSIDE the modal, not loose in the table cell - is
+    // still worth asserting directly rather than assumed from the migration alone.
+    it("the Move modal's destination select is a DOM descendant of the modal dialog (finding 11, D-8)", async () => {
       installMosni();
       vi.stubGlobal(
         "fetch",
@@ -1532,12 +1546,12 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       await selectRowAction(row, "move");
       await flush();
 
-      const modal = container.querySelector('mosni-modal[heading^="Move"]');
-      expect(modal).not.toBeNull();
-      const select = container.querySelector("select");
+      const modal = modalByHeading("Move");
+      expect(modal).not.toBeUndefined();
+      const select = document.body.querySelector("select");
       expect(select).not.toBeNull();
-      // Not merely "select is somewhere in the document" - it must be a real descendant of the modal
-      // element itself, or it has landed in the table cell instead (the bug's actual production symptom).
+      // Not merely "select is somewhere in the document" - it must be a real descendant of the dialog
+      // itself, or it has landed loose in the document instead (the bug's actual production symptom).
       expect(modal!.contains(select)).toBe(true);
     });
 
@@ -1545,7 +1559,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     // shows up on the NEXT render - D-8, D-112 and D-164 are all this shape. Forces one unrelated re-render
     // (root.render() of an equivalent tree, the createRoot equivalent of `rerender(<Same />)`) while the
     // modal is open, and re-asserts containment rather than trusting the mount-time assertion above.
-    it("the Move modal's destination select stays inside mosni-modal after an unrelated re-render (H7)", async () => {
+    it("the Move modal's destination select stays inside the modal dialog after an unrelated re-render (H7)", async () => {
       installMosni();
       vi.stubGlobal(
         "fetch",
@@ -1564,7 +1578,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       await selectRowAction(row, "move");
       await flush();
 
-      expect(container.querySelector('mosni-modal[heading^="Move"]')!.contains(container.querySelector("select"))).toBe(true);
+      expect(modalByHeading("Move")!.contains(document.body.querySelector("select"))).toBe(true);
 
       // The unrelated re-render: same element tree, same props from this test's own point of view -
       // exactly what a parent-driven refetch/reload elsewhere on the page would trigger while this modal
@@ -1574,23 +1588,23 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       });
       await flush();
 
-      const modal = container.querySelector('mosni-modal[heading^="Move"]');
-      const select = container.querySelector("select");
-      expect(modal).not.toBeNull();
+      const modal = modalByHeading("Move");
+      const select = document.body.querySelector("select");
+      expect(modal).not.toBeUndefined();
       expect(select).not.toBeNull();
       expect(modal!.contains(select)).toBe(true);
     });
 
-    // E7-QA1 §C2/C3 (F7): a real mosni-modal can close itself (backdrop/ESC/its own control) without React
-    // knowing, leaving `open` stuck true so a later re-open is a no-op. React serialises `open={true}` as
-    // an empty-string `open` attribute and `open={false}` as no attribute at all (verified against this
-    // exact custom-element declaration) - `hasAttribute("open")` is therefore the DOM-level ground truth for
-    // whether React still believes the modal is open, independent of jsdom's lack of a real MosniModal.
+    // E7-QA1 §C2/C3 (F7): a real dialog can close itself (backdrop/ESC/its own close button) without React
+    // knowing, leaving `open` stuck true so a later re-open is a no-op. @mosni/react's <Modal> wires its
+    // own `onClose` straight to the dialog's native `close` event, so dispatching that event directly
+    // reproduces exactly what a self-close does - `hasAttribute("open")` is the DOM-level ground truth,
+    // reflecting the real `HTMLDialogElement.open` IDL attribute.
     //
-    // Proven red-then-green, per the hand-off: reverting the `ref={...}` wiring on ANY of these four
-    // modals makes its own test in this block fail, since nothing would be listening for the dispatched
-    // `close` event and the `open` attribute would stay present.
-    it("the Move modal reopens after closing itself (dispatching `close` on the element, F7)", async () => {
+    // Proven red-then-green, per the hand-off: reverting the `onClose={...}` wiring on ANY of these four
+    // modals makes its own test in this block fail, since nothing would react to the dispatched `close`
+    // event and the `open` attribute would stay present.
+    it("the Move modal reopens after closing itself (dispatching `close` on the dialog, F7)", async () => {
       installMosni();
       vi.stubGlobal(
         "fetch",
@@ -1608,10 +1622,10 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       const row = container.querySelector("[data-row-id]")!;
       await selectRowAction(row, "move");
       await flush();
-      const modal = container.querySelector('mosni-modal[heading^="Move"]')!;
+      const modal = modalByHeading("Move")!;
       expect(modal.hasAttribute("open")).toBe(true);
 
-      // The element closes ITSELF - not via React state (nothing calls setMoveOpen here).
+      // The dialog closes ITSELF - not via React state (nothing calls setMoveOpen here).
       await act(async () => {
         modal.dispatchEvent(new Event("close"));
         await flush();
@@ -1621,7 +1635,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       // Re-opening via the same row action must work again - this is what F7 broke.
       await selectRowAction(row, "move");
       await flush();
-      expect(container.querySelector('mosni-modal[heading^="Move"]')!.hasAttribute("open")).toBe(true);
+      expect(modalByHeading("Move")!.hasAttribute("open")).toBe(true);
     });
 
     it("a file row's Delete modal reopens after closing itself", async () => {
@@ -1635,7 +1649,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
 
       const row = container.querySelector("[data-row-id]")!;
       await selectRowAction(row, "delete");
-      const modal = row.querySelector('mosni-modal[heading^="Delete"]')!;
+      const modal = modalByHeading("Delete")!;
       expect(modal.hasAttribute("open")).toBe(true);
 
       await act(async () => {
@@ -1645,7 +1659,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       expect(modal.hasAttribute("open")).toBe(false);
 
       await selectRowAction(row, "delete");
-      expect(row.querySelector('mosni-modal[heading^="Delete"]')!.hasAttribute("open")).toBe(true);
+      expect(modalByHeading("Delete")!.hasAttribute("open")).toBe(true);
     });
 
     it("a collection row's Delete modal reopens after closing itself", async () => {
@@ -1667,7 +1681,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
 
       const row = container.querySelector("[data-row-id]")!;
       await selectRowAction(row, "delete");
-      const modal = row.querySelector('mosni-modal[heading^="Delete"]')!;
+      const modal = modalByHeading("Delete")!;
       expect(modal.hasAttribute("open")).toBe(true);
 
       await act(async () => {
@@ -1677,7 +1691,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       expect(modal.hasAttribute("open")).toBe(false);
 
       await selectRowAction(row, "delete");
-      expect(row.querySelector('mosni-modal[heading^="Delete"]')!.hasAttribute("open")).toBe(true);
+      expect(modalByHeading("Delete")!.hasAttribute("open")).toBe(true);
     });
 
     it("the picker lists Root plus the caller's collections; confirming PATCHes collectionId and reloads", async () => {
@@ -1699,7 +1713,9 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       await selectRowAction(row, "move");
       await flush();
 
-      const select = container.querySelector("select") as HTMLSelectElement;
+      // E7.5 Wave D: <Modal> portals to document.body, so its content is no longer a DOM descendant of
+      // `container`.
+      const select = document.body.querySelector("select") as HTMLSelectElement;
       expect(Array.from(select.options).map((o) => ({ value: o.value, text: o.textContent }))).toEqual([
         { value: "", text: "Root" },
         { value: "dest-1", text: "Vacation" },
@@ -1713,7 +1729,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
 
       // E7.5 Wave C: the row's "Move" dropdown item is now a real <button role="menuitem"> too, so a
       // bare textContent match is ambiguous - exclude it to reach the modal's own confirm button.
-      const confirmButton = Array.from(container.querySelectorAll("button")).find(
+      const confirmButton = Array.from(document.body.querySelectorAll("button")).find(
         (b) => b.textContent === "Move" && b.getAttribute("role") !== "menuitem",
       )!;
       await act(async () => {
@@ -1747,9 +1763,10 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       await selectRowAction(row, "move");
       await flush();
 
-      // E7.5 Wave C: the row's "Move" dropdown item is now a real <button role="menuitem"> too, so a
-      // bare textContent match is ambiguous - exclude it to reach the modal's own confirm button.
-      const confirmButton = Array.from(container.querySelectorAll("button")).find(
+      // E7.5 Wave C/D: the row's "Move" dropdown item is a real <button role="menuitem">, and <Modal>
+      // portals its confirm button to document.body - both need the same textContent match, and only the
+      // menuitem exclusion disambiguates them.
+      const confirmButton = Array.from(document.body.querySelectorAll("button")).find(
         (b) => b.textContent === "Move" && b.getAttribute("role") !== "menuitem",
       )!;
       await act(async () => {

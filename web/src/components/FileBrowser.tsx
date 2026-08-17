@@ -29,7 +29,7 @@
 // a client-side-only placeholder row (C10, D-118) instead of a permanent form.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { Dropdown, DropdownItem, Tab, Tabs } from "@mosni/react";
+import { Dropdown, DropdownItem, Modal, Tab, Tabs } from "@mosni/react";
 import { can, isSuperuser, type Claims } from "../../../app/src/lib/roles.ts";
 import type { Protection, VisibilityReason } from "../../../app/src/lib/protection.ts";
 import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../../../app/src/lib/browseContext.ts";
@@ -41,7 +41,6 @@ import { collectArchiveEntries, downloadArchive, isArchiveSupported, type Archiv
 import { pluralize } from "../lib/format.ts";
 import { isPlainLeftClick, pathnameOf, tokenOf } from "../lib/links.ts";
 import { upsertJob, useReloadSignal } from "../lib/jobs.ts";
-import { useModalClose } from "../lib/modalClose.ts";
 import { DropZone } from "./DropZone.tsx";
 import { IconConfirmCancel, RenameInput } from "./InlineRename.tsx";
 import { ProtectionControl } from "./ProtectionControl.tsx";
@@ -145,20 +144,28 @@ function MoveModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  // Finding 11 / D-8 (E5.1 live-testing): always render the children and toggle only `open`, exactly as
-  // the Delete modal immediately below already does. A conditionally-rendered custom-element child is
-  // not safe in this design system - React keeps the same DOM element across the toggle and appends
-  // children AFTER it has already connected, so a real mosni-modal never projects them into its dialog
-  // and they land wherever this component sits in the page instead (see technical-baseline.md's
-  // custom-element guidance).
-  //
-  // E7-QA1 §C2 (F7): a real mosni-modal can close itself (backdrop/ESC/its own control) without React
-  // knowing, leaving `open` stuck true so a later setMoveOpen(true) is a no-op and the modal never
-  // reopens. onCancel already does exactly what a self-close should (resets moveOpen to false with no
-  // move applied), so it doubles as the close handler here.
-  const modalRef = useModalClose(onCancel);
+  // E7.5 Wave D: <Modal> (@mosni/react) - a real <dialog> React owns and portals to document.body, closing
+  // both hazards this used to guard against: the D-8 class (a real mosni-modal took its light-DOM children
+  // on connect, so React's stale parent references crashed the whole root on any later child swap) and the
+  // self-close desync (E7-QA1 §C2/F7: a real mosni-modal could close itself - backdrop/ESC/its own control
+  // - without React knowing, leaving `open` stuck true). <Modal>'s own `onClose` fires from the dialog's
+  // native `close` event, so `onCancel` wired there covers both a Cancel click and a self-close identically.
   return (
-    <mosni-modal ref={modalRef} heading={`Move "${itemName}"`} open={open}>
+    <Modal
+      open={open}
+      heading={`Move "${itemName}"`}
+      onClose={onCancel}
+      footer={
+        <>
+          <button type="button" className="btn-ghost" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="btn" onClick={onConfirm}>
+            Move
+          </button>
+        </>
+      }
+    >
       <div className="field" style={{ marginBottom: 0 }}>
         <label htmlFor={`move-destination-${itemName}`}>Destination</label>
         <select
@@ -174,13 +181,7 @@ function MoveModal({
           ))}
         </select>
       </div>
-      <button slot="footer" type="button" className="btn-ghost" onClick={onCancel}>
-        Cancel
-      </button>
-      <button slot="footer" type="button" className="btn" onClick={onConfirm}>
-        Move
-      </button>
-    </mosni-modal>
+    </Modal>
   );
 }
 
@@ -280,9 +281,6 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
   const [moveDestination, setMoveDestination] = useState("");
   const [moveCollections, setMoveCollections] = useState<CollectionOption[]>([]);
   const [moveCollectionsLoaded, setMoveCollectionsLoaded] = useState(false);
-  // E7-QA1 §C2 (F7): this row's own Delete modal, self-closable via backdrop/ESC - see MoveModal's
-  // comment for why the fix is the same shape everywhere.
-  const deleteModalRef = useModalClose(() => setDeleteOpen(false));
   const manage = canManage(row.reason, user);
   const mayDelete = canDelete(row.reason, user);
 
@@ -414,15 +412,23 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
               onDeleteSelected={() => setDeleteOpen(true)}
             />
           )}
-          <mosni-modal ref={deleteModalRef} heading={`Delete "${row.name}"?`} open={deleteOpen}>
+          <Modal
+            open={deleteOpen}
+            heading={`Delete "${row.name}"?`}
+            onClose={() => setDeleteOpen(false)}
+            footer={
+              <>
+                <button type="button" className="btn-ghost" onClick={() => setDeleteOpen(false)}>
+                  Cancel
+                </button>
+                <button type="button" className="btn-danger" onClick={() => void confirmDelete()}>
+                  Yes, delete
+                </button>
+              </>
+            }
+          >
             <p>This can&apos;t be undone.</p>
-            <button slot="footer" type="button" className="btn-ghost" onClick={() => setDeleteOpen(false)}>
-              Cancel
-            </button>
-            <button slot="footer" type="button" className="btn-danger" onClick={() => void confirmDelete()}>
-              Yes, delete
-            </button>
-          </mosni-modal>
+          </Modal>
           <MoveModal
             itemName={row.name}
             open={moveOpen}
@@ -472,12 +478,12 @@ function CollectionRow({
   const [moveDestination, setMoveDestination] = useState("");
   const [moveCollections, setMoveCollections] = useState<CollectionOption[]>([]);
   const [moveCollectionsLoaded, setMoveCollectionsLoaded] = useState(false);
-  // E7-QA1 §C2 (F7): mirrors the Cancel button's own close handling below (resets deleteOpen AND the
-  // dry-run pending count together).
-  const deleteModalRef = useModalClose(() => {
+  // E7-QA1 §C2 (F7): shared by <Modal>'s onClose and the Cancel button below - resets deleteOpen AND the
+  // dry-run pending count together, whether dismissed by the button, backdrop, or ESC.
+  function closeDeleteModal() {
     setDeleteOpen(false);
     setPending(null);
-  });
+  }
   const manage = canManage(row.reason, user);
   const mayDelete = canDelete(row.reason, user);
 
@@ -617,31 +623,27 @@ function CollectionRow({
               onDeleteSelected={() => void requestDelete()}
             />
           )}
-          <mosni-modal
-            ref={deleteModalRef}
-            heading={`Delete "${row.name}"?`}
+          <Modal
             open={deleteOpen}
+            heading={`Delete "${row.name}"?`}
+            onClose={closeDeleteModal}
+            footer={
+              <>
+                <button type="button" className="btn-ghost" onClick={closeDeleteModal}>
+                  Cancel
+                </button>
+                <button type="button" className="btn-danger" onClick={() => void confirmDelete()}>
+                  Yes, delete
+                </button>
+              </>
+            }
           >
             <p>
               {pending !== null && pending.collectionCount > 1 && `${pluralize(pending.collectionCount - 1, "nested collection")} and `}
               {pending !== null && pending.fileCount > 0 && `${pluralize(pending.fileCount, "file")} will also be deleted. `}
               This can&apos;t be undone.
             </p>
-            <button
-              slot="footer"
-              type="button"
-              className="btn-ghost"
-              onClick={() => {
-                setDeleteOpen(false);
-                setPending(null);
-              }}
-            >
-              Cancel
-            </button>
-            <button slot="footer" type="button" className="btn-danger" onClick={() => void confirmDelete()}>
-              Yes, delete
-            </button>
-          </mosni-modal>
+          </Modal>
           <MoveModal
             itemName={row.name}
             open={moveOpen}
