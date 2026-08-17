@@ -228,19 +228,21 @@ test("a can_upload-only grantee (no files:write role) can upload into a shared c
 // shipped with NONE, so acceptance criteria 5, 9, 10, 14, 15 and 19 - the entire dialog - were never once
 // opened in a browser by any automated tier.
 //
-// It needed to be THIS test specifically, not just any browser test. The crash lives in the seam between
-// React and a real registered custom element: mosni-chrome's MosniModal MOVES its light-DOM children into
-// a <dialog> it builds (`takeSlot`/`takeDefault` call `child.remove()`), so React's recorded parent for
-// those nodes goes stale and the next swap of one throws NotFoundError in React's commit phase, tearing
-// down the whole root. In every test that stubs or never loads mosnicat.js, `<mosni-modal>` is an inert
-// unknown element, children stay exactly where React put them, and the bug cannot exist.
+// The original crash lived in the seam between React and a real registered custom element: mosni-chrome's
+// MosniModal MOVED its light-DOM children into a <dialog> it built (`takeSlot`/`takeDefault` called
+// `child.remove()`), so React's recorded parent for those nodes went stale and the next swap of one threw
+// NotFoundError in React's commit phase, tearing down the whole root. Same class as session 021's
+// production `mosni-tab label` crash.
 //
-// This is the SAME class as session 021's production `mosni-tab label` crash, and browse.spec.ts's
-// "real mosni-chrome integration" block is the harness that was built for it - E7 simply never extended
-// that pattern to the component it added. Hence the identical shape here: ignoreHTTPSErrors so the REAL
-// ui.mosni.dev/mosnicat.js loads through the sandbox proxy, scoped with test.use to just this block, with
-// retries for that one genuine external fetch (real network flakiness passes on a retry; the regression
-// this exists to catch fails identically every time).
+// E7.5 (D-212/D-214): ShareDialog now mounts @mosni/react's `<Modal>`, `<Switch>` and `<Slider>` - real
+// components that portal a real `<dialog>` to `document.body` and never hand a custom element any React
+// children, so the exact hazard this block was built for cannot recur here any more (see D-214's narrowed
+// invariant). The block stays anyway, for the same reason browse.spec.ts's own "real mosni-chrome
+// integration" block stays: it is now the guard that this dialog opens against the REAL deployed
+// stylesheet (ui.mosni.dev/mosnicat.js, not a stub) with zero uncaught page errors, which is still worth
+// having and is cheap. Hence the identical shape here: ignoreHTTPSErrors so the real script loads through
+// the sandbox proxy, scoped with test.use to just this block, with retries for that one genuine external
+// fetch (real network flakiness passes on a retry; a genuine regression fails identically every time).
 test.describe("real mosni-chrome integration: the share dialog must OPEN without crashing React", () => {
   test.use({ ignoreHTTPSErrors: true });
   test.describe.configure({ retries: 2 });
@@ -273,23 +275,20 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
     // before we start clicking, so a failure below is the dialog's and not a slow listing's.
     const row = page.getByText(name, { exact: true }).first();
     await expect(row).toBeVisible({ timeout: 20_000 });
-    await page.locator("mosni-dropdown", { has: page.locator("mosni-dropdown-item") }).first().click();
-    await page.locator("mosni-dropdown-item", { hasText: "Share" }).first().click();
+    await page.locator('button[aria-haspopup="menu"]').first().click();
+    await page.getByRole("menuitem", { name: "Share" }).click();
 
-    // FIRST, prove the design system actually upgraded this element - without this the whole test is
-    // vacuous. `dialog.modal` is built by MosniModal.render() itself, so it exists ONLY if the real
-    // mosnicat.js loaded and `customElements.define("mosni-modal", ...)` ran. Asserting React-rendered
-    // text alone (the first draft of this test did exactly that) passes identically whether the element
-    // upgraded or stayed an inert unknown tag - and an inert tag is precisely the state in which the crash
-    // cannot happen. Measured: with this assertion missing, this test passed against the CRASHING
-    // component. browse.spec.ts gets this for free by asserting on `mosni-tabs button`, markup only the
-    // upgraded element produces.
-    // Scoped by heading: every row mounts THREE upgraded mosni-modals (Delete, Move, Share), so a bare
-    // `mosni-modal dialog.modal` is a strict-mode violation, not a signal.
-    await expect(page.locator('mosni-modal[heading^="Share"] dialog.modal')).toBeAttached({ timeout: 20_000 });
+    // The dialog must mount, real DOM built by <Modal>'s own render (a real <dialog class="modal"> React
+    // itself portals to document.body - see the block comment above for why the D-8 crash class this test
+    // was built for no longer applies to this call site).
+    // Scoped by heading: every row mounts THREE modals (Delete, Move, Share), so a bare `dialog.modal`
+    // would be a strict-mode violation, not a signal.
+    const shareModal = page.locator("dialog.modal").filter({ has: page.locator(".modal-heading", { hasText: /^Share/ }) });
+    await expect(shareModal).toBeAttached({ timeout: 20_000 });
 
-    // THEN the dialog must reach its LOADED state, not just mount - the crash happens on the
-    // spinner -> content swap, so asserting the spinner alone would pass while the app is already dead.
+    // THEN the dialog must reach its LOADED state, not just mount - the crash this block guards against
+    // happens on the spinner -> content swap, so asserting the spinner alone would pass while the app is
+    // already dead.
     await expect(page.getByText("Add people")).toBeVisible({ timeout: 20_000 });
 
     // The real assertion. A NotFoundError in React's commit phase unmounts the root, so the surest
@@ -357,17 +356,17 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
   // wrapping a mosni-* element needs BOTH tiers"). Round 2 added a wrapper for a brand-new element,
   // `<mosni-switch>`, and shipped only the unit tier.
   //
-  // That unit test (web/test/unit/switchChange.test.tsx) is a textbook case of the harness removing the
-  // only risk it exists to catch: `useSwitchChange` reads the HOST's own `checked` attribute on a bubbling
-  // `change`, which is correct ONLY IF the real mosni-switch reflects the user's click onto that attribute
-  // BEFORE the event reaches an ancestor. The unit fixture makes that true by hand
-  // (`el.setAttribute("checked", ""); el.dispatchEvent(...)`) - i.e. the test author supplies the exact
-  // behaviour under test, so it stays green no matter what the real element does. Same shape as the
-  // round-trip collation tests and the fabricated Authorization header this whole round exists to fix.
+  // E7.5 (D-212): this is a real `<Switch>` (@mosni/react) now, not a wrapped custom element - there is no
+  // reflect-then-bubble timing assumption left to prove, since `onChange` is React's own synthetic event
+  // firing off a real `<input type="checkbox">`, the same as any other controlled form element in this
+  // codebase. web/test/unit/ShareDialog.test.tsx already covers that wiring in jsdom, faithfully (a real
+  // `<input>`, a real `change` event - nothing fabricated). This test stays for a narrower, still-real
+  // reason: it is the only tier that opens the dialog against the ACTUAL deployed stylesheet, so it is
+  // what proves D-23's consequence line renders legibly (not clipped) under the real CSS.
   //
   // It is not cosmetic: this switch is `allow_register`, and turning it off is D-23's shared WRITE
   // identity. A switch that silently reports a stale value sends the wrong `allow_register` to auth.
-  test("the invite switch is a REAL upgraded <mosni-switch> and its click reaches React state (F4/F13, D-198)", async ({
+  test("the invite switch is a real <Switch> and its click reaches React state, against the real deployed stylesheet (F4/F13, D-198)", async ({
     page,
     request,
   }) => {
@@ -392,25 +391,26 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
 
     await page.goto(`${FILES_ORIGIN}/`);
     await expect(page.getByText(name, { exact: true }).first()).toBeVisible({ timeout: 20_000 });
-    await page.locator("mosni-dropdown", { has: page.locator("mosni-dropdown-item") }).first().click();
-    await page.locator("mosni-dropdown-item", { hasText: "Share" }).first().click();
+    await page.locator('button[aria-haspopup="menu"]').first().click();
+    await page.getByRole("menuitem", { name: "Share" }).click();
     await expect(page.getByText("Add people")).toBeVisible({ timeout: 20_000 });
 
-    // Prove the element genuinely UPGRADED before asserting anything about its behaviour - an inert
-    // unknown tag would render nothing and every assertion below would be about the wrong thing. The
-    // internal checkbox is built by mosni-switch's own render(), so it exists only if mosnicat.js ran.
-    const toggle = page.locator("mosni-modal[heading^=\"Share\"] mosni-switch").first();
+    // The dialog mounts one `<Switch>` for `type="file"` (the `canUpload` switch only renders for
+    // `type="collection"`) - `allowRegister`, matched by its own label rather than position.
+    const toggleLabel = page.locator("label.switch", { hasText: "Let the recipient turn this into their own account" });
+    const toggle = toggleLabel.locator('input[type="checkbox"]');
     await expect(toggle).toBeAttached({ timeout: 20_000 });
-    await expect(toggle.locator("input[type=checkbox]")).toBeAttached({ timeout: 20_000 });
 
     // Defaults ON (D-198), and the consequence line is absent while it is.
-    await expect(toggle).toHaveAttribute("checked", /.*/);
+    await expect(toggle).toBeChecked();
     await expect(page.getByText("Everyone who opens this link shares one identity")).toHaveCount(0);
 
-    // The actual contract under test: a real click on the real element must reach React state. If the
-    // hook's attribute-timing assumption is wrong, the click still toggles the element visually and this
-    // line never appears - which is exactly the failure no unit test in this repo can see.
-    await toggle.click();
+    // The real contract under test: a real click on the real, deployed-stylesheet element must reach React
+    // state and render the D-23 consequence line legibly. Clicking the LABEL, not the input directly - a
+    // real Switch visually hides the native checkbox under `.switch-visual` (a real user's pointer always
+    // lands on the visual, never the input itself), and Playwright's actionability check correctly refuses
+    // to click a target another element visually intercepts.
+    await toggleLabel.click();
     const consequence = page.getByText("Everyone who opens this link shares one identity");
     await expect(consequence).toBeVisible({ timeout: 10_000 });
 
@@ -426,14 +426,13 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
     expect(pageErrors, `uncaught page errors: ${pageErrors.join(", ")}`).toEqual([]);
   });
 
-  // E7-QA2 §C1 (D-203..D-208): the ONLY tier in this repo that can prove <mosni-slider> works. Every
-  // assertion in web/test/unit/ShareDialog.test.tsx and sliderChange.test.tsx runs in jsdom, where
-  // mosni-slider is an inert unknown element and the test's own fixture supplies the reflect-then-bubble
-  // behaviour under test (see sliderChange.test.tsx's header comment). This test drives the REAL, upstream-
-  // deployed element - it can only pass once mosni-chrome's Wave 0a has been deployed to ui.mosni.dev
-  // (curl https://ui.mosni.dev/mosnicat-core.js | grep -o 'mosni-slider'). Until then it is expected RED,
-  // same as every other consumer of the real design system this repo cannot control the deploy of.
-  test("the invite duration slider is a REAL upgraded <mosni-slider> and a click reaches React state (D-207)", async ({
+  // E7-QA2 §C1 (D-203..D-208), updated E7.5 (D-212): <Slider> is now a real @mosni/react component, not a
+  // wrapped custom element - `web/test/unit/ShareDialog.test.tsx` already drives its real `<input
+  // type="range">` and real `change` events in jsdom, faithfully (no fixture stands in for anything). This
+  // test stays as the one tier that opens the dialog against the ACTUAL deployed stylesheet
+  // (ui.mosni.dev/mosnicat.js), which is what proves the readout renders legibly under the real CSS rather
+  // than merely in jsdom's absence of layout.
+  test("the invite duration slider is a real <Slider> and a click reaches React state, against the real deployed stylesheet (D-207)", async ({
     page,
     request,
   }) => {
@@ -459,26 +458,26 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
 
     await page.goto(`${FILES_ORIGIN}/`);
     await expect(page.getByText(name, { exact: true }).first()).toBeVisible({ timeout: 20_000 });
-    await page.locator("mosni-dropdown", { has: page.locator("mosni-dropdown-item") }).first().click();
-    await page.locator("mosni-dropdown-item", { hasText: "Share" }).first().click();
+    await page.locator('button[aria-haspopup="menu"]').first().click();
+    await page.getByRole("menuitem", { name: "Share" }).click();
     await expect(page.getByText("Add people")).toBeVisible({ timeout: 20_000 });
 
-    const slider = page.locator('mosni-modal[heading^="Share"] mosni-slider');
-    const rangeInput = slider.locator("input[type=range]");
-    // C1.1: prove the element upgraded before asserting anything about its behaviour - the internal range
-    // input is built by MosniSlider.render() itself, so it exists only if mosnicat.js ran for real.
+    const shareModal = page.locator("dialog.modal").filter({ has: page.locator(".modal-heading", { hasText: /^Share/ }) });
+    const rangeInput = shareModal.locator('input[type="range"]');
+    // C1.1: the internal range input is built by <Slider>'s own render, so this is real DOM regardless of
+    // mosnicat.js - what genuinely depends on the real stylesheet is the readout's legibility, below.
     await expect(rangeInput).toBeAttached({ timeout: 20_000 });
 
     // C1.2: D-205's default, through the real element.
-    const readout = slider.locator(".slider-readout");
+    const readout = shareModal.locator(".slider-readout");
     await expect(readout).toHaveText("1 hour");
     await expect(page.getByText("This link expires after 1 hour.")).toBeVisible();
 
     // C1.3, the real contract under test: drive it the way a user does (a focused native range input's
     // arrow keys), never page.evaluate setting the attribute directly - that would reproduce the unit
-    // tier's fixture at a higher tier and prove nothing about the real element. If mosni-slider's
-    // reflect-then-bubble assumption (§1.2) is wrong, the element still moves visually and React never
-    // hears about it - this assertion is the only thing in the repo that can fail on that.
+    // tier's own approach at a higher tier and prove nothing new. web/test/unit/ShareDialog.test.tsx
+    // already proves the onChange wiring in jsdom; what only this tier can prove is that a real keyboard
+    // interaction against the real deployed CSS produces the same result.
     await rangeInput.focus();
     // Index 1 ("1 hour") -> index 4 ("12 hours"): three presses.
     await page.keyboard.press("ArrowRight");
@@ -488,8 +487,10 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
     await expect(page.getByText("This link expires after 12 hours.")).toBeVisible();
     await expect(page.getByText("This link expires after 1 hour.")).toHaveCount(0);
 
-    // C1.4: the readout must not clip - the dialog inherits white-space: nowrap from its row <td>
-    // (review 049, defect 5), and the document-level overflow guard cannot see clipping inside a <dialog>.
+    // C1.4: the readout must not clip. E7.5: the dialog no longer inherits white-space: nowrap from its
+    // row <td> (review 049, defect 5) - <Modal> portals to document.body now, escaping that ancestor
+    // entirely (CHROME-MODAL-INHERITS-NOWRAP is closed) - but the document-level overflow guard is still
+    // blind to clipping inside a <dialog>, so the assertion stays as a direct check on the element itself.
     const clipped = await readout.evaluate((el) => el.scrollWidth > el.clientWidth + 1);
     expect(clipped, "the slider readout must wrap, never clip").toBe(false);
 

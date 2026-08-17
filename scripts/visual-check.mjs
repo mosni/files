@@ -366,9 +366,9 @@ const signedInAsReal = (claims, token) => `
 async function openRowShareDialog(p, rowText) {
   await p.waitForSelector(`[data-row-id]:has-text(${JSON.stringify(rowText)})`, { timeout: 10_000 });
   const row = p.locator("[data-row-id]", { hasText: rowText });
-  await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 });
-  await row.locator("mosni-dropdown-item", { hasText: "Share" }).click({ timeout: 5_000 });
-  await p.waitForSelector("mosni-modal[open]", { timeout: 10_000 });
+  await row.locator('[aria-haspopup="menu"]').click({ timeout: 5_000 });
+  await row.locator('[role="menuitem"]', { hasText: "Share" }).click({ timeout: 5_000 });
+  await p.waitForSelector("dialog.modal[open]", { timeout: 10_000 });
 }
 
 const uploadToken = await mintToken(WRITER.sub);
@@ -674,7 +674,7 @@ const PAGES = [
       "drop zone. A real Bearer, so the /api/browse fetch actually authorizes.",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
-      await p.waitForSelector("mosni-tabs", { timeout: 10_000 }).catch(() => {});
+      await p.waitForSelector('[role="tablist"]', { timeout: 10_000 }).catch(() => {});
       await p.waitForTimeout(500);
     },
   },
@@ -699,13 +699,13 @@ const PAGES = [
     label: "Landing - browser section, an opened row overflow menu",
     url: "/",
     note: "E4.1 Wave B/D-109: per-row actions (copy link, rename, protection, delete) live behind a " +
-      "trailing <mosni-dropdown>, not inline. This opens one on the signed-in owner's own row so every " +
+      "trailing <Dropdown>, not inline. This opens one on the signed-in owner's own row so every " +
       "manage action is visible in the same shot.",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
       await p.waitForSelector(`[data-row-id]:has-text("vis-${run}-deletable")`, { timeout: 10_000 }).catch(() => {});
       const row = p.locator("[data-row-id]", { hasText: `vis-${run}-deletable` });
-      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
+      await row.locator('[aria-haspopup="menu"]').click({ timeout: 5_000 }).catch(() => {});
       await p.waitForTimeout(150);
     },
   },
@@ -721,8 +721,8 @@ const PAGES = [
       "appearing here, or the stranger-owned row being absent, is a real defect.",
     init: signedInAsReal(ADMIN, adminToken),
     interact: async (p) => {
-      await p.waitForSelector("mosni-tabs", { timeout: 10_000 }).catch(() => {});
-      await p.locator("mosni-tabs button", { hasText: "Browse" }).click({ timeout: 5_000 }).catch(() => {});
+      await p.waitForSelector('[role="tablist"]', { timeout: 10_000 }).catch(() => {});
+      await p.locator('[role="tab"]', { hasText: "Browse" }).click({ timeout: 5_000 }).catch(() => {});
       await p.waitForSelector(`text=vis-${run}-stranger-owned`, { timeout: 10_000 }).catch(() => {});
       await p.waitForTimeout(200);
     },
@@ -740,8 +740,8 @@ const PAGES = [
     interact: async (p) => {
       await p.waitForSelector(`[data-row-id]:has-text("vis-${run}-deletable")`, { timeout: 10_000 }).catch(() => {});
       const row = p.locator("[data-row-id]", { hasText: `vis-${run}-deletable` });
-      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
-      await row.locator("mosni-dropdown-item", { hasText: "Rename" }).click({ timeout: 5_000 }).catch(() => {});
+      await row.locator('[aria-haspopup="menu"]').click({ timeout: 5_000 }).catch(() => {});
+      await row.locator('[role="menuitem"]', { hasText: "Rename" }).click({ timeout: 5_000 }).catch(() => {});
       await p.waitForTimeout(200);
     },
   },
@@ -756,7 +756,7 @@ const PAGES = [
       "recorded. No server call has happened at this point.",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
-      await p.waitForSelector("mosni-tabs", { timeout: 10_000 }).catch(() => {});
+      await p.waitForSelector('[role="tablist"]', { timeout: 10_000 }).catch(() => {});
       await p.locator("button", { hasText: "New collection" }).first().click({ timeout: 5_000 }).catch(() => {});
       await p.waitForTimeout(200);
     },
@@ -774,8 +774,8 @@ const PAGES = [
     interact: async (p) => {
       await p.waitForSelector(`[data-row-id]:has-text("vis-${run}-deletable")`, { timeout: 10_000 }).catch(() => {});
       const row = p.locator("[data-row-id]", { hasText: `vis-${run}-deletable` });
-      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
-      await row.locator("mosni-dropdown-item", { hasText: "Protection" }).click({ timeout: 5_000 }).catch(() => {});
+      await row.locator('[aria-haspopup="menu"]').click({ timeout: 5_000 }).catch(() => {});
+      await row.locator('[role="menuitem"]', { hasText: "Protection" }).click({ timeout: 5_000 }).catch(() => {});
       await p.waitForTimeout(200);
     },
   },
@@ -791,8 +791,8 @@ const PAGES = [
     interact: async (p) => {
       await p.waitForSelector(`[data-row-id]:has-text("vis-${run}-deletable")`, { timeout: 10_000 }).catch(() => {});
       const row = p.locator("[data-row-id]", { hasText: `vis-${run}-deletable` });
-      await row.locator("mosni-dropdown .dropdown-trigger").click();
-      await row.locator("mosni-dropdown-item", { hasText: "Delete" }).click();
+      await row.locator('[aria-haspopup="menu"]').click();
+      await row.locator('[role="menuitem"]', { hasText: "Delete" }).click();
       await p.waitForSelector("text=This can't be undone.", { timeout: 10_000 }).catch(() => {});
       await p.waitForTimeout(150);
     },
@@ -852,15 +852,18 @@ const PAGES = [
     id: "share-dialog-invite-switch-off",
     label: "Share dialog - the invite switch turned OFF, with D-23's consequence line",
     url: `/f/vis-${run}-deletable`,
-    note: "E7-QA1 §B1.7/D-198/F13. The 'Let the recipient turn this into their own account' control must " +
-      "render as a REAL <mosni-switch> (F4 - not a bare checkbox), default ON, and turning it off must " +
-      "surface D-23's shared-identity consequence plainly at the point of choice - not in a tooltip, not " +
-      "behind a disclosure. This shot is the only tier that shows the real design-system switch; the unit " +
-      "test drives a hand-written double of it.",
+    note: "E7-QA1 §B1.7/D-198/F13. The 'Let the recipient turn this into their own account' control is a " +
+      "real <Switch> (F4/D-212 - not a bare checkbox), default ON, and turning it off must surface D-23's " +
+      "shared-identity consequence plainly at the point of choice - not in a tooltip, not behind a " +
+      "disclosure. This shot is the only tier that shows the switch against the real deployed stylesheet; " +
+      "the unit test already drives its real onChange in jsdom.",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
       await openRowShareDialog(p, "confidential-share.txt");
-      const toggle = p.locator("mosni-switch").first();
+      // Click the LABEL, not the input directly - a real Switch visually hides the native checkbox under
+      // `.switch-visual`, which intercepts a pointer click aimed at the input itself (measured: Playwright's
+      // actionability check correctly refuses that click and times out).
+      const toggle = p.locator("label.switch").first();
       await toggle.waitFor({ state: "attached", timeout: 10_000 });
       await toggle.click({ timeout: 5_000 });
       await p.waitForSelector("text=Everyone who opens this link shares one identity", { timeout: 10_000 });
@@ -871,15 +874,14 @@ const PAGES = [
     id: "share-dialog-duration-default",
     label: "Share dialog - the invite duration slider at its default (1h)",
     url: `/f/vis-${run}-deletable`,
-    note: "E7-QA2 §C2/D-204/D-205/D-207. A real <mosni-slider> over the ten D-204 stops, defaulting to " +
-      "1h, showing the notch-per-stop track, the end-only labels (30 minutes / 90 days), the readout " +
-      "naming the current stop, and the always-visible duration sentence (D-208) - today's default path " +
-      "said nothing about expiry at all. ⚠ Requires mosni-chrome's Wave 0a deployed to ui.mosni.dev; " +
-      "until then <mosni-slider> is an inert unknown tag and this shot proves nothing.",
+    note: "E7-QA2 §C2/D-204/D-205/D-207. A real <Slider> (@mosni/react, F4/D-212) over the ten D-204 " +
+      "stops, defaulting to 1h, showing the notch-per-stop track, the end-only labels (30 minutes / 90 " +
+      "days), the readout naming the current stop, and the always-visible duration sentence (D-208) - " +
+      "today's default path said nothing about expiry at all.",
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
       await openRowShareDialog(p, "confidential-share.txt");
-      await p.waitForSelector("mosni-slider input[type=range]", { timeout: 10_000 });
+      await p.waitForSelector('input[type="range"]', { timeout: 10_000 });
       await p.waitForSelector("text=This link expires after 1 hour.", { timeout: 10_000 });
       await p.waitForTimeout(200);
     },
@@ -896,12 +898,13 @@ const PAGES = [
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
       await openRowShareDialog(p, "confidential-share.txt");
-      const rangeInput = p.locator("mosni-slider input[type=range]");
+      const rangeInput = p.locator('input[type="range"]');
       await rangeInput.waitFor({ state: "attached", timeout: 10_000 });
       await rangeInput.focus();
       await p.keyboard.press("End");
       await p.waitForSelector("text=This link expires after 90 days.", { timeout: 10_000 });
-      const toggle = p.locator("mosni-switch").first();
+      // Click the LABEL, not the input - see share-dialog-invite-switch-off's comment above.
+      const toggle = p.locator("label.switch").first();
       await toggle.waitFor({ state: "attached", timeout: 10_000 });
       await toggle.click({ timeout: 5_000 });
       await p.waitForSelector("text=Everyone who opens this link shares one identity", { timeout: 10_000 });
@@ -939,7 +942,7 @@ const PAGES = [
     init: signedInAsReal(WRITER, uploadToken),
     interact: async (p) => {
       await p.getByRole("button", { name: /^Share$/ }).click({ timeout: 10_000 });
-      await p.waitForSelector("mosni-modal[open]", { timeout: 10_000 });
+      await p.waitForSelector("dialog.modal[open]", { timeout: 10_000 });
       await p.waitForTimeout(200);
     },
   },
@@ -954,7 +957,7 @@ const PAGES = [
     interact: async (p) => {
       await p.waitForSelector('[data-row-id]:has-text("guest-upload.txt")', { timeout: 10_000 }).catch(() => {});
       const row = p.locator("[data-row-id]", { hasText: "guest-upload.txt" });
-      await row.locator("mosni-dropdown .dropdown-trigger").click({ timeout: 5_000 }).catch(() => {});
+      await row.locator('[aria-haspopup="menu"]').click({ timeout: 5_000 }).catch(() => {});
       await p.waitForTimeout(200);
     },
   },

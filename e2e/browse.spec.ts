@@ -193,16 +193,17 @@ test("the link offered for a file gated only by its collection contains no colle
 
 // PRODUCTION INCIDENT, 2026-07-29: FileBrowser's mosni-tabs switcher crashed the ENTIRE page in production
 // ("Uncaught TypeError: setting getter-only property 'label'") the moment a signed-in user (2+ tabs)
-// loaded "/". mosni-chrome's real MosniTab class declares `label` as a getter-only accessor; React sets a
-// custom element's props as JS properties once the element is already an instance of its real registered
-// class (which only happens once ui.mosni.dev/mosnicat.js has actually loaded and called
-// `customElements.define`) - so `<mosni-tab label={...}>` crashed only once that upgrade had happened,
-// which every real user eventually reaches. Every other test in this file, and every other test in this
-// whole e2e suite, blocks or never triggers mosnicat.js loading at all (it fails TLS validation in this
-// sandbox otherwise), so `<mosni-tab>` was always an inert, unupgraded element in every test that ran
-// before this one - which is exactly why nothing caught it. `ignoreHTTPSErrors` is what makes the REAL
-// script load for real, through this sandbox's outbound proxy, and this test is scoped to just this file
-// via `test.use` below rather than the whole suite, since no other test here needs it.
+// loaded "/". This was the D-8 class of hazard - a custom element's real registered class fighting React
+// over a property - and it is why this block exists at all.
+//
+// E7.5 (D-212/D-214): FileBrowser's tabs are now `<Tabs>`/`<Tab>` (@mosni/react), real components that
+// render a real `<button role="tab">` DOM directly - there is no custom element here any more for
+// mosnicat.js to upgrade, and the class of crash this test was built for cannot recur at this call site.
+// The block stays anyway: it is now the guard that this page loads against the REAL deployed stylesheet
+// (ui.mosni.dev/mosnicat.js, not a stub) with zero uncaught page errors, which is still worth having and
+// is cheap. `ignoreHTTPSErrors` is what makes the real script load through this sandbox's outbound proxy,
+// scoped to just this file via `test.use` below rather than the whole suite, since no other test here
+// needs it.
 test.describe("real mosni-chrome integration (must load the ACTUAL mosnicat.js/auth SDK, not a stub of them)", () => {
   test.use({ ignoreHTTPSErrors: true });
   // This is the one test in the whole suite that depends on a genuine external fetch (ui.mosni.dev)
@@ -233,10 +234,10 @@ test.describe("real mosni-chrome integration (must load the ACTUAL mosnicat.js/a
 
     await page.goto(`${FILES_ORIGIN}/`);
     // A signed-in user without the admin role sees exactly two tabs ("My files", "Browse") - the case
-    // that crashed in production, since visibleTabs.length > 1 is what renders <mosni-tabs> at all.
-    await expect(page.locator("mosni-tabs button", { hasText: "My files" })).toBeVisible({ timeout: 20_000 });
-    await expect(page.locator("mosni-tabs button", { hasText: "Browse" })).toBeVisible();
-    await page.locator("mosni-tabs button", { hasText: "Browse" }).click();
+    // that crashed in production, since visibleTabs.length > 1 is what renders <Tabs> at all.
+    await expect(page.getByRole("tab", { name: "My files" })).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByRole("tab", { name: "Browse" })).toBeVisible();
+    await page.getByRole("tab", { name: "Browse" }).click();
     await page.waitForTimeout(300);
 
     expect(pageErrors, `uncaught page errors: ${pageErrors.join(", ")}`).toEqual([]);
