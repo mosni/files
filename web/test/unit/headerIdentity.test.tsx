@@ -1,12 +1,20 @@
-// Live-testing addition (2026-08-06): <mosni-header>'s right-side tagline slot shows "Logged in as
-// [avatar] [name]" once signed in. initHeaderIdentity() cannot rely on the normal slot mechanism (see the
-// module's own comment - mosni-chrome renders a slot exactly once, before auth state is known), so this
-// exercises the DOM it writes into directly, the same shape shareTarget.test.ts uses for window.mosni.
+// Live-testing addition (2026-08-06): the header's right-side tagline slot shows "Logged in as [avatar]
+// [name]" once signed in.
+//
+// E7.5 Wave E: `initHeaderIdentity()` and its DOM-node-hunting mechanics (the `.little-link` polling, the
+// mount-once guard, the second `createRoot`) are gone - the header moved into the React tree, and
+// `<HeaderIdentity />` is now ordinary composition passed straight to `<Header tagline={...}>` (main.tsx).
+// This file renders it the same way any other component test here does: a real root, real DOM queries on
+// the render container. Two tests that covered ONLY the deleted polling/mount-once mechanics (a missing
+// slot never throwing; waiting for a late-upgrading slot) are gone with it - there is no slot to wait for
+// any more. Everything else - the identity rendering itself - is unchanged real logic and keeps its
+// coverage.
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { act } from "react";
-import { initHeaderIdentity } from "../../src/lib/headerIdentity.tsx";
+import { createRoot, type Root } from "react-dom/client";
+import { HeaderIdentity } from "../../src/lib/headerIdentity.tsx";
 
 type Listener = (user: unknown) => void;
 
@@ -36,10 +44,6 @@ function installSdk() {
   };
 }
 
-// Review session 052 round 2: the module renders through a React root now (Hannah: the front-end is
-// supposed to use React, not build DOM by hand), so flushing has to happen inside act() or React warns and
-// the assertions race the commit. The assertions themselves are unchanged - they still check the real DOM
-// the header slot ends up holding, which is the whole point of this file.
 async function flush() {
   await act(async () => {
     for (let i = 0; i < 5; i++) await Promise.resolve();
@@ -52,9 +56,14 @@ async function flush() {
 // read "Logged in as ...", keep meaning what they did.
 let matchMediaMatches = false;
 
-describe("initHeaderIdentity (live-testing addition, 2026-08-06)", () => {
+let container: HTMLDivElement;
+let root: Root;
+
+describe("HeaderIdentity (live-testing addition, 2026-08-06)", () => {
   beforeEach(() => {
-    document.body.innerHTML = '<mosni-header><div class="little-link"></div></mosni-header>';
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
     delete (window as unknown as { mosni?: unknown }).mosni;
     matchMediaMatches = false;
     (window as unknown as { matchMedia: unknown }).matchMedia = (query: string) => ({
@@ -66,44 +75,48 @@ describe("initHeaderIdentity (live-testing addition, 2026-08-06)", () => {
   });
 
   afterEach(() => {
-    document.body.innerHTML = "";
+    act(() => root.unmount());
+    container.remove();
   });
 
-  it("does nothing until window.mosni exists, then reflects signed-out as empty", async () => {
-    initHeaderIdentity();
-    const target = document.querySelector(".little-link")!;
-    expect(target.textContent).toBe("");
+  it("renders nothing until signed in", async () => {
+    act(() => {
+      root.render(<HeaderIdentity />);
+    });
+    expect(container.textContent).toBe("");
 
     installSdk();
     await flush();
-    // Signed out (the SDK's initial `null` notification) - the slot stays exactly as empty as it started.
-    expect(target.textContent).toBe("");
+    // Signed out (the SDK's initial `null` notification) - still nothing.
+    expect(container.textContent).toBe("");
   });
 
   it("shows the avatar and the captured name once signed in", async () => {
     const sdk = installSdk();
-    initHeaderIdentity();
+    act(() => {
+      root.render(<HeaderIdentity />);
+    });
     await flush();
 
     sdk.signIn({ name: "Hannah" });
     await flush();
 
-    const target = document.querySelector(".little-link")!;
-    expect(target.textContent).toBe("Logged in as Hannah");
-    const img = target.querySelector("img")!;
+    expect(container.textContent).toBe("Logged in as Hannah");
+    const img = container.querySelector("img")!;
     expect(img.src).toBe("https://auth.mosni.dev/avatar/google%3A123");
   });
 
   it("falls back to the sub when no name claim is present (D-168's rule)", async () => {
     const sdk = installSdk();
-    initHeaderIdentity();
+    act(() => {
+      root.render(<HeaderIdentity />);
+    });
     await flush();
 
     sdk.signIn();
     await flush();
 
-    const target = document.querySelector(".little-link")!;
-    expect(target.textContent).toBe("Logged in as google:123");
+    expect(container.textContent).toBe("Logged in as google:123");
   });
 
   // Review session 052, round 2 (Hannah: "it is now truncated in the modal but not in the header"). The
@@ -113,14 +126,15 @@ describe("initHeaderIdentity (live-testing addition, 2026-08-06)", () => {
   // the other three sites: one line, ellipsis, full value in `title`. No sub is parsed (invariant 6).
   it("truncates a long identity rather than running it across the header", async () => {
     const sdk = installSdk();
-    initHeaderIdentity();
+    act(() => {
+      root.render(<HeaderIdentity />);
+    });
     await flush();
 
     sdk.signIn({ sub: "link:9f86d081-884c-4d1c-9be0-11223344556677" });
     await flush();
 
-    const target = document.querySelector(".little-link")!;
-    const nameEl = target.querySelector<HTMLElement>("[data-identity-name]");
+    const nameEl = container.querySelector<HTMLElement>("[data-identity-name]");
     expect(nameEl, "the identity must be an element that can be truncated, not a bare text node").not.toBeNull();
     expect(nameEl!.textContent).toBe("link:9f86d081-884c-4d1c-9be0-11223344556677");
     // The full value stays recoverable even though the rendering is clipped.
@@ -148,33 +162,38 @@ describe("initHeaderIdentity (live-testing addition, 2026-08-06)", () => {
   it("drops the 'Logged in as' words at phone width, keeping the avatar and the name", async () => {
     matchMediaMatches = true;
     const sdk = installSdk();
-    initHeaderIdentity();
+    act(() => {
+      root.render(<HeaderIdentity />);
+    });
     await flush();
 
     sdk.signIn({ sub: "google:123", name: "Hannah" });
     await flush();
 
-    const target = document.querySelector(".little-link")!;
-    expect(target.textContent).toBe("Hannah");
-    expect(target.querySelector("img"), "the avatar is content, not decoration - it must survive").not.toBeNull();
-    expect(target.querySelector<HTMLElement>("[data-identity-name]")!.textContent).toBe("Hannah");
+    expect(container.textContent).toBe("Hannah");
+    expect(container.querySelector("img"), "the avatar is content, not decoration - it must survive").not.toBeNull();
+    expect(container.querySelector<HTMLElement>("[data-identity-name]")!.textContent).toBe("Hannah");
   });
 
   it("keeps the 'Logged in as' words above the phone breakpoint", async () => {
     matchMediaMatches = false;
     const sdk = installSdk();
-    initHeaderIdentity();
+    act(() => {
+      root.render(<HeaderIdentity />);
+    });
     await flush();
 
     sdk.signIn({ sub: "google:123", name: "Hannah" });
     await flush();
 
-    expect(document.querySelector(".little-link")!.textContent).toBe("Logged in as Hannah");
+    expect(container.textContent).toBe("Logged in as Hannah");
   });
 
   it("clears back to empty on sign-out", async () => {
     const sdk = installSdk();
-    initHeaderIdentity();
+    act(() => {
+      root.render(<HeaderIdentity />);
+    });
     await flush();
 
     sdk.signIn({ name: "Hannah" });
@@ -182,53 +201,27 @@ describe("initHeaderIdentity (live-testing addition, 2026-08-06)", () => {
     sdk.signOut();
     await flush();
 
-    const target = document.querySelector(".little-link")!;
-    expect(target.textContent).toBe("");
+    expect(container.textContent).toBe("");
   });
 
   it("removes the avatar image on a load failure instead of leaving a broken icon", async () => {
     const sdk = installSdk();
-    initHeaderIdentity();
+    act(() => {
+      root.render(<HeaderIdentity />);
+    });
     await flush();
     sdk.signIn({ name: "Hannah" });
     await flush();
 
-    const target = document.querySelector(".little-link")!;
-    const img = target.querySelector("img")!;
-    // Inside act(): the failure now flips React state rather than removing the node behind React's back,
-    // so the re-render has to be flushed before asserting. `error` on an <img> genuinely does not bubble,
-    // and React attaches this one directly to the element - so the event stays the shape a real broken
-    // image produces, which is the point (D-200: never assert a shape the product cannot produce).
+    const img = container.querySelector("img")!;
+    // `error` on an <img> genuinely does not bubble, and React attaches this one directly to the element -
+    // so the event stays the shape a real broken image produces (D-200: never assert a shape the product
+    // cannot produce).
     await act(async () => {
       img.dispatchEvent(new Event("error"));
     });
 
-    expect(target.querySelector("img")).toBeNull();
-    expect(target.textContent).toBe("Logged in as Hannah");
-  });
-
-  it("is a no-op when <mosni-header> has no .little-link (never throws into main.tsx's render path)", () => {
-    document.body.innerHTML = "";
-    expect(() => initHeaderIdentity()).not.toThrow();
-  });
-
-  // ⚠ The regression this exists for: an earlier version resolved the slot with ONE querySelector and
-  // returned when it was null, so a header that upgraded even slightly late meant this silently did
-  // nothing forever, with no error to find. `vite build` hoists this module's <script> into <head> in the
-  // SHIPPED page (verified against the deployed index.html), which is exactly the ordering that makes a
-  // late upgrade reachable. Fails against the one-shot version.
-  it("waits for the header to upgrade instead of giving up when the slot is not there yet", async () => {
-    document.body.innerHTML = ""; // no <mosni-header> at all when init runs
-    const sdk = installSdk();
-    initHeaderIdentity();
-    await flush();
-
-    // ...the design system upgrades the element a beat later, as a deferred script ordering can produce.
-    document.body.innerHTML = '<mosni-header><div class="little-link"></div></mosni-header>';
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    sdk.signIn({ name: "Hannah" });
-    await flush();
-
-    expect(document.querySelector(".little-link")!.textContent).toBe("Logged in as Hannah");
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).toBe("Logged in as Hannah");
   });
 });

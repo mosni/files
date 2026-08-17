@@ -1,5 +1,6 @@
 import "@mosni/react/elements";
 import { createRoot } from "react-dom/client";
+import { Header } from "@mosni/react";
 import { BrowserRouter, Route, Routes } from "react-router";
 import { DropZone } from "./components/DropZone.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
@@ -7,7 +8,7 @@ import { UploadStack } from "./components/UploadStack.tsx";
 import { PreviewPage } from "./pages/Preview.tsx";
 import { restorePausedUploads } from "./lib/uploads.ts";
 import { initShareTarget } from "./lib/shareTarget.ts";
-import { initHeaderIdentity } from "./lib/headerIdentity.tsx";
+import { HeaderIdentity } from "./lib/headerIdentity.tsx";
 
 // Moved out of index.html (round 4, live-testing: Hannah found dev-rationale comments shipping verbatim
 // in the served page source - a .html entry file's comments survive `vite build` untouched, unlike a
@@ -22,15 +23,18 @@ import { initHeaderIdentity } from "./lib/headerIdentity.tsx";
 // web/embed.html gets NEITHER, deliberately: the embeddable player route is not the app and must not be
 // installable.
 //
-// index.html's <body> renders mosni-chrome's own <mosni-header> directly (NOT <mosni-layout>: that
-// component's grid hard-codes a sidebar column - `grid-template-columns: $sidebar-width 1fr` - whether
-// or not a menu is slotted, so with no navigation to put there it renders a large empty rail and pushes
-// the page past the viewport; this app has no nav until E4's file browser, switch to <mosni-layout>
-// then). It lives in the static shell, outside this React root, on purpose - the element reparents its
-// own children on connect (takeSlot/takeDefault), and letting it move nodes React is reconciling is
-// exactly the custom-element glue friction D-8 warned about. mosnicat.js is a synchronous <script> in
-// <head>, so it upgrades before this module runs and React only ever owns the inside of #root. The
-// preview <head> is spliced into this same shell (D-72), so preview documents get the chrome for free.
+// E7.5 Wave E: the header moves INTO this React tree (D-213) - <Header> (@mosni/react) renders real DOM
+// React itself owns, so the D-8 class friction that kept it in the static shell (a real mosni-header
+// reparents its own children on connect) no longer applies. index.html's <body> is now just
+// `<div id="root">`; <Header> renders as a sibling BEFORE <main>, matching the exact structure
+// app/src/views/NotFound.tsx already uses (header, then a width-capped <main>) - <Header> must NOT end up
+// nested inside the width-capped <main> below, or it renders capped and centred instead of full-width.
+// Accepted consequence (D-213): the header's first paint now happens after hydration instead of before -
+// it used to be static markup that painted before any JS ran. mosnicat.js is still a synchronous <script>
+// in <head>, so <Header>'s zero-CSS-shipped markup (@mosni/react ships no styles, D-R2) still renders
+// against the real stylesheet the instant this root mounts. The preview <head> is spliced into this same
+// shell (D-72), so preview documents get the chrome for free - see §E.6 of the hand-off for why that
+// coupling needs its own check.
 
 // E5 Wave G (D-133): registered defensively - a browser with no service-worker support, or one where
 // registration fails, simply never gets a controller (web/src/lib/archive.ts's isArchiveSupported()/
@@ -64,10 +68,6 @@ void restorePausedUploads();
 // carries a `?share-target=<id>`.
 initShareTarget();
 
-// Live-testing addition (2026-08-06): "logged in as [pic] [name]" in <mosni-header>'s right-side tagline
-// slot. See lib/headerIdentity.tsx for why this cannot be a normal slotted child.
-initHeaderIdentity();
-
 // F1-F5: the drop zone was the whole landing page (D-64); E4 adds the browser BELOW it (D-1, D-93) - the
 // order here is load-bearing, never swap it, and nothing may render between the two.
 // D-70/D-73: the preview page is now a route inside this SPA rather than a server-rendered document.
@@ -84,20 +84,25 @@ const root = document.getElementById("root");
 if (root) {
   createRoot(root).render(
     <BrowserRouter>
-      <Routes>
-        <Route
-          path="/"
-          element={
-            <>
-              <DropZone />
-              <FileBrowser />
-            </>
-          }
-        />
-        <Route path="/f/*" element={<PreviewPage />} />
-        <Route path="/t/:token" element={<PreviewPage />} />
-      </Routes>
-      <UploadStack />
+      {/* Live-testing addition (2026-08-06): "logged in as [pic] [name]" in the header's right-side
+          tagline slot - see lib/headerIdentity.tsx for HeaderIdentity itself. */}
+      <Header brand="HANNAH'S" accent="FILE DROP" tagline={<HeaderIdentity />} />
+      <main style={{ maxWidth: "1100px", margin: "0 auto", padding: "1.75rem 1.25rem" }}>
+        <Routes>
+          <Route
+            path="/"
+            element={
+              <>
+                <DropZone />
+                <FileBrowser />
+              </>
+            }
+          />
+          <Route path="/f/*" element={<PreviewPage />} />
+          <Route path="/t/:token" element={<PreviewPage />} />
+        </Routes>
+        <UploadStack />
+      </main>
     </BrowserRouter>,
   );
 }
