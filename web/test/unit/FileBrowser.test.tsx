@@ -26,16 +26,43 @@ async function flush() {
   });
 }
 
-// `<mosni-dropdown>` never actually upgrades in jsdom (mosnicat.js isn't loaded here - see
-// technical-baseline.md §4), so there is no real click-to-open/keyboard-nav behavior to drive. Tests
-// interact with it the same way the existing `mosni-tab-change` test already does with `<mosni-tabs>`:
-// dispatch the CustomEvent the real component would emit on selection, directly on the element.
+// E7.5 Wave C: <Dropdown>/<DropdownItem> (@mosni/react) render real DOM - the menu's items are always
+// present (only `hidden` toggles on the menu, matching the D-8 class rule this design system's own
+// components follow), so a test can click a menuitem directly without opening the dropdown first, the
+// same shape the old CustomEvent dispatch had. A DropdownItem's `value` is consumed internally by
+// <Dropdown>'s onSelect wiring and never reaches the DOM, so items are found by their visible text.
+const ROW_ACTION_LABEL: Record<string, string> = {
+  copy: "Copy link",
+  rename: "Rename",
+  protection: "Protection",
+  move: "Move",
+  share: "Share",
+  delete: "Delete",
+};
+
 async function selectRowAction(row: Element, value: string) {
-  const dropdown = row.querySelector("mosni-dropdown")!;
+  const label = ROW_ACTION_LABEL[value] ?? value;
+  const item = Array.from(row.querySelectorAll('[role="menuitem"]')).find(
+    (el) => el.textContent === label,
+  ) as HTMLElement | undefined;
   await act(async () => {
-    dropdown.dispatchEvent(new CustomEvent("mosni-dropdown-select", { detail: { value } }));
+    item?.click();
     await flush();
   });
+}
+
+const ROW_ACTION_VALUE_BY_LABEL: Record<string, string> = Object.fromEntries(
+  Object.entries(ROW_ACTION_LABEL).map(([value, label]) => [label, value]),
+);
+
+function rowActionValues(row: Element): string[] {
+  return Array.from(row.querySelectorAll('[role="menuitem"]')).map(
+    (item) => ROW_ACTION_VALUE_BY_LABEL[item.textContent ?? ""] ?? (item.textContent ?? ""),
+  );
+}
+
+function rowActionTrigger(row: Element): Element | null {
+  return row.querySelector('[aria-haspopup="menu"]');
 }
 
 // E4.1 Wave E findings (C3): a real MouseEvent so isPlainLeftClick's modifier/button checks have
@@ -229,14 +256,15 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     });
     await flush();
 
-    const tabs = container.querySelectorAll("mosni-tab");
+    // E7.5 Wave C: <Tabs> (@mosni/react) renders real <button role="tab"> elements whose visible text IS
+    // the label - no more a `label` attribute on a custom element.
+    const tabs = container.querySelectorAll('[role="tab"]');
     expect(tabs).toHaveLength(2);
-    expect(Array.from(tabs).map((t) => t.getAttribute("label"))).toEqual(["My files", "Browse"]);
-    expect(Array.from(tabs).some((t) => t.getAttribute("label") === "All files")).toBe(false);
+    expect(Array.from(tabs).map((t) => t.textContent)).toEqual(["My files", "Browse"]);
+    expect(Array.from(tabs).some((t) => t.textContent === "All files")).toBe(false);
 
-    const tabsEl = container.querySelector("mosni-tabs")!;
     await act(async () => {
-      tabsEl.dispatchEvent(new CustomEvent("mosni-tab-change", { detail: { index: 1 } }));
+      (tabs[1] as HTMLElement).click();
       await flush();
     });
     expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=visible"), expect.anything());
@@ -252,7 +280,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     });
     await flush();
 
-    expect(container.querySelector("mosni-tabs")).toBeNull();
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
     expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=visible"), undefined);
   });
 
@@ -440,17 +468,14 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     const mineRow = rows.find((r) => r.getAttribute("data-row-id") === "mine")!;
     const theirsRow = rows.find((r) => r.getAttribute("data-row-id") === "theirs")!;
 
-    function itemValues(row: Element): string[] {
-      return Array.from(row.querySelectorAll("mosni-dropdown-item")).map((item) => item.getAttribute("value")!);
-    }
-    expect(itemValues(mineRow)).toEqual(expect.arrayContaining(["rename", "protection", "delete"]));
-    expect(itemValues(theirsRow)).not.toEqual(expect.arrayContaining(["rename"]));
-    expect(itemValues(theirsRow)).not.toEqual(expect.arrayContaining(["protection"]));
-    expect(itemValues(theirsRow)).not.toEqual(expect.arrayContaining(["delete"]));
+    expect(rowActionValues(mineRow)).toEqual(expect.arrayContaining(["rename", "protection", "delete"]));
+    expect(rowActionValues(theirsRow)).not.toEqual(expect.arrayContaining(["rename"]));
+    expect(rowActionValues(theirsRow)).not.toEqual(expect.arrayContaining(["protection"]));
+    expect(rowActionValues(theirsRow)).not.toEqual(expect.arrayContaining(["delete"]));
 
     // C7: the row's trigger carries an accessible name that includes the row's own name.
-    expect(mineRow.querySelector("mosni-dropdown")?.getAttribute("label")).toBe("Actions for mine.png");
-    expect(theirsRow.querySelector("mosni-dropdown")?.getAttribute("label")).toBe("Actions for theirs.png");
+    expect(rowActionTrigger(mineRow)?.getAttribute("aria-label")).toBe("Actions for mine.png");
+    expect(rowActionTrigger(theirsRow)?.getAttribute("aria-label")).toBe("Actions for theirs.png");
 
     await selectRowAction(mineRow, "protection");
     // Scoped to the protection control's own select - A2/D-8 made MoveModal's destination <select>
@@ -478,7 +503,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     await flush();
 
     const row = container.querySelector('[data-row-id="theirs"]')!;
-    const values = Array.from(row.querySelectorAll("mosni-dropdown-item")).map((item) => item.getAttribute("value")!);
+    const values = rowActionValues(row);
     expect(values).toContain("delete");
     expect(values).not.toContain("rename");
     expect(values).not.toContain("protection");
@@ -505,14 +530,17 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     await flush();
 
     const row = container.querySelector('[data-row-id="hosted-file"]')!;
-    const values = Array.from(row.querySelectorAll("mosni-dropdown-item")).map((item) => item.getAttribute("value")!);
+    const values = rowActionValues(row);
     expect(values).toEqual(["copy", "delete"]);
   });
 
-  // C7: every row's icon-only trigger, regardless of glyph, still opens the right menu - verifies the
-  // dropdown wiring survived the icon-only switch (mosnicat.js itself, and its rendered glyph, are Wave
-  // 0's job and covered there / by the D-79 visual check).
-  it("the row action trigger is icon-only, carrying more-vertical as its glyph", async () => {
+  // C7: every row's icon-only trigger, regardless of glyph, still opens the right menu. E7.5 Wave C:
+  // <Dropdown iconOnly> (@mosni/react) renders a real inline SVG with no name/class identifying which
+  // glyph it is, so the glyph identity itself is the D-79 visual check's job (and mosnicat's own choice of
+  // "more-vertical" for this icon name is exercised by mosni-chrome's own tests) - what this test can and
+  // does assert is that icon-only mode is active: no visible label text, and the aria-label the icon-only
+  // path is the only one that sets.
+  it("the row action trigger is icon-only - no visible label text, only its aria-label", async () => {
     (window as unknown as { mosni: unknown }).mosni = { user: () => null, token: () => null, onChange: (cb: (u: unknown) => void) => cb(null) };
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse({ files: [makeFile({ reason: "public" })] }))));
     act(() => {
@@ -520,8 +548,9 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     });
     await flush();
 
-    const dropdown = container.querySelector("[data-row-id] mosni-dropdown")!;
-    expect(dropdown.getAttribute("icon-only")).toBe("more-vertical");
+    const trigger = rowActionTrigger(container.querySelector("[data-row-id]")!);
+    expect(trigger?.textContent).toBe("");
+    expect(trigger?.getAttribute("aria-label")).toMatch(/^Actions for /);
   });
 
   // D-118/C10: the permanent form is gone; a small button inserts a client-side-only placeholder row.
@@ -707,7 +736,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(container.textContent).not.toContain("1 files");
   });
 
-  it("dispatching mosni-tab-change on the tab bar switches scope and resets to the root", async () => {
+  it("clicking the Browse tab switches scope and resets to the root", async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => ({ sub: "user:a", roles: ["files:write"] }),
       token: () => "tok",
@@ -723,9 +752,9 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=mine"), expect.anything());
 
     // Tab order is "My files" (0), "Browse" (1) - exactly two tabs now (D-116).
-    const tabs = container.querySelector("mosni-tabs")!;
+    const tabs = container.querySelectorAll('[role="tab"]');
     await act(async () => {
-      tabs.dispatchEvent(new CustomEvent("mosni-tab-change", { detail: { index: 1, label: "Browse" } }));
+      (tabs[1] as HTMLElement).click();
       await flush();
     });
 
@@ -1306,7 +1335,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       });
       await flush();
 
-      expect(container.querySelector("mosni-tabs")).toBeNull();
+      expect(container.querySelector('[role="tablist"]')).toBeNull();
       expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("New collection"))).toBe(false);
     });
 
@@ -1476,8 +1505,8 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       const rows = container.querySelectorAll("[data-row-id]");
       const ownRow = Array.from(rows).find((r) => r.getAttribute("data-row-id") === "mine")!;
       const strangerRow = Array.from(rows).find((r) => r.getAttribute("data-row-id") === "theirs")!;
-      expect(ownRow.querySelector('mosni-dropdown-item[value="move"]')).not.toBeNull();
-      expect(strangerRow.querySelector('mosni-dropdown-item[value="move"]')).toBeNull();
+      expect(rowActionValues(ownRow)).toContain("move");
+      expect(rowActionValues(strangerRow)).not.toContain("move");
     });
 
     // Finding 11 / D-8: MoveModal used to render NO children while closed and only add them once `open`
@@ -1682,7 +1711,11 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
         select.dispatchEvent(new Event("change", { bubbles: true }));
       });
 
-      const confirmButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Move")!;
+      // E7.5 Wave C: the row's "Move" dropdown item is now a real <button role="menuitem"> too, so a
+      // bare textContent match is ambiguous - exclude it to reach the modal's own confirm button.
+      const confirmButton = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "Move" && b.getAttribute("role") !== "menuitem",
+      )!;
       await act(async () => {
         confirmButton.click();
         await flush();
@@ -1714,7 +1747,11 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       await selectRowAction(row, "move");
       await flush();
 
-      const confirmButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Move")!;
+      // E7.5 Wave C: the row's "Move" dropdown item is now a real <button role="menuitem"> too, so a
+      // bare textContent match is ambiguous - exclude it to reach the modal's own confirm button.
+      const confirmButton = Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "Move" && b.getAttribute("role") !== "menuitem",
+      )!;
       await act(async () => {
         confirmButton.click();
         await flush();

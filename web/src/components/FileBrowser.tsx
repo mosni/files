@@ -6,13 +6,12 @@
 // required) and "visible" (everything THIS VIEWER can see: public for anonymous, public ∪ own ∪ granted
 // signed in, everything for an admin because they ARE an admin). This is ONE contract decided
 // server-side; the client sends the same scope for every viewer and branches on role nowhere - there is
-// no client-side isFilesAdmin check anywhere in this file. A `mosni-tabs` switcher lives inside this
-// section (D-93/D-102).
+// no client-side isFilesAdmin check anywhere in this file. A `<Tabs>` switcher (@mosni/react, E7.5 Wave C)
+// lives inside this section (D-93/D-102).
 //
 // E4.1 Wave B: the listing is a real `<table>` (D-108), one row per item; per-row actions (copy link,
-// rename, protection, delete) live behind a trailing `<mosni-dropdown>` overflow menu (D-109) instead of
-// always-expanded inline controls. Wave 0's write-through property setters (D-112) are what let
-// `<mosni-tab>`/`<mosni-dropdown>` be written as ordinary JSX props below - see mosnicat.md.
+// rename, protection, delete) live behind a trailing `<Dropdown>` overflow menu (D-109) instead of
+// always-expanded inline controls.
 //
 // E4.1 Wave C (D-107 client half): mounted two ways now. On `/` with no `initialCollectionId`, this owns
 // its own scope (mine/visible) exactly as before. Mounted by pages/Preview.tsx on `/f/*`/`/t/:token` with
@@ -30,6 +29,7 @@
 // a client-side-only placeholder row (C10, D-118) instead of a permanent form.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
+import { Dropdown, DropdownItem, Tab, Tabs } from "@mosni/react";
 import { can, isSuperuser, type Claims } from "../../../app/src/lib/roles.ts";
 import type { Protection, VisibilityReason } from "../../../app/src/lib/protection.ts";
 import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../../../app/src/lib/browseContext.ts";
@@ -210,23 +210,14 @@ function RowActions({
   onShare: () => void;
   onDeleteSelected: () => void;
 }) {
-  const ref = useRef<HTMLElement>(null);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    function onSelect(event: Event) {
-      const value = (event as CustomEvent<{ value: string }>).detail.value;
-      if (value === "copy") void copyLinkToClipboard(previewUrl);
-      else if (value === "rename") onRename();
-      else if (value === "protection") onProtection();
-      else if (value === "move") onMove();
-      else if (value === "share") onShare();
-      else if (value === "delete") onDeleteSelected();
-    }
-    el.addEventListener("mosni-dropdown-select", onSelect);
-    return () => el.removeEventListener("mosni-dropdown-select", onSelect);
-  }, [previewUrl, onRename, onProtection, onMove, onShare, onDeleteSelected]);
+  function onSelect(value: string) {
+    if (value === "copy") void copyLinkToClipboard(previewUrl);
+    else if (value === "rename") onRename();
+    else if (value === "protection") onProtection();
+    else if (value === "move") onMove();
+    else if (value === "share") onShare();
+    else if (value === "delete") onDeleteSelected();
+  }
 
   return (
     // E4.1 Wave E findings (C7, finding 3): icon-only (Wave 0.3) - just the ⋮ glyph, no visible text and
@@ -234,21 +225,21 @@ function RowActions({
     // visible text once icon-only is set, so it becomes the trigger's aria-label instead - safe to make
     // it per-row again ("Actions for <name>") since nothing renders it as literal button text anymore
     // (the old fixed "Actions" existed ONLY to avoid that - see D-79's phone-width finding).
-    <mosni-dropdown ref={ref} icon-only="more-vertical" label={`Actions for ${name}`}>
-      <mosni-dropdown-item value="copy">Copy link</mosni-dropdown-item>
-      {manage && <mosni-dropdown-item value="rename">Rename</mosni-dropdown-item>}
-      {manage && <mosni-dropdown-item value="protection">Protection</mosni-dropdown-item>}
+    <Dropdown iconOnly="more-vertical" label={`Actions for ${name}`} onSelect={onSelect}>
+      <DropdownItem value="copy">Copy link</DropdownItem>
+      {manage && <DropdownItem value="rename">Rename</DropdownItem>}
+      {manage && <DropdownItem value="protection">Protection</DropdownItem>}
       {/* G3 (E4.1 live-testing findings): gated on `manage`, same as rename/protection. */}
-      {manage && <mosni-dropdown-item value="move">Move</mosni-dropdown-item>}
+      {manage && <DropdownItem value="move">Move</DropdownItem>}
       {/* E7: gated on `manage` too - only the object's own owner (or a superuser) may share it (D-187),
           exactly the same population that may rename/change protection/move it. */}
-      {manage && <mosni-dropdown-item value="share">Share</mosni-dropdown-item>}
+      {manage && <DropdownItem value="share">Share</DropdownItem>}
       {mayDelete && (
-        <mosni-dropdown-item value="delete" variant="danger">
+        <DropdownItem value="delete" variant="danger">
           Delete
-        </mosni-dropdown-item>
+        </DropdownItem>
       )}
-    </mosni-dropdown>
+    </Dropdown>
   );
 }
 
@@ -700,7 +691,6 @@ export function FileBrowser({
   // C10/D-118: the "New collection" button inserts this CLIENT-SIDE-ONLY placeholder row; no server call
   // happens until confirm, and cancel touches nothing.
   const [creatingCollection, setCreatingCollection] = useState(false);
-  const tabsRef = useRef<HTMLElement>(null);
   // E5.1 Wave E (D-161): "Download all" progress now lives in the SHARED job stack (web/src/lib/jobs.ts),
   // same as upload progress - this is only a local "is one of MY archives currently in flight" flag, so
   // the button can disable itself without this component reading the store back.
@@ -789,24 +779,6 @@ export function FileBrowser({
   // branch of any kind - an admin sees the exact same two tabs as everyone else and sees more INSIDE
   // Browse because the server, not this filter, knows they are an admin.
   const visibleTabs = useMemo(() => SCOPE_TABS.filter((t) => t.scope === "visible" || user !== null), [user]);
-
-  useEffect(() => {
-    const el = tabsRef.current;
-    if (!el) return;
-    function onTabChange(event: Event) {
-      const index = (event as CustomEvent<{ index: number }>).detail.index;
-      const next = visibleTabs[index];
-      // Tabs only ever render in root mode (see the JSX below), where collectionId is always "" - no
-      // collectionId reset needed here the way the pre-Wave-C version needed one.
-      if (next) setScope(next.scope);
-    }
-    el.addEventListener("mosni-tab-change", onTabChange);
-    return () => el.removeEventListener("mosni-tab-change", onTabChange);
-    // `scope` is in the dep list even though it's not read in the body: `<mosni-tabs>` only actually
-    // mounts once `scope` leaves its initial `null` (the component returns just a spinner until then), so
-    // without this the ref is still empty the one time `visibleTabs` settles to its post-auth value, and
-    // this effect would never fire again to pick up the real node once it exists.
-  }, [visibleTabs, scope]);
 
   function reload() {
     setReloadKey((k) => k + 1);
@@ -992,16 +964,22 @@ export function FileBrowser({
       {/* Scope switching only makes sense in root mode - a collection-route mount is a fixed, specific
           collection (see the header comment), not something to browse mine/visible within. */}
       {!isCollectionRoute && authReady && visibleTabs.length > 1 && (
-        // D-112 (Wave 0) gave `<mosni-tab>` a write-through `label` setter, so this is ordinary JSX now -
-        // no more building an HTML string for dangerouslySetInnerHTML. `key` still forces a fresh element
-        // (and so a fresh one-time render() call) when the visible tab set itself changes, e.g. once auth
-        // resolves: MosniTabs.render() only runs once at connect and physically relocates its `<mosni-tab>`
-        // children from then on (see session-021's log), so a later prop-only update wouldn't re-run it.
-        <mosni-tabs key={visibleTabs.map((t) => t.scope).join(",")} ref={tabsRef}>
+        // E7.5 Wave C: <Tabs>/<Tab> (@mosni/react) render real DOM and own selection themselves - no ref,
+        // no mosni-tab-change listener, no key-based remount hack (all three existed only because the old
+        // custom element mounted once and physically relocated its children thereafter). `selectedIndex`
+        // must never be -1: `findIndex` returns that while `scope` is momentarily not among `visibleTabs`
+        // (reachable while auth resolves), so it is floored at 0.
+        <Tabs
+          selectedIndex={Math.max(0, visibleTabs.findIndex((t) => t.scope === scope))}
+          onChange={(index: number) => {
+            const next = visibleTabs[index];
+            if (next) setScope(next.scope);
+          }}
+        >
           {visibleTabs.map((tab) => (
-            <mosni-tab key={tab.scope} label={tab.label} selected={scope === tab.scope} />
+            <Tab key={tab.scope} label={tab.label} />
           ))}
-        </mosni-tabs>
+        </Tabs>
       )}
 
       {/* C9/D-117: the "Files and collections" heading is removed entirely, not moved. */}
