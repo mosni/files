@@ -8,6 +8,7 @@
 // a .html entry file's comments ship verbatim in the response; a .ts/.tsx comment does not survive
 // `vite build`'s minifier).
 
+import "@mosni/react/elements";
 import { createRoot } from "react-dom/client";
 import { readEmbeddedTarget } from "./lib/previewContext.ts";
 import { VideoPreview } from "./components/VideoPreview.tsx";

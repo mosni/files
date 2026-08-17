@@ -3,6 +3,7 @@
 // column. `own` outranks `granted` in how the server computes the reason (isListedFor()) - this component
 // still makes no precedence decision of its own, it only renders whichever reason it is handed.
 
+import { Tooltip } from "@mosni/react";
 import type { VisibilityReason } from "../../../app/src/lib/protection.ts";
 
 const LABEL: Record<VisibilityReason, string> = {
@@ -24,27 +25,15 @@ const ICON: Record<VisibilityReason, string> = {
   public: "globe",
 };
 
-declare module "react" {
-  namespace JSX {
-    interface IntrinsicElements {
-      "mosni-icon": React.DetailedHTMLProps<
-        React.HTMLAttributes<HTMLElement> & { name?: string; size?: string | number },
-        HTMLElement
-      >;
-      "mosni-tooltip": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement> & { text?: string }, HTMLElement>;
-    }
-  }
-}
-
 export function VisibilityIndicator({ reason }: { reason: VisibilityReason }) {
   const label = LABEL[reason];
   return (
-    <mosni-tooltip text={label}>
+    <Tooltip text={label}>
       {/* The tooltip text alone is not an accessible name for a hover-only trigger - role="img" plus
           aria-label keeps this announced the same as the old badge's visible text was. */}
       <span tabIndex={0} role="img" aria-label={label} style={{ display: "inline-flex" }}>
-        <mosni-icon name={ICON[reason]} size="18" />
+        <mosni-icon name={ICON[reason]} size={18} />
       </span>
-    </mosni-tooltip>
+    </Tooltip>
   );
 }

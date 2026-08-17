@@ -403,7 +403,12 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
-    expect(container.querySelector('mosni-tooltip[text="Public"] mosni-icon[name="globe"]')).not.toBeNull();
+    // E7.5: VisibilityIndicator now wraps its anchor in @mosni/react's <Tooltip>, which clones the anchor
+    // in place (no wrapper element) and portals the hover text to document.body - the accessible name is
+    // what's asserted here, same as before.
+    const anchor = container.querySelector('span[aria-label="Public"]');
+    expect(anchor).not.toBeNull();
+    expect(anchor?.querySelector('mosni-icon[name="globe"]')).not.toBeNull();
   });
 
   it("owner row (reason=own) gets a Protection menu item and a Delete item; a non-owner row gets neither, and the trigger's accessible name includes the row's name", async () => {

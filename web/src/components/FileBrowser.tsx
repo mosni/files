@@ -50,33 +50,6 @@ import { VisibilityIndicator } from "./VisibilityIndicator.tsx";
 
 type MosniUser = Claims | null;
 
-// React 19's @types/react moved IntrinsicElements under React.JSX (see DropZone.tsx's identical note for
-// mosni-login-button) - augment the "react" module's JSX namespace, not a bare global `JSX` namespace.
-declare module "react" {
-  namespace JSX {
-    interface IntrinsicElements {
-      "mosni-tabs": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-      "mosni-tab": React.DetailedHTMLProps<
-        React.HTMLAttributes<HTMLElement> & { label?: string; selected?: boolean },
-        HTMLElement
-      >;
-      "mosni-icon": React.DetailedHTMLProps<
-        React.HTMLAttributes<HTMLElement> & { name?: string; size?: string | number },
-        HTMLElement
-      >;
-      "mosni-dropdown": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement> & { label?: string }, HTMLElement>;
-      "mosni-dropdown-item": React.DetailedHTMLProps<
-        React.HTMLAttributes<HTMLElement> & { value?: string; variant?: string; disabled?: boolean },
-        HTMLElement
-      >;
-      "mosni-modal": React.DetailedHTMLProps<
-        React.HTMLAttributes<HTMLElement> & { heading?: string; open?: boolean },
-        HTMLElement
-      >;
-    }
-  }
-}
-
 // D-116: exactly two tabs, always. "Browse" means scope=visible for every viewer - an admin sees more
 // INSIDE it because the server knows they are an admin, never because a third tab exists.
 const SCOPE_TABS: { scope: Scope; label: string }[] = [
@@ -412,7 +385,7 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
               style={{ objectFit: "cover", borderRadius: 2 }}
             />
           ) : (
-            <mosni-icon name={iconForKind(row.kind)} size="18" />
+            <mosni-icon name={iconForKind(row.kind)} size={18} />
           )}
         </td>
         <td>
@@ -606,7 +579,7 @@ function CollectionRow({
     <>
       <tr data-row-id={row.id}>
         <td>
-          <mosni-icon name="folder" size="18" />
+          <mosni-icon name="folder" size={18} />
         </td>
         <td>
           {panel === "rename" ? (
@@ -1052,7 +1025,7 @@ export function FileBrowser({
             setCreatingCollection(true);
           }}
         >
-          <mosni-icon name="plus" size="16" /> New collection
+          <mosni-icon name="plus" size={16} /> New collection
         </button>
       )}
 
@@ -1127,7 +1100,7 @@ export function FileBrowser({
               disabled={archiveInFlight}
               onClick={() => void handleDownloadAll()}
             >
-              <mosni-icon name="download" size="16" /> Download all
+              <mosni-icon name="download" size={16} /> Download all
             </button>
           )}
 
@@ -1142,7 +1115,7 @@ export function FileBrowser({
               style={{ justifySelf: "start", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
               onClick={() => setShareOpen(true)}
             >
-              <mosni-icon name="user-plus" size="16" /> Share
+              <mosni-icon name="user-plus" size={16} /> Share
             </button>
           )}
           {isCollectionRoute && (
@@ -1186,7 +1159,7 @@ export function FileBrowser({
                 {creatingCollection && (
                   <tr>
                     <td>
-                      <mosni-icon name="folder" size="18" />
+                      <mosni-icon name="folder" size={18} />
                     </td>
                     <td>
                       <div className="field" style={{ marginBottom: 0 }}>

@@ -32,17 +32,6 @@ declare global {
   }
 }
 
-// React 19's @types/react moved IntrinsicElements under React.JSX rather than a bare global `JSX`
-// namespace (the old `declare global { namespace JSX {...} }` pattern silently fails to merge under
-// the "react-jsx" transform with these types) - augment the "react" module's JSX namespace instead.
-declare module "react" {
-  namespace JSX {
-    interface IntrinsicElements {
-      "mosni-login-button": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-    }
-  }
-}
-
 function toastError(message: string): void {
   if (typeof window.mosni !== "undefined" && window.mosni.toast) {
     window.mosni.toast(message, { variant: "error" });

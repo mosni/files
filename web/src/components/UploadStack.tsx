@@ -77,7 +77,7 @@ function DismissButton({ label, onDismiss }: { label: string; onDismiss: () => v
       onClick={onDismiss}
       style={{ position: "absolute", top: "0.5rem", right: "0.5rem" }}
     >
-      <mosni-icon name="x" size="14" />
+      <mosni-icon name="x" size={14} />
     </button>
   );
 }
@@ -155,7 +155,7 @@ function UploadStackItem({ upload, onDismiss }: { upload: UploadJob; onDismiss: 
               aria-label={`Copy direct link for ${upload.name}`}
               onClick={() => void copyDirectLink(upload.state.status === "done" ? (upload.state.directUrl ?? "") : "")}
             >
-              <mosni-icon name="copy" size="14" />
+              <mosni-icon name="copy" size={14} />
             </button>
           )}
         </div>
@@ -309,7 +309,7 @@ function GroupingStackItem({ batchId, onDismiss }: { batchId: string; onDismiss:
             aria-label={`Copy link for ${result.name}`}
             onClick={() => void copyDirectLink(result.previewUrl)}
           >
-            <mosni-icon name="copy" size="14" />
+            <mosni-icon name="copy" size={14} />
           </button>
         </div>
       </div>

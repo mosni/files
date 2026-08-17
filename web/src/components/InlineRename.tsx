@@ -20,10 +20,10 @@ export function IconConfirmCancel({
   return (
     <>
       <button type="button" className="btn-icon" aria-label={confirmLabel} disabled={confirmDisabled} onClick={onConfirm}>
-        <mosni-icon name="check" size="16" />
+        <mosni-icon name="check" size={16} />
       </button>
       <button type="button" className="btn-icon" aria-label={cancelLabel} onClick={onCancel}>
-        <mosni-icon name="x" size="16" />
+        <mosni-icon name="x" size={16} />
       </button>
     </>
   );

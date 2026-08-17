@@ -14,6 +14,7 @@
     "screenshot": "node scripts/screenshot.mjs"
   },
   "dependencies": {
+    "@mosni/react": "https://ui.mosni.dev/mosni-react-0.1.0.tgz",
     "fastify": "^5.0.0",
     "mysql2": "^3.0.0",
     "ioredis": "^5.0.0",

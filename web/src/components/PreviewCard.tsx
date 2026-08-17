@@ -5,6 +5,7 @@
 
 import { Component, lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { Code } from "@mosni/react";
 import type { PreviewContext } from "../../../app/src/lib/previewContext.ts";
 import { formatUploadDateTimeLocal } from "../../../app/src/lib/previewContext.ts";
 import type { Protection } from "../../../app/src/lib/protection.ts";
@@ -48,26 +49,6 @@ const FRAME: React.CSSProperties = { width: "100%", height: "min(70vh, 640px)", 
 const STACK_GAP = "0.35rem";
 const INLINE_ICON_GAP = "0.35rem";
 
-// Wrapper glue for <mosni-code> (the friction D-8 predicted for React + custom elements). The element's
-// render() reads this.textContent and then WIPES its own children to rebuild them - so it must already
-// contain its text at the moment it enters the document. React inserts an element and appends children
-// after, which means a JSX <mosni-code><pre>…</pre></mosni-code> upgrades while empty and renders an
-// empty block. Creating it imperatively with textContent already set fixes both halves: the content is
-// there on connect, and React never owns children the element intends to destroy.
-function CodeBlock({ text, language }: { text: string; language?: string }) {
-  const hostRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const host = hostRef.current;
-    if (host === null) return;
-    const el = document.createElement("mosni-code");
-    if (language !== undefined) el.setAttribute("language", language);
-    el.textContent = text;
-    host.replaceChildren(el);
-    return () => host.replaceChildren();
-  }, [text, language]);
-  return <div ref={hostRef} />;
-}
-
 // E5 Wave E (D-141): full text/code preview, capped at TEXT_FULL_MAX_BYTES. Above the cap, rendering the
 // whole file through Prism risks locking the tab - the snippet already captured at ingest plus a download
 // action stays the answer there. Below the cap, this fetches the full file from `directUrl` (cross-origin
@@ -99,7 +80,7 @@ function TextPreview({ ctx }: { ctx: PreviewContext }) {
   if (!withinCap) {
     return (
       <div className="panel" style={{ display: "grid", gap: "0.75rem" }}>
-        {ctx.textPreview !== null && <CodeBlock text={ctx.textPreview} language={language} />}
+        {ctx.textPreview !== null && <Code language={language}>{ctx.textPreview}</Code>}
         <a className="btn" href={ctx.directUrl}>
           Download to view in full
         </a>
@@ -107,7 +88,7 @@ function TextPreview({ ctx }: { ctx: PreviewContext }) {
     );
   }
 
-  return <CodeBlock text={fullText ?? ctx.textPreview ?? ""} language={language} />;
+  return <Code language={language}>{fullText ?? ctx.textPreview ?? ""}</Code>;
 }
 
 function renderMedia(ctx: PreviewContext) {
@@ -347,12 +328,12 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
             // D-111: btn-icon, never a bare <button> - mosni-chrome's _button.scss styles the bare
             // `button` element as a filled purple primary with no opt-out.
             <button type="button" className="btn-icon" aria-label="Rename" onClick={startRename}>
-              <mosni-icon name="pencil" size="16" />
+              <mosni-icon name="pencil" size={16} />
             </button>
           )}
           {headerMode === "view" && ctx.canDelete && (
             <button type="button" className="btn-icon" aria-label="Delete file" onClick={startDelete}>
-              <mosni-icon name="trash-2" size="16" />
+              <mosni-icon name="trash-2" size={16} />
             </button>
           )}
           {headerMode === "renaming" && (
@@ -395,11 +376,11 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
           >
             {ctx.isOwner && (
               <span style={{ display: "inline-flex", alignItems: "center", gap: INLINE_ICON_GAP }}>
-                <mosni-icon name="user-check" size="14" /> You own this file
+                <mosni-icon name="user-check" size={14} /> You own this file
               </span>
             )}
             <span style={{ display: "inline-flex", alignItems: "center", gap: INLINE_ICON_GAP }}>
-              <mosni-icon name={PROTECTION_ICON[ctx.protection]} size="14" /> {ctx.protection}
+              <mosni-icon name={PROTECTION_ICON[ctx.protection]} size={14} /> {ctx.protection}
             </span>
           </p>
         )}
@@ -470,7 +451,7 @@ export function PreviewCard({ context }: { context: PreviewContext }) {
             style={{ justifySelf: "start", display: "inline-flex", alignItems: "center", gap: "0.35rem" }}
             onClick={() => setShareOpen(true)}
           >
-            <mosni-icon name="user-plus" size="16" /> Share
+            <mosni-icon name="user-plus" size={16} /> Share
           </button>
           <ShareDialog type="file" id={ctx.id} objectLabel={ctx.name} open={shareOpen} onClose={() => setShareOpen(false)} />
         </>

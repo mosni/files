@@ -5,19 +5,6 @@
 
 import { renderToString } from "react-dom/server";
 
-declare module "react" {
-  namespace JSX {
-    interface IntrinsicElements {
-      "mosni-layout": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
-      "mosni-header": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement> & {
-        slot?: string;
-        brand?: string;
-        accent?: string;
-      };
-    }
-  }
-}
-
 function NotFound() {
   return (
     <html lang="en">

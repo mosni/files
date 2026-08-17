@@ -18,41 +18,6 @@ import { useSliderChange } from "../lib/sliderChange.ts";
 import { useSwitchChange } from "../lib/switchChange.ts";
 import { CopyLink } from "./CopyLink.tsx";
 
-declare module "react" {
-  namespace JSX {
-    interface IntrinsicElements {
-      "mosni-modal": React.DetailedHTMLProps<
-        React.HTMLAttributes<HTMLElement> & { heading?: string; open?: boolean },
-        HTMLElement
-      >;
-      "mosni-icon": React.DetailedHTMLProps<
-        React.HTMLAttributes<HTMLElement> & { name?: string; size?: string | number },
-        HTMLElement
-      >;
-      // E7-QA1 live-testing round 2 (F4/F13): confirmed real and registered by fetching and reading the
-      // ACTUAL built https://ui.mosni.dev/mosnicat-core.js directly (the source repo stays out of this
-      // session's scope, but the served bundle is a public URL) - `observedAttributes: ["checked",
-      // "disabled"]`, plus a `label` attribute it renders itself. `checked`/`disabled` are boolean
-      // ATTRIBUTES here, same as `mosni-modal`'s `open` above (React serializes a boolean prop on an
-      // unrecognized custom element as the attribute's bare presence/absence, never a stringified
-      // "true"/"false" - confirmed empirically this session). lib/switchChange.ts's useSwitchChange is the
-      // paired hook for reading the user's actual toggle back out.
-      "mosni-switch": React.DetailedHTMLProps<
-        React.HTMLAttributes<HTMLElement> & { checked?: boolean; disabled?: boolean; label?: string },
-        HTMLElement
-      >;
-      // E7-QA2 §1.2/D-207: mosni-chrome's generic ordered-discrete-choice slider - `stops` is pipe-
-      // delimited labels in order, `value` is the selected INDEX as a string (reflected as an attribute,
-      // same convention as mosni-switch's `checked`). lib/sliderChange.ts's useSliderChange is the paired
-      // hook for reading the user's actual selection back out.
-      "mosni-slider": React.DetailedHTMLProps<
-        React.HTMLAttributes<HTMLElement> & { stops?: string; value?: string; label?: string },
-        HTMLElement
-      >;
-    }
-  }
-}
-
 // Same subscribe-with-poll shape FileBrowser.tsx and lib/shareTarget.ts already use - the auth SDK's
 // <script> tag loads independently of this module, so window.mosni may not exist on first mount yet.
 function useCurrentUserSub(): string | null {
@@ -431,7 +396,7 @@ export function ShareDialog({
               <mosni-slider
                 ref={durationSliderRef}
                 stops={INVITE_DURATION_STOPS.map((stop) => stop.label).join("|")}
-                value={String(durationIndex)}
+                value={durationIndex}
                 label="Link expires after"
               />
               {/* D-208: this sentence renders in BOTH switch positions - today's default path said nothing
@@ -459,7 +424,7 @@ export function ShareDialog({
                 disabled={inviting}
                 onClick={() => void sendInvite()}
               >
-                <mosni-icon name="user-plus" size="16" /> Invite someone without an account
+                <mosni-icon name="user-plus" size={16} /> Invite someone without an account
               </button>
             </div>
           ) : (

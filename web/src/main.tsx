@@ -1,3 +1,4 @@
+import "@mosni/react/elements";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router";
 import { DropZone } from "./components/DropZone.tsx";

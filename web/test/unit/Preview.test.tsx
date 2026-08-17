@@ -756,14 +756,15 @@ describe("PreviewPage", () => {
     renderAt("/f/notes.txt");
 
     expect(container.querySelector("iframe")).toBeNull();
-    expect(container.querySelector("mosni-code")).toBeNull();
+    expect(container.querySelector(".code")).toBeNull();
     const link = container.querySelector(".panel a.btn") as HTMLAnchorElement;
     expect(link.textContent).toBe("Download to view in full");
     expect(link.getAttribute("href")).toBe("https://dl.mosni.dev/photo.png");
   });
 
   // session 013 debt: PreviewCard's CodeBlock (mosni-code wrapper) had no coverage at any tier.
-  it("renders <mosni-code> instead of an iframe for kind text when a textPreview was captured at ingest", () => {
+  // E7.5: CodeBlock is gone - <Code> from @mosni/react renders real DOM (div.code > pre > code).
+  it("renders <Code> instead of an iframe for kind text when a textPreview was captured at ingest", () => {
     embedContext(
       makeContext({ kind: "text", mimeType: "text/plain", name: "notes.txt", textPreview: "Hello from the file." }),
     );
@@ -772,7 +773,7 @@ describe("PreviewPage", () => {
     renderAt("/f/notes.txt");
 
     expect(container.querySelector("iframe")).toBeNull();
-    const code = container.querySelector("mosni-code");
+    const code = container.querySelector(".code code");
     expect(code).not.toBeNull();
     expect(code?.textContent).toBe("Hello from the file.");
   });
@@ -798,7 +799,7 @@ describe("PreviewPage", () => {
       await flush();
 
       expect(fetchSpy).toHaveBeenCalledWith("https://dl.mosni.dev/photo.png");
-      const code = container.querySelector("mosni-code");
+      const code = container.querySelector(".code code");
       expect(code?.textContent).toBe("the full file body");
     });
 
@@ -811,7 +812,7 @@ describe("PreviewPage", () => {
 
       renderAt("/f/notes.txt");
 
-      const code = container.querySelector("mosni-code");
+      const code = container.querySelector(".code code");
       expect(code?.textContent).toBe("short snippet");
     });
 
@@ -824,7 +825,7 @@ describe("PreviewPage", () => {
       renderAt("/f/notes.txt");
       await flush();
 
-      const code = container.querySelector("mosni-code");
+      const code = container.querySelector(".code code");
       expect(code?.textContent).toBe("short snippet");
     });
 
@@ -844,11 +845,11 @@ describe("PreviewPage", () => {
       renderAt("/f/notes.txt");
 
       expect(fetchSpy).not.toHaveBeenCalled();
-      expect(container.querySelector("mosni-code")?.textContent).toBe("short snippet");
+      expect(container.querySelector(".code code")?.textContent).toBe("short snippet");
       expect(container.querySelector(".panel a.btn")?.textContent).toBe("Download to view in full");
     });
 
-    it("passes a language derived from the filename's inner extension to mosni-code", async () => {
+    it("passes a language derived from the filename's inner extension to <Code>", async () => {
       embedContext(
         makeContext({
           kind: "text",
@@ -864,11 +865,11 @@ describe("PreviewPage", () => {
       renderAt("/f/script.py.txt");
       await flush();
 
-      const code = container.querySelector("mosni-code");
-      expect(code?.getAttribute("language")).toBe("python");
+      const code = container.querySelector(".code code");
+      expect(code?.className).toBe("language-python");
     });
 
-    it("passes no language attribute for a plain .txt file - Prism degrades to unhighlighted", () => {
+    it("passes no language for a plain .txt file - Prism degrades to unhighlighted", () => {
       embedContext(
         makeContext({ kind: "text", mimeType: "text/plain", name: "notes.txt", bytes: 500_000, textPreview: "plain text" }),
       );
@@ -876,7 +877,7 @@ describe("PreviewPage", () => {
 
       renderAt("/f/notes.txt");
 
-      expect(container.querySelector("mosni-code")?.hasAttribute("language")).toBe(false);
+      expect(container.querySelector(".code code")?.className).toBe("language-");
     });
   });
 
