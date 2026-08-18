@@ -1,0 +1,42 @@
+name: no-claude-branches
+
+# Backstop for .githooks/pre-push: the hook only runs in clones that ran
+# `git config core.hooksPath .githooks`, so a fresh checkout can still push a
+# claude/* branch. This job cannot reject the push - the ref has already
+# landed - it fails the branch loudly so the push is visibly not accepted
+# work. Delete the branch by hand once the work is off it.
+
+on:
+  push:
+    branches: ['claude/**']
+
+permissions:
+  contents: read
+
+jobs:
+  reject:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail on agent working branch
+        env:
+          BRANCH: ${{ github.ref_name }}
+          PUSHER: ${{ github.event.pusher.name }}
+        run: |
+          {
+            echo "### Agent working branch pushed"
+            echo
+            echo "Branch \`$BRANCH\` was pushed by \`$PUSHER\`."
+            echo
+            echo "Branches named \`claude/*\` stay local. See \`agent-docs/git-workflow.md\`, rule 6:"
+            echo "do not push, force-push, rebase, or rewrite history unless the user"
+            echo "explicitly asks for it."
+            echo
+            echo "If this push was not requested, delete the remote branch:"
+            echo
+            echo '```sh'
+            echo "git push origin --delete $BRANCH"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::error title=Agent working branch::$BRANCH was pushed to the remote. See agent-docs/git-workflow.md rule 6 - claude/* branches stay local."
+          exit 1

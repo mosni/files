@@ -1,0 +1,62 @@
+#!/bin/sh
+#
+# Only main (and tags) may be pushed from this repo.
+#
+# Third layer of the branch policy in agent-docs/git-workflow.md rule 3, below
+# agent-docs/hooks/branch-policy-guard.sh. That guard runs as a Claude Code
+# PreToolUse hook, so it only exists where .claude/settings.json is loaded; a
+# session cut onto a claude/* branch may not have it at all. Git runs this hook
+# for every push from the checkout, whoever issued it.
+#
+# Completed work is merged and pushed to main here (rule 3: this project does
+# not use feature branches). A claude/<task> branch is scaffolding, not a
+# deliverable - delete it before the session ends rather than pushing it.
+#
+# Note that a push to main IS a deploy (.github/workflows/deploy.yml), and the
+# deploy server serializes across the box: space cross-repo pushes out, or the
+# second one 409s. See agent-docs/git-workflow.md rule 3.
+#
+# This is a name rule, not a permission rule. Rule 3 is the standing permission
+# to push at closeout - this hook only constrains where.
+#
+# Install (once per clone, git does not ship hooks on clone):
+#
+#   git config core.hooksPath .githooks
+#
+# In a Claude Code cloud session, put that line in the environment's setup
+# script so the hook is armed before the agent starts working.
+#
+# stdin lines are: <local ref> <local sha> <remote ref> <remote sha>
+
+zero=$(git hash-object --stdin </dev/null | tr '0-9a-f' '0')
+
+blocked=''
+while read -r local_ref local_sha remote_ref remote_sha; do
+	# Deleting a branch is always allowed - it removes a ref rather than adding one.
+	if [ "$local_sha" = "$zero" ]; then
+		continue
+	fi
+
+	case "$remote_ref" in
+	refs/heads/main | refs/tags/*) continue ;;
+	esac
+
+	blocked="$blocked  ${remote_ref#refs/}
+"
+done
+
+if [ -n "$blocked" ]; then
+	cat >&2 <<EOF
+
+pre-push: refusing to push ref(s) other than main:
+
+$blocked
+Completed work goes to main here. A session harness branch such as
+claude/<task> is not a branch this repo uses - merge the work into main and
+push that. See agent-docs/git-workflow.md rule 3.
+
+EOF
+	exit 1
+fi
+
+exit 0

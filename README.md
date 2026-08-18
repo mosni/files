@@ -37,6 +37,14 @@ This repo is **TDD**: write the failing test first, then the implementation. Cov
 invariant) are listed in `agent-docs/verification-concept.md` and must never be deleted, skipped, or
 weakened to make a change pass.
 
+### Branch hygiene
+
+Completed work is pushed to `main`; a session harness branch such as `claude/<task>` is not a branch this
+repo uses (`agent-docs/git-workflow.md`). `.githooks/pre-push` refuses any push whose target is not `main`
+or a tag — deleting a branch stays allowed. Opt in per clone with `git config core.hooksPath .githooks`,
+or from the cloud environment's setup script. A repository ruleset blocks `claude/**` server-side, and the
+`no-claude-branches` workflow fails any such push that got through anyway.
+
 ## Browser-driven e2e (D-53, reverses D-28)
 
 `e2e/` holds Playwright specs, run only via `npx playwright test` / `npm run test:e2e` — **never** through
