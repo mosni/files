@@ -14,6 +14,7 @@ import { resolveCollectionById, revokeCollectionAcl } from "../storage/collectio
 import { setAccountRole } from "../auth/internalApi.ts";
 import { volumeUsage } from "../lib/diskUsage.ts";
 import { trackedBytesByOwner, trackedBytesTopCollections, trackedBytesTotal } from "../storage/usage.ts";
+import type { AdminGrantRow, AdminUsageResponse } from "../lib/adminContext.ts";
 
 const USAGE_TOP_COLLECTIONS_LIMIT = 10;
 
@@ -33,13 +34,12 @@ export async function listGrantsHandler(request: FastifyRequest, reply: FastifyR
   const claims = await requireAdmin(request, reply, config);
   if (claims === null) return;
   const grants = await listAllGrants();
-  reply.send({
-    grants: grants.map((grant) => ({
-      ...grant,
-      grantedAt: grant.grantedAt.toISOString(),
-      expiresAt: grant.expiresAt === null ? null : grant.expiresAt.toISOString(),
-    })),
-  });
+  const rows: AdminGrantRow[] = grants.map((grant) => ({
+    ...grant,
+    grantedAt: grant.grantedAt.toISOString(),
+    expiresAt: grant.expiresAt === null ? null : grant.expiresAt.toISOString(),
+  }));
+  reply.send({ grants: rows });
 }
 
 export async function revokeGrantHandler(request: FastifyRequest, reply: FastifyReply, config: Config): Promise<void> {
@@ -91,5 +91,6 @@ export async function usageHandler(request: FastifyRequest, reply: FastifyReply,
   // actually is.
   const untrackedBytes = volume === null ? null : Math.max(0, volume.usedBytes - tracked.bytes);
 
-  reply.send({ volume, tracked, untrackedBytes, byOwner, topCollections });
+  const body: AdminUsageResponse = { volume, tracked, untrackedBytes, byOwner, topCollections };
+  reply.send(body);
 }

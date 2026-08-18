@@ -14,6 +14,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router";
 import { HeaderIdentity } from "../../src/lib/headerIdentity.tsx";
 
 type Listener = (user: unknown) => void;
@@ -81,7 +82,11 @@ describe("HeaderIdentity (live-testing addition, 2026-08-06)", () => {
 
   it("renders nothing until signed in", async () => {
     act(() => {
-      root.render(<HeaderIdentity />);
+      root.render(
+        <MemoryRouter>
+          <HeaderIdentity />
+        </MemoryRouter>,
+      );
     });
     expect(container.textContent).toBe("");
 
@@ -94,7 +99,11 @@ describe("HeaderIdentity (live-testing addition, 2026-08-06)", () => {
   it("shows the avatar and the captured name once signed in", async () => {
     const sdk = installSdk();
     act(() => {
-      root.render(<HeaderIdentity />);
+      root.render(
+        <MemoryRouter>
+          <HeaderIdentity />
+        </MemoryRouter>,
+      );
     });
     await flush();
 
@@ -109,7 +118,11 @@ describe("HeaderIdentity (live-testing addition, 2026-08-06)", () => {
   it("falls back to the sub when no name claim is present (D-168's rule)", async () => {
     const sdk = installSdk();
     act(() => {
-      root.render(<HeaderIdentity />);
+      root.render(
+        <MemoryRouter>
+          <HeaderIdentity />
+        </MemoryRouter>,
+      );
     });
     await flush();
 
@@ -127,7 +140,11 @@ describe("HeaderIdentity (live-testing addition, 2026-08-06)", () => {
   it("truncates a long identity rather than running it across the header", async () => {
     const sdk = installSdk();
     act(() => {
-      root.render(<HeaderIdentity />);
+      root.render(
+        <MemoryRouter>
+          <HeaderIdentity />
+        </MemoryRouter>,
+      );
     });
     await flush();
 
@@ -163,7 +180,11 @@ describe("HeaderIdentity (live-testing addition, 2026-08-06)", () => {
     matchMediaMatches = true;
     const sdk = installSdk();
     act(() => {
-      root.render(<HeaderIdentity />);
+      root.render(
+        <MemoryRouter>
+          <HeaderIdentity />
+        </MemoryRouter>,
+      );
     });
     await flush();
 
@@ -179,7 +200,11 @@ describe("HeaderIdentity (live-testing addition, 2026-08-06)", () => {
     matchMediaMatches = false;
     const sdk = installSdk();
     act(() => {
-      root.render(<HeaderIdentity />);
+      root.render(
+        <MemoryRouter>
+          <HeaderIdentity />
+        </MemoryRouter>,
+      );
     });
     await flush();
 
@@ -192,7 +217,11 @@ describe("HeaderIdentity (live-testing addition, 2026-08-06)", () => {
   it("clears back to empty on sign-out", async () => {
     const sdk = installSdk();
     act(() => {
-      root.render(<HeaderIdentity />);
+      root.render(
+        <MemoryRouter>
+          <HeaderIdentity />
+        </MemoryRouter>,
+      );
     });
     await flush();
 
@@ -207,7 +236,11 @@ describe("HeaderIdentity (live-testing addition, 2026-08-06)", () => {
   it("removes the avatar image on a load failure instead of leaving a broken icon", async () => {
     const sdk = installSdk();
     act(() => {
-      root.render(<HeaderIdentity />);
+      root.render(
+        <MemoryRouter>
+          <HeaderIdentity />
+        </MemoryRouter>,
+      );
     });
     await flush();
     sdk.signIn({ name: "Hannah" });
@@ -223,5 +256,70 @@ describe("HeaderIdentity (live-testing addition, 2026-08-06)", () => {
 
     expect(container.querySelector("img")).toBeNull();
     expect(container.textContent).toBe("Logged in as Hannah");
+  });
+
+  // E8/D-217: the admin button's absence is the cosmetic half of reveal-nothing - the server's 404
+  // (controllers/admin.ts) is the half that actually matters, but the button must not leak the panel's
+  // existence to a non-admin browsing normally either.
+  describe("admin button (E8, D-217)", () => {
+    function render() {
+      act(() => {
+        root.render(
+          <MemoryRouter>
+            <HeaderIdentity />
+          </MemoryRouter>,
+        );
+      });
+    }
+
+    it("renders for a both-roles admin, linking to /admin", async () => {
+      const sdk = installSdk();
+      render();
+      await flush();
+      sdk.signIn({ name: "Hannah", roles: ["files:write", "files:delete"] });
+      await flush();
+
+      const link = container.querySelector<HTMLAnchorElement>('a[aria-label="Admin"]');
+      expect(link).not.toBeNull();
+      expect(link!.getAttribute("href")).toBe("/admin");
+    });
+
+    it("renders for mosni_owner alone", async () => {
+      const sdk = installSdk();
+      render();
+      await flush();
+      sdk.signIn({ name: "Hannah", roles: [], mosni_owner: true });
+      await flush();
+
+      expect(container.querySelector('a[aria-label="Admin"]')).not.toBeNull();
+    });
+
+    it("does NOT render for a files:write-only user", async () => {
+      const sdk = installSdk();
+      render();
+      await flush();
+      sdk.signIn({ name: "Hannah", roles: ["files:write"] });
+      await flush();
+
+      expect(container.querySelector('a[aria-label="Admin"]')).toBeNull();
+    });
+
+    it("does NOT render for a files:read-only user", async () => {
+      const sdk = installSdk();
+      render();
+      await flush();
+      sdk.signIn({ name: "Hannah", roles: ["files:read"] });
+      await flush();
+
+      expect(container.querySelector('a[aria-label="Admin"]')).toBeNull();
+    });
+
+    it("does NOT render for a signed-out visitor", async () => {
+      installSdk();
+      render();
+      await flush();
+
+      expect(container.querySelector('a[aria-label="Admin"]')).toBeNull();
+    });
   });
 });

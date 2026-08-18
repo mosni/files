@@ -6,6 +6,7 @@ import { DropZone } from "./components/DropZone.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { UploadStack } from "./components/UploadStack.tsx";
 import { PreviewPage } from "./pages/Preview.tsx";
+import { AdminPage } from "./pages/Admin.tsx";
 import { restorePausedUploads } from "./lib/uploads.ts";
 import { initShareTarget } from "./lib/shareTarget.ts";
 import { HeaderIdentity } from "./lib/headerIdentity.tsx";
@@ -100,6 +101,7 @@ if (root) {
           />
           <Route path="/f/*" element={<PreviewPage />} />
           <Route path="/t/:token" element={<PreviewPage />} />
+          <Route path="/admin" element={<AdminPage />} />
         </Routes>
         <UploadStack />
       </main>
