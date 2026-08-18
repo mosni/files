@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { VisibilityIndicator } from "../../src/components/VisibilityIndicator.tsx";
 
@@ -41,5 +45,43 @@ describe("VisibilityIndicator (D-103/D-189: own / hosted / granted / admin / pub
   it("carries an accessible name independent of the tooltip (role=img + aria-label)", () => {
     const html = renderToStaticMarkup(<VisibilityIndicator reason="own" />);
     expect(html).toContain('role="img"');
+  });
+});
+
+// ⚠ Review session 055. The SSR block above used to assert `text="Yours"` on `<mosni-tooltip>`; E7.5
+// dropped that line because `<Tooltip>` portals its tip to document.body on the CLIENT and renders
+// nothing for it under renderToStaticMarkup. Nothing replaced it, so the hover text - the only thing this
+// component exists to show - was asserted at no tier: `aria-label` is a different prop on a different
+// element, so deleting `text={label}` from the JSX would have left every test above green. The tip is
+// rendered eagerly and merely `hidden` until hover, so a client render can read it without simulating one.
+describe("VisibilityIndicator: the tooltip actually receives its text (E7.5 Wave B)", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it.each([
+    ["own", "Yours"],
+    ["hosted", "In your collection"],
+    ["granted", "Shared with you"],
+    ["admin", "Admin view"],
+    ["public", "Public"],
+  ] as const)("%s renders its label as the tip text", (reason, label) => {
+    act(() => {
+      root.render(<VisibilityIndicator reason={reason} />);
+    });
+
+    const tip = document.body.querySelector('[role="tooltip"]');
+    expect(tip, "<Tooltip> must portal a tip element even before hover").not.toBeNull();
+    expect(tip!.textContent).toBe(label);
   });
 });

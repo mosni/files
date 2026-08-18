@@ -242,4 +242,41 @@ test.describe("real mosni-chrome integration (must load the ACTUAL mosnicat.js/a
 
     expect(pageErrors, `uncaught page errors: ${pageErrors.join(", ")}`).toEqual([]);
   });
+
+  // ⚠ Added by review session 055. E7.5 Wave E (D-213) moved the header out of index.html's static <body>
+  // and into main.tsx's React tree, which gave main.tsx a second load-bearing guarantee: <Header> renders
+  // as a SIBLING before the width-capped <main>, never inside it. main.tsx's own comment names the failure
+  // ("or it renders capped and centred instead of full-width"), and nothing enforced it - main.tsx is
+  // excluded from coverage as untestable mount glue and is imported by no test, so the only evidence was a
+  // screenshot a human had to look at. This tier renders the real built SPA, so the structure is readable
+  // directly, and it fails on a header nested one level too deep - which a screenshot only catches if
+  // somebody notices the width.
+  test("the header renders in the React tree as a sibling of <main>, never nested inside it (D-213)", async ({
+    page,
+    request,
+  }) => {
+    const sub = `user:e2e-header-structure-${randomUUID()}`;
+    const token = await mintToken(request, sub);
+
+    await page.route("**/sdk.js", (route) => route.abort());
+    await page.addInitScript(`
+      window.mosni = Object.assign(window.mosni ?? {}, {
+        user: () => ({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        token: () => ${JSON.stringify(token)},
+        onChange: (cb) => cb({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        login: () => {}, logout: () => {},
+        toast: () => {},
+      });
+    `);
+
+    await page.goto(`${FILES_ORIGIN}/`);
+    // Wait for the React root, not the header - the header IS the thing under test, so waiting on it
+    // would turn "it never rendered at all" into a timeout in the wrong place.
+    await expect(page.getByRole("tab", { name: "My files" })).toBeVisible({ timeout: 20_000 });
+
+    await expect(page.locator("header.header")).toHaveCount(1);
+    await expect(page.locator("main header.header"), "the header must not be inside the width-capped <main>").toHaveCount(0);
+    // ...and it is React's, not a leftover static tag in the shipped index.html (E1).
+    await expect(page.locator("mosni-header")).toHaveCount(0);
+  });
 });

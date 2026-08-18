@@ -123,9 +123,17 @@ describe("routes/embed.ts + controllers/embed.ts (E5 Wave H, D-140)", () => {
     expect(res.headers["content-type"]).toContain("text/html");
     expect(res.body).toContain("clip.mp4");
     expect(res.body).toContain('id="preview-context"');
-    // No app chrome in the shell this route splices into (H1).
-    expect(res.body).not.toContain("mosni-header");
-    expect(res.body).not.toContain("auth.mosni.dev/sdk.js");
+    // H1: this route splices into the EMBED shell, never the SPA's. ⚠ Review session 055 rewrote this,
+    // twice over. It used to read `expect(res.body).not.toContain("mosni-header")`, which was doubly
+    // hollow: E7.5 Wave E deleted that tag from index.html as well, so it no longer told the two shells
+    // apart at all - and, more fundamentally, this suite installs its own FAKE_EMBED_SHELL above, so every
+    // "the response carries no app chrome" assertion here only ever asserts about a string this file wrote
+    // itself. That is the stub-of-the-thing-that-breaks shape (HANDOFF.md): the fixture has removed the
+    // only risk the assertion exists to catch. The load-bearing check is the POSITIVE one - a marker only
+    // the embed shell carries, which does fail if controllers/embed.ts ever splices getSpaShell() instead.
+    // The real `web/embed.html` is guarded where it actually lives, as a file, by
+    // web/test/unit/htmlEntries.test.ts.
+    expect(res.body).toContain("/assets/embed-test.js");
 
     const csp = res.headers["content-security-policy"] as string;
     const frameAncestors = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("frame-ancestors"));

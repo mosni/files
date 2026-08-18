@@ -297,6 +297,76 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
     await expect(page.getByText(name, { exact: true }).first()).toBeVisible();
   });
 
+  // ⚠ Added by review session 055, and it is the cell E7.5 left blank. Dismissal used to be OWNED by this
+  // repo: `lib/modalClose.ts` listened for the element's own `close`/`mosni-modal-close` events, and F7
+  // (E7-QA1 §C2) is the real bug that came of getting it wrong - a dialog that closed itself left React's
+  // `open` stuck true and the modal never reopened. E7.5 deleted that hook and moved dismissal into
+  // `<Modal>`: ESC is now the NATIVE <dialog>'s own behaviour, and the backdrop is an `onPointerDown`
+  // comparing `event.target === event.currentTarget`. Neither of those can be reached from jsdom - the unit
+  // tier's polyfill (web/test/setup.ts) implements neither, so ShareDialog.test.tsx's F7 test dispatches a
+  // synthetic `close` event and therefore only proves the wiring DOWNSTREAM of a dismissal that already
+  // happened. The hand-off asked for both paths as a human hand-walk instead; a hand-walk is not a guard
+  // (HANDOFF.md: "an invariant whose only enforcement is a procedure is not enforced"), so here it is at
+  // the one tier that can actually produce the gestures.
+  //
+  // Proven red-then-green: replacing <Modal onClose={onClose}> in ShareDialog.tsx with a no-op fails both
+  // halves (the dialog closes natively, React never hears, and the reopen below is a no-op) - which is F7
+  // exactly.
+  test("the share dialog closes by ESC and by a backdrop click, and reopens afterwards (F7)", async ({
+    page,
+    request,
+  }) => {
+    const sub = `user:e2e-share-dismiss-${randomUUID()}`;
+    const token = await mintToken(request, sub);
+    const name = `share-dismiss-${randomUUID().slice(0, 8)}.txt`;
+    await withDb((conn) => seedPrivateFile(conn, { name, ownerSub: sub }));
+
+    const pageErrors: string[] = [];
+    page.on("pageerror", (err) => pageErrors.push(err.message));
+
+    await page.route("**/sdk.js", (route) => route.abort());
+    await page.addInitScript(`
+      window.mosni = Object.assign(window.mosni ?? {}, {
+        user: () => ({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        token: () => ${JSON.stringify(token)},
+        onChange: (cb) => cb({ sub: ${JSON.stringify(sub)}, roles: ["files:write"] }),
+        login: () => {}, logout: () => {},
+        toast: () => {},
+      });
+    `);
+
+    await page.goto(`${FILES_ORIGIN}/`);
+    await expect(page.getByText(name, { exact: true }).first()).toBeVisible({ timeout: 20_000 });
+
+    const shareModal = page.locator("dialog.modal").filter({ has: page.locator(".modal-heading", { hasText: /^Share/ }) });
+    const openShare = async () => {
+      await page.locator('button[aria-haspopup="menu"]').first().click();
+      await page.getByRole("menuitem", { name: "Share" }).click();
+      await expect(shareModal).toHaveAttribute("open", /.*/, { timeout: 20_000 });
+    };
+
+    // 1. ESC. `open` is the native HTMLDialogElement IDL attribute, so this is the DOM's own ground truth
+    //    for "the dialog closed", not a class or a React-rendered string.
+    await openShare();
+    await page.keyboard.press("Escape");
+    await expect(shareModal).not.toHaveAttribute("open", /.*/);
+
+    // 2. ...and it reopens. This is the half F7 broke: a self-close React never heard about leaves `open`
+    //    stuck true, so the next click sets it true again and nothing happens.
+    await openShare();
+
+    // 3. The backdrop. A modal <dialog>'s backdrop hit-tests as the dialog element ITSELF, which is what
+    //    <Modal>'s `event.target === event.currentTarget` check keys on - so a click in the far corner,
+    //    outside the dialog's own box, is a real user's backdrop dismissal and not a synthetic stand-in.
+    await page.mouse.click(5, 5);
+    await expect(shareModal).not.toHaveAttribute("open", /.*/);
+
+    // ...and again, from the backdrop route this time.
+    await openShare();
+
+    expect(pageErrors, `uncaught page errors: ${pageErrors.join(", ")}`).toEqual([]);
+  });
+
   // E7-QA1 §D3/F8: the headline finding of this round, proven in a REAL browser - a genuine navigation to
   // a private collection's deep link, which sends no Authorization header at all (that is what a browser
   // navigation is). Before this fix the document layer gated on that missing header and 404'd for
