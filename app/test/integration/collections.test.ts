@@ -18,6 +18,8 @@ import {
   isDescendantOf,
   listCollectionGrants,
   listCollectionsFor,
+  listLinkAuthorizedChildCollections,
+  listVisibleChildCollections,
   moveCollection,
   revokeCollectionAcl,
   protectionChain,
@@ -543,6 +545,113 @@ describe("storage/collections.ts - nested collections (D-80/D-88)", () => {
       expect(await hasAclGrantOnChain(child.id, probe)).toBe(false);
       // ...and the real grant still works, so this is strictness, not a broken read path.
       expect(await hasAclGrantOnChain(child.id, granted)).toBe(true);
+    });
+  });
+
+  // E8 Wave A5 (D-219/D-220): expiry enforcement on every collection-side ACL read. Each assertion below
+  // asserts an ABSENCE of access and was run RED against the pre-Wave-A predicates before
+  // COLLECTION_GRANT_LIVE was appended - a never-ran-red assertion proves nothing (see the hand-off's own
+  // warning on this wave).
+  describe("expiry enforcement (D-219/D-220, E8)", () => {
+    function pastDate(): Date {
+      return new Date(Date.now() - 60_000);
+    }
+    function futureDate(): Date {
+      return new Date(Date.now() + 60_000);
+    }
+
+    it("granted_at is populated automatically on insert", async () => {
+      const collection = await createCollection({ parentId: "", name: `granted-at-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      await grantCollectionAcl(collection.id, "user:grantee", false);
+      const [rows] = await getPool().query(
+        "SELECT granted_at FROM collection_acl WHERE collection_id = ? AND sub = ?",
+        [collection.id, "user:grantee"],
+      );
+      expect((rows as { granted_at: Date }[])[0]?.granted_at).toBeInstanceOf(Date);
+    });
+
+    it("hasCollectionAclGrant: an EXPIRED grant does NOT authorize", async () => {
+      const collection = await createCollection({ parentId: "", name: `expired-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      await grantCollectionAcl(collection.id, "user:grantee", false, pastDate());
+      expect(await hasCollectionAclGrant(collection.id, "user:grantee")).toBe(false);
+    });
+
+    it("hasCollectionAclGrant: a NULL expiry authorizes (the ordinary-share case)", async () => {
+      const collection = await createCollection({ parentId: "", name: `permanent-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      await grantCollectionAcl(collection.id, "user:grantee", false, null);
+      expect(await hasCollectionAclGrant(collection.id, "user:grantee")).toBe(true);
+    });
+
+    it("hasCollectionAclGrant: a FUTURE expiry authorizes", async () => {
+      const collection = await createCollection({ parentId: "", name: `future-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      await grantCollectionAcl(collection.id, "user:grantee", false, futureDate());
+      expect(await hasCollectionAclGrant(collection.id, "user:grantee")).toBe(true);
+    });
+
+    it("hasAclGrantOnChain: an EXPIRED grant on an ancestor does NOT authorize", async () => {
+      const top = await createCollection({ parentId: "", name: `expired-chain-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(top.id);
+      const child = await createCollection({ parentId: top.id, name: "child", ownerSub: "user:a" });
+      createdCollectionIds.push(child.id);
+      await grantCollectionAcl(top.id, "user:grantee", false, pastDate());
+      expect(await hasAclGrantOnChain(child.id, "user:grantee")).toBe(false);
+    });
+
+    it("canUploadTo: an EXPIRED can_upload grant does NOT authorize", async () => {
+      const collection = await createCollection({ parentId: "", name: `expired-upload-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      await grantCollectionAcl(collection.id, "user:grantee", true, pastDate());
+      expect(await canUploadTo(collection, { sub: "user:grantee" })).toBe(false);
+    });
+
+    it("hasAnyUploadGrant: an EXPIRED can_upload grant does not count", async () => {
+      const collection = await createCollection({ parentId: "", name: `expired-any-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      const sub = `user:${randomUUID()}`;
+      await grantCollectionAcl(collection.id, sub, true, pastDate());
+      expect(await hasAnyUploadGrant(sub)).toBe(false);
+    });
+
+    it("listCollectionGrants omits an EXPIRED grant", async () => {
+      const collection = await createCollection({ parentId: "", name: `list-expired-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(collection.id);
+      await grantCollectionAcl(collection.id, "user:live", false, futureDate());
+      await grantCollectionAcl(collection.id, "user:dead", false, pastDate());
+      expect(await listCollectionGrants(collection.id)).toEqual([{ sub: "user:live", canUpload: false }]);
+    });
+
+    it("listVisibleChildCollections omits a collection reachable only via an EXPIRED ACL grant", async () => {
+      const parent = await createCollection({ parentId: "", name: `visible-expired-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(parent.id);
+      const child = await createCollection({
+        parentId: parent.id,
+        name: "child",
+        ownerSub: "user:a",
+        protection: "private",
+      });
+      createdCollectionIds.push(child.id);
+      await grantCollectionAcl(child.id, "user:grantee", false, pastDate());
+      const ids = (await listVisibleChildCollections(parent.id, "user:grantee")).map((c) => c.id);
+      expect(ids).not.toContain(child.id);
+    });
+
+    it("listLinkAuthorizedChildCollections omits a collection reachable only via an EXPIRED ACL grant", async () => {
+      const parent = await createCollection({ parentId: "", name: `link-expired-${randomUUID()}`, ownerSub: "user:a" });
+      createdCollectionIds.push(parent.id);
+      const child = await createCollection({
+        parentId: parent.id,
+        name: "child",
+        ownerSub: "user:a",
+        protection: "private",
+      });
+      createdCollectionIds.push(child.id);
+      await grantCollectionAcl(child.id, "user:grantee", false, pastDate());
+      const ids = (await listLinkAuthorizedChildCollections(parent.id, "user:grantee")).map((c) => c.id);
+      expect(ids).not.toContain(child.id);
     });
   });
 

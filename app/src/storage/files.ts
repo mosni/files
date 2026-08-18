@@ -14,6 +14,7 @@ import { mintUniqueToken } from "../lib/tokens.ts";
 import { generateId } from "../lib/ids.ts";
 import { protectionChain, resolveCollectionByNames } from "./collections.ts";
 import { getPool, isLinkTokenTaken } from "./db.ts";
+import { FILE_GRANT_EXISTS, FILE_GRANT_LIVE } from "./aclPredicates.ts";
 
 export type FileRecord = {
   id: string;
@@ -240,7 +241,7 @@ export async function listVisibleFilesIn(collectionId: string, viewerSub: string
        AND (
          protection = 'public'
          OR owner_sub = ?
-         OR EXISTS (SELECT 1 FROM file_acl WHERE file_acl.file_id = files.id AND file_acl.sub = ?)
+         OR ${FILE_GRANT_EXISTS}
        )
      ORDER BY created_at DESC`,
     [collectionId, viewerSub, viewerSub],
@@ -266,7 +267,7 @@ export async function listLinkAuthorizedFilesIn(collectionId: string, viewerSub:
        AND (
          protection IN ('public','unlisted')
          OR owner_sub = ?
-         OR EXISTS (SELECT 1 FROM file_acl WHERE file_acl.file_id = files.id AND file_acl.sub = ?)
+         OR ${FILE_GRANT_EXISTS}
        )
      ORDER BY created_at DESC`,
     [collectionId, viewerSub, viewerSub],
@@ -285,9 +286,10 @@ export async function listAllFilesIn(collectionId: string): Promise<FileRecord[]
 // Security invariant 6: sub is matched byte-for-byte, never parsed - a plain equality WHERE clause is
 // exactly that. Used by the delivery/preview controllers to authorize `private` access for a
 // non-owner/non-superuser.
+// E8 Wave A2 (D-221/D-220): appends FILE_GRANT_LIVE - an expired grant no longer authorizes.
 export async function hasAclGrant(fileId: string, sub: string): Promise<boolean> {
   const [rows] = await getPool().query<RowDataPacket[]>(
-    "SELECT 1 FROM file_acl WHERE file_id = ? AND sub = ? LIMIT 1",
+    `SELECT 1 FROM file_acl WHERE file_id = ? AND sub = ? AND ${FILE_GRANT_LIVE} LIMIT 1`,
     [fileId, sub],
   );
   return rows.length > 0;
@@ -297,18 +299,27 @@ export async function hasAclGrant(fileId: string, sub: string): Promise<boolean>
 // authorization (D-187). Every sub below is bound as an opaque query parameter - no LIKE, no SUBSTRING, no
 // prefix comparison anywhere (security invariant 6).
 
+// E8 Wave A3 (D-220): feeds the share dialog's "who has access" list - once an expired grant no longer
+// authorizes, showing it there would be a lie. The admin panel does NOT use this (it needs expired rows
+// too); it gets them from storage/grants.ts's listAllGrants, which deliberately applies no filter.
 export async function listFileGrants(fileId: string): Promise<string[]> {
   const [rows] = await getPool().query<RowDataPacket[]>(
-    "SELECT sub FROM file_acl WHERE file_id = ? ORDER BY sub",
+    `SELECT sub FROM file_acl WHERE file_id = ? AND ${FILE_GRANT_LIVE} ORDER BY sub`,
     [fileId],
   );
   return (rows as { sub: string }[]).map((row) => row.sub);
 }
 
 // Idempotent: re-granting an existing sub is a no-op, never an error - INSERT IGNORE against the
-// (file_id, sub) primary key.
-export async function grantFileAcl(fileId: string, sub: string): Promise<void> {
-  await getPool().query("INSERT IGNORE INTO file_acl (file_id, sub) VALUES (?, ?)", [fileId, sub]);
+// (file_id, sub) primary key. E8 Wave A4 (D-219/D-220): `expiresAt` defaults to null (permanent-until-
+// revoked, the ordinary-share case); an invite grant passes auth's OWN returned expiry so the ACL row and
+// the link can never disagree. `granted_at` is left to the column default.
+export async function grantFileAcl(fileId: string, sub: string, expiresAt: Date | null = null): Promise<void> {
+  await getPool().query("INSERT IGNORE INTO file_acl (file_id, sub, expires_at) VALUES (?, ?, ?)", [
+    fileId,
+    sub,
+    expiresAt,
+  ]);
 }
 
 export async function revokeFileAcl(fileId: string, sub: string): Promise<void> {

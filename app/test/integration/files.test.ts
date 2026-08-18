@@ -14,6 +14,8 @@ import {
   hasAclGrant,
   initFilesStorage,
   listFileGrants,
+  listLinkAuthorizedFilesIn,
+  listVisibleFilesIn,
   revokeFileAcl,
   renameFile,
   resolveById,
@@ -448,6 +450,75 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
       expect((await listFileGrants(id)).sort()).toEqual(["user:Case", "user:case"].sort());
       await revokeFileAcl(id, "user:case");
       expect(await hasAclGrant(id, "user:Case")).toBe(true);
+    });
+  });
+
+  // E8 Wave A5 (D-219/D-220): expiry enforcement on every file-side ACL read. Each assertion below asserts
+  // an ABSENCE of access and was run RED against the pre-Wave-A predicates before FILE_GRANT_LIVE was
+  // appended - a never-ran-red assertion proves nothing (see the hand-off's own warning on this wave).
+  describe("expiry enforcement (D-219/D-220, E8)", () => {
+    function pastDate(): Date {
+      return new Date(Date.now() - 60_000);
+    }
+    function futureDate(): Date {
+      return new Date(Date.now() + 60_000);
+    }
+
+    it("granted_at is populated automatically on insert", async () => {
+      const { id } = await seedCommittedFile({ protection: "private" });
+      const sub = `user:${randomUUID()}`;
+      await grantFileAcl(id, sub);
+      const [rows] = await getPool().query("SELECT granted_at FROM file_acl WHERE file_id = ? AND sub = ?", [
+        id,
+        sub,
+      ]);
+      expect((rows as { granted_at: Date }[])[0]?.granted_at).toBeInstanceOf(Date);
+    });
+
+    it("hasAclGrant: an EXPIRED grant does NOT authorize", async () => {
+      const { id } = await seedCommittedFile({ protection: "private" });
+      const sub = `user:${randomUUID()}`;
+      await grantFileAcl(id, sub, pastDate());
+      expect(await hasAclGrant(id, sub)).toBe(false);
+    });
+
+    it("hasAclGrant: a NULL expiry authorizes (the ordinary-share case)", async () => {
+      const { id } = await seedCommittedFile({ protection: "private" });
+      const sub = `user:${randomUUID()}`;
+      await grantFileAcl(id, sub, null);
+      expect(await hasAclGrant(id, sub)).toBe(true);
+    });
+
+    it("hasAclGrant: a FUTURE expiry authorizes", async () => {
+      const { id } = await seedCommittedFile({ protection: "private" });
+      const sub = `user:${randomUUID()}`;
+      await grantFileAcl(id, sub, futureDate());
+      expect(await hasAclGrant(id, sub)).toBe(true);
+    });
+
+    it("listFileGrants omits an EXPIRED grant", async () => {
+      const { id } = await seedCommittedFile({ protection: "private" });
+      await grantFileAcl(id, "user:live", futureDate());
+      await grantFileAcl(id, "user:dead", pastDate());
+      expect(await listFileGrants(id)).toEqual(["user:live"]);
+    });
+
+    it("listVisibleFilesIn omits a file reachable only via an EXPIRED file_acl grant", async () => {
+      const collectionId = await seedCollection();
+      const { id } = await seedCommittedFile({ collectionId, protection: "private", ownerSub: "user:owner" });
+      const sub = `user:${randomUUID()}`;
+      await grantFileAcl(id, sub, pastDate());
+      const ids = (await listVisibleFilesIn(collectionId, sub)).map((f) => f.id);
+      expect(ids).not.toContain(id);
+    });
+
+    it("listLinkAuthorizedFilesIn omits a file reachable only via an EXPIRED file_acl grant", async () => {
+      const collectionId = await seedCollection();
+      const { id } = await seedCommittedFile({ collectionId, protection: "private", ownerSub: "user:owner" });
+      const sub = `user:${randomUUID()}`;
+      await grantFileAcl(id, sub, pastDate());
+      const ids = (await listLinkAuthorizedFilesIn(collectionId, sub)).map((f) => f.id);
+      expect(ids).not.toContain(id);
     });
   });
 

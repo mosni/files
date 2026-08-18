@@ -184,6 +184,8 @@ export async function grantShareHandler(request: FastifyRequest, reply: FastifyR
   // D-182: this app does NOT call POST /internal/roles when granting to an ordinary account - the row IS
   // the grant, there is no role to add. auth is only involved for invites (createInviteHandler) and for
   // the files:read cleanup on revoke (D-192, below).
+  // E8/D-220: an ordinary account share has no duration control and does not expire (expiresAt stays the
+  // default null) - only an invite grant (createInviteHandler, below) ever passes a value.
   if (target.type === "file") {
     await grantFileAcl(target.file.id, body.sub);
   } else {
@@ -283,11 +285,15 @@ export async function createInviteHandler(request: FastifyRequest, reply: Fastif
   // is the invitee's sub from their first click, upgrade or not - see verification-concept.md's mandatory
   // box check, the one proof no automated tier here can produce.
   const sub = `link:${minted.value.id}`;
+  // D-220: the ACL row's expiry is auth's OWN returned expiry for THIS mint, not a recomputed value, so
+  // the row and the link can never disagree. Passed regardless of allow_register - the switch changes who
+  // the identity is (upgraded account vs. link-bound), never how long the grant lasts.
+  const expiresAt = new Date(minted.value.expiresAt);
   try {
     if (target.type === "file") {
-      await grantFileAcl(target.file.id, sub);
+      await grantFileAcl(target.file.id, sub, expiresAt);
     } else {
-      await grantCollectionAcl(target.collection.id, sub, body.canUpload === true);
+      await grantCollectionAcl(target.collection.id, sub, body.canUpload === true, expiresAt);
     }
   } catch (err) {
     // The mint already succeeded - the link is live and un-revocable via this API (auth has no internal

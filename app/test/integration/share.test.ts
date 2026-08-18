@@ -99,6 +99,13 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
     verifyMock.mockResolvedValue({ sub, ...extra } as never);
   }
 
+  // E8/D-220: a mint fixture's expiresAt now has real consequences (Wave A enforces it in every read), so
+  // a fixture that means "grants real access" must use a FUTURE timestamp - computed relative to "now"
+  // rather than hardcoded, so it never goes stale the way the old fixed 2026-08-13 literal did.
+  function futureIso(): string {
+    return new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  }
+
   const req = (
     method: "GET" | "POST",
     url: string,
@@ -305,6 +312,38 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
     });
   });
 
+  // E8 Wave A5 (D-219/D-220): an ordinary account share has no duration control and must write a NULL
+  // expiry (AC8) - only an invite mint ever writes a real one (covered in the "invites" describe block
+  // below, AC7).
+  describe("ordinary account shares write a NULL expiry (D-219/D-220, AC8)", () => {
+    it("POST /api/shares (file) writes expires_at NULL", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/shares", { token: "t", body: { type: "file", id: file.id, sub: "user:grantee" } });
+      expect(res.statusCode).toBe(200);
+      const [rows] = await getPool().query("SELECT expires_at FROM file_acl WHERE file_id = ? AND sub = ?", [
+        file.id,
+        "user:grantee",
+      ]);
+      expect((rows as { expires_at: Date | null }[])[0]?.expires_at).toBeNull();
+    });
+
+    it("POST /api/shares (collection) writes expires_at NULL", async () => {
+      const collection = await seedCollection("user:owner", { protection: "unlisted" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/shares", {
+        token: "t",
+        body: { type: "collection", id: collection.id, sub: "user:grantee" },
+      });
+      expect(res.statusCode).toBe(200);
+      const [rows] = await getPool().query(
+        "SELECT expires_at FROM collection_acl WHERE collection_id = ? AND sub = ?",
+        [collection.id, "user:grantee"],
+      );
+      expect((rows as { expires_at: Date | null }[])[0]?.expires_at).toBeNull();
+    });
+  });
+
   describe("grant -> real delivery goes 403 -> 200; revoke -> 200 -> 403 again", () => {
     it("round-trips against the real delivery controller", async () => {
       const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
@@ -379,7 +418,10 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
       const linkId = `lnk_${randomUUID()}`;
       mintInviteLinkMock.mockResolvedValue({
         ok: true,
-        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt: "2026-08-13T00:00:00.000Z" },
+        // E8/D-220: a FUTURE expiry - grants now expire (Wave A), so a fixture using a past date would
+        // (correctly) fail hasAclGrant below rather than exercising the "grants access" path this test is
+        // actually about.
+        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt: futureIso() },
       });
 
       asUser("user:owner");
@@ -428,6 +470,53 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
       expect(mintInviteLinkMock).toHaveBeenCalledWith(expect.objectContaining({ allowRegister: false }));
     });
 
+    // E8 Wave A5/A4 (D-220's whole point, AC7): the ACL row's expires_at must match auth's OWN returned
+    // expiry for THIS mint - never a recomputed value - and it must be written REGARDLESS of allow_register,
+    // because the switch changes who the identity is, never how long the grant lasts.
+    it.each([
+      ["allow_register: true", true],
+      ["allow_register: false", false],
+    ] as const)("invite with %s writes expires_at matching the response's expiresAt", async (_label, allowRegister) => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      const linkId = `L${randomUUID()}`;
+      const expiresAt = "2026-09-01T12:34:56.000Z";
+      mintInviteLinkMock.mockResolvedValue({
+        ok: true,
+        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt },
+      });
+      asUser("user:owner");
+      const res = await req("POST", "/api/invites", {
+        token: "t",
+        body: { type: "file", id: file.id, allow_register: allowRegister },
+      });
+      expect(res.statusCode).toBe(201);
+      const body = res.json() as { expiresAt: string };
+      expect(body.expiresAt).toBe(expiresAt);
+      const [rows] = await getPool().query("SELECT expires_at FROM file_acl WHERE file_id = ? AND sub = ?", [
+        file.id,
+        `link:${linkId}`,
+      ]);
+      expect((rows as { expires_at: Date }[])[0]?.expires_at?.toISOString()).toBe(expiresAt);
+    });
+
+    it("a COLLECTION invite also writes expires_at matching the response's expiresAt", async () => {
+      const collection = await seedCollection("user:owner", { protection: "unlisted" });
+      const linkId = `L${randomUUID()}`;
+      const expiresAt = "2026-09-01T12:34:56.000Z";
+      mintInviteLinkMock.mockResolvedValue({
+        ok: true,
+        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt },
+      });
+      asUser("user:owner");
+      const res = await req("POST", "/api/invites", { token: "t", body: { type: "collection", id: collection.id } });
+      expect(res.statusCode).toBe(201);
+      const [rows] = await getPool().query(
+        "SELECT expires_at FROM collection_acl WHERE collection_id = ? AND sub = ?",
+        [collection.id, `link:${linkId}`],
+      );
+      expect((rows as { expires_at: Date }[])[0]?.expires_at?.toISOString()).toBe(expiresAt);
+    });
+
     // E7-QA1 D-195: replaces the old "409 not_private" test - an invite for a non-private object now
     // mints and grants exactly like a private one does.
     it("invite creation succeeds for a non-private object too (D-195)", async () => {
@@ -435,7 +524,7 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
       const linkId = `L${randomUUID()}`;
       mintInviteLinkMock.mockResolvedValue({
         ok: true,
-        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt: "2026-08-13T00:00:00.000Z" },
+        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt: futureIso() },
       });
       asUser("user:owner");
       const res = await req("POST", "/api/invites", { token: "t", body: { type: "file", id: file.id } });

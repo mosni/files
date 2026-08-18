@@ -11,6 +11,7 @@ import { mostRestrictive, type Protection } from "../lib/protection.ts";
 import { mintUniqueToken } from "../lib/tokens.ts";
 import { deleteFile } from "./files.ts";
 import { getPool, isLinkTokenTaken } from "./db.ts";
+import { COLLECTION_GRANT_EXISTS, COLLECTION_GRANT_LIVE } from "./aclPredicates.ts";
 
 export type CollectionRecord = {
   id: string;
@@ -212,9 +213,7 @@ export async function listVisibleChildCollections(
        AND (
          protection = 'public'
          OR owner_sub = ?
-         OR EXISTS (
-           SELECT 1 FROM collection_acl WHERE collection_acl.collection_id = collections.id AND collection_acl.sub = ?
-         )
+         OR ${COLLECTION_GRANT_EXISTS}
        )
      ORDER BY created_at DESC`,
     [parentId, viewerSub, viewerSub],
@@ -253,9 +252,7 @@ export async function listLinkAuthorizedChildCollections(
        AND (
          protection IN ('public','unlisted')
          OR owner_sub = ?
-         OR EXISTS (
-           SELECT 1 FROM collection_acl WHERE collection_acl.collection_id = collections.id AND collection_acl.sub = ?
-         )
+         OR ${COLLECTION_GRANT_EXISTS}
        )
      ORDER BY created_at DESC`,
     [parentId, viewerSub, viewerSub],
@@ -374,9 +371,10 @@ export async function deleteCollectionRecursive(
 // is matched byte-for-byte by a plain equality clause, never parsed. Exported because a listing needs the
 // per-row check on its own, separately from the ancestor walk below - every row on one browse page shares
 // the same ancestors, so walking the chain again per row is pure repeated work (controllers/browse.ts).
+// E8 Wave A2 (D-221/D-220): appends COLLECTION_GRANT_LIVE - an expired grant no longer authorizes.
 export async function hasCollectionAclGrant(collectionId: string, sub: string): Promise<boolean> {
   const [rows] = await getPool().query<RowDataPacket[]>(
-    "SELECT 1 FROM collection_acl WHERE collection_id = ? AND sub = ? LIMIT 1",
+    `SELECT 1 FROM collection_acl WHERE collection_id = ? AND sub = ? AND ${COLLECTION_GRANT_LIVE} LIMIT 1`,
     [collectionId, sub],
   );
   return rows.length > 0;
@@ -385,9 +383,12 @@ export async function hasCollectionAclGrant(collectionId: string, sub: string): 
 // E7 Wave A2: the write half of collection_acl - controllers/share.ts is the only caller, and it alone
 // owns authorization (D-187). Every sub below is bound as an opaque query parameter - security invariant 6.
 
+// E8 Wave A3 (D-220): feeds the share dialog's "who has access" list - an expired grant is omitted, the
+// same reasoning as files.ts's listFileGrants. The admin panel gets unfiltered rows from
+// storage/grants.ts's listAllGrants instead.
 export async function listCollectionGrants(collectionId: string): Promise<{ sub: string; canUpload: boolean }[]> {
   const [rows] = await getPool().query<RowDataPacket[]>(
-    "SELECT sub, can_upload FROM collection_acl WHERE collection_id = ? ORDER BY sub",
+    `SELECT sub, can_upload FROM collection_acl WHERE collection_id = ? AND ${COLLECTION_GRANT_LIVE} ORDER BY sub`,
     [collectionId],
   );
   return (rows as { sub: string; can_upload: number }[]).map((row) => ({
@@ -398,11 +399,18 @@ export async function listCollectionGrants(collectionId: string): Promise<{ sub:
 
 // Re-granting the same person with a DIFFERENT upload flag UPDATES it rather than failing on the
 // (collection_id, sub) primary key - a share dialog toggling "can upload" for someone it already granted
-// must not have to revoke-then-regrant.
-export async function grantCollectionAcl(collectionId: string, sub: string, canUpload: boolean): Promise<void> {
+// must not have to revoke-then-regrant. E8 Wave A4 (D-219/D-220): `expiresAt` defaults to null
+// (permanent-until-revoked); re-granting also updates it, so an admin correcting an invite's duration by
+// re-inviting is not silently ignored the way a stale expiry would otherwise be.
+export async function grantCollectionAcl(
+  collectionId: string,
+  sub: string,
+  canUpload: boolean,
+  expiresAt: Date | null = null,
+): Promise<void> {
   await getPool().query(
-    "INSERT INTO collection_acl (collection_id, sub, can_upload) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE can_upload = VALUES(can_upload)",
-    [collectionId, sub, canUpload ? 1 : 0],
+    "INSERT INTO collection_acl (collection_id, sub, can_upload, expires_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE can_upload = VALUES(can_upload), expires_at = VALUES(expires_at)",
+    [collectionId, sub, canUpload ? 1 : 0, expiresAt],
   );
 }
 
@@ -436,7 +444,7 @@ export async function canUploadTo(collection: CollectionRecord, claims: Claims):
   if (claims.sub === collection.ownerSub) return true;
   if (isSuperuser(claims)) return true;
   const [rows] = await getPool().query<RowDataPacket[]>(
-    "SELECT 1 FROM collection_acl WHERE collection_id = ? AND sub = ? AND can_upload = 1 LIMIT 1",
+    `SELECT 1 FROM collection_acl WHERE collection_id = ? AND sub = ? AND can_upload = 1 AND ${COLLECTION_GRANT_LIVE} LIMIT 1`,
     [collection.id, claims.sub],
   );
   return rows.length > 0;
@@ -452,7 +460,7 @@ export async function canUploadTo(collection: CollectionRecord, claims: Claims):
 // precise per-destination decision is resolveDestinationCollection's/canUploadTo's, in controllers/upload.ts.
 export async function hasAnyUploadGrant(sub: string): Promise<boolean> {
   const [rows] = await getPool().query<RowDataPacket[]>(
-    "SELECT 1 FROM collection_acl WHERE sub = ? AND can_upload = 1 LIMIT 1",
+    `SELECT 1 FROM collection_acl WHERE sub = ? AND can_upload = 1 AND ${COLLECTION_GRANT_LIVE} LIMIT 1`,
     [sub],
   );
   return rows.length > 0;

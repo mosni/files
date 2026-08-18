@@ -167,6 +167,72 @@ describe("numbered migrations (storage/db.ts, D-83)", () => {
       await c.end();
     }
   });
+
+  // E8 Wave A1 (D-219/D-220): migration 009 adds grant timestamps to both ACL tables.
+  it("file_acl and collection_acl both carry granted_at (NOT NULL) and expires_at (nullable) after migration 009", async () => {
+    const c = await conn();
+    try {
+      const [fileAclRows] = await c.execute("DESCRIBE file_acl");
+      const fileAclColumns = fileAclRows as { Field: string; Null: string }[];
+      expect(fileAclColumns.find((r) => r.Field === "granted_at")?.Null).toBe("NO");
+      expect(fileAclColumns.find((r) => r.Field === "expires_at")?.Null).toBe("YES");
+
+      const [collectionAclRows] = await c.execute("DESCRIBE collection_acl");
+      const collectionAclColumns = collectionAclRows as { Field: string; Null: string }[];
+      expect(collectionAclColumns.find((r) => r.Field === "granted_at")?.Null).toBe("NO");
+      expect(collectionAclColumns.find((r) => r.Field === "expires_at")?.Null).toBe("YES");
+    } finally {
+      await c.end();
+    }
+  });
+
+  it("records version 9 in schema_version (E8)", async () => {
+    const c = await conn();
+    try {
+      const [rows] = await c.execute("SELECT version FROM schema_version ORDER BY version");
+      const versions = (rows as { version: number }[]).map((row) => row.version);
+      expect(versions).toEqual(expect.arrayContaining([1, 2, 3, 4, 9]));
+    } finally {
+      await c.end();
+    }
+  });
+
+  // E8 Wave A6: migration 008's collation half of security invariant 6 ("byte-for-byte") had NO automated
+  // guard anywhere before this - verified 2026-08-18 by grepping app/test/ for "nopad" and finding zero
+  // matches. Migration 009 ALTERs both tables migration 008 pinned, so this asserts the pin survived rather
+  // than assuming it. The expected column set is listed EXPLICITLY (technical-baseline.md §1 invariant 6):
+  // an unpinned new sub-shaped column must fail this test, not silently pass by omission.
+  it("every sub-shaped column is utf8mb4_nopad_bin - migration 008's pin survives migration 009's ALTER (invariant 6)", async () => {
+    const c = await conn();
+    try {
+      const [rows] = await c.execute(
+        `SELECT TABLE_NAME, COLUMN_NAME, COLLATION_NAME
+         FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND COLUMN_NAME IN ('sub', 'owner_sub', 'uploader_sub')`,
+      );
+      const columns = rows as { TABLE_NAME: string; COLUMN_NAME: string; COLLATION_NAME: string }[];
+      const byTableThenColumn = (a: { TABLE_NAME: string; COLUMN_NAME: string }, b: typeof a) =>
+        a.TABLE_NAME === b.TABLE_NAME ? a.COLUMN_NAME.localeCompare(b.COLUMN_NAME) : a.TABLE_NAME.localeCompare(b.TABLE_NAME);
+      const expected = [
+        { TABLE_NAME: "collection_acl", COLUMN_NAME: "sub" },
+        { TABLE_NAME: "collections", COLUMN_NAME: "owner_sub" },
+        { TABLE_NAME: "file_acl", COLUMN_NAME: "sub" },
+        { TABLE_NAME: "files", COLUMN_NAME: "owner_sub" },
+        { TABLE_NAME: "files", COLUMN_NAME: "uploader_sub" },
+      ].sort(byTableThenColumn);
+      // Fails loudly (rather than vacuously passing on an empty diff) if a column is renamed, dropped, or a
+      // new sub-shaped column is added anywhere without being added to `expected` above too. Sorted in JS
+      // rather than relied on from SQL - information_schema's own row order is not guaranteed.
+      const actual = columns.map((r) => ({ TABLE_NAME: r.TABLE_NAME, COLUMN_NAME: r.COLUMN_NAME })).sort(byTableThenColumn);
+      expect(actual).toEqual(expected);
+      for (const column of columns) {
+        expect(column.COLLATION_NAME).toBe("utf8mb4_nopad_bin");
+      }
+    } finally {
+      await c.end();
+    }
+  });
 });
 
 // Wave 0.2: the migration itself only ADDs the columns (link_token defaulting to '' for every existing
