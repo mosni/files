@@ -15,6 +15,7 @@ import { registerAdminRoutes } from "../../src/routes/admin.ts";
 import { applyMigrations, closeDb, getPool, initDb } from "../../src/storage/db.ts";
 import { claimFileRow, commitFileRow, diskRelPath, grantFileAcl, hasAclGrant, initFilesStorage, resolveById } from "../../src/storage/files.ts";
 import { createCollection, grantCollectionAcl, hasCollectionAclGrant } from "../../src/storage/collections.ts";
+import { initSpaShell } from "../../src/storage/spaShell.ts";
 import { makeTestConfig } from "../helpers/testConfig.ts";
 import type { Protection } from "../../src/lib/protection.ts";
 
@@ -37,6 +38,9 @@ describe("routes/admin.ts + controllers/admin.ts (E8)", () => {
     await applyMigrations();
     root = await mkdtemp(path.join(os.tmpdir(), "admin-test-"));
     initFilesStorage(root);
+    // getSpaShell() (GET /admin's handler) throws unless initSpaShell() has run at least once - falls back
+    // to a minimal built-in shell for a path with no real web/dist, exactly like server.ts's own tolerance.
+    initSpaShell(root);
 
     app = Fastify({ logger: false });
     const config = makeTestConfig({ storageRoot: root });
@@ -103,7 +107,7 @@ describe("routes/admin.ts + controllers/admin.ts (E8)", () => {
     return collection;
   }
 
-  async function seedFile(opts: { collectionId?: string; name?: string; ownerSub?: string; protection?: Protection }) {
+  async function seedFile(opts: { collectionId?: string; name?: string; ownerSub?: string; protection?: Protection; bytes?: number }) {
     const collectionId = opts.collectionId ?? "";
     const name = opts.name ?? `file-${randomUUID()}.txt`;
     const claimed = await claimFileRow({
@@ -121,7 +125,7 @@ describe("routes/admin.ts + controllers/admin.ts (E8)", () => {
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, "admin-test-bytes");
     await commitFileRow(claimed.id, {
-      bytes: 17,
+      bytes: opts.bytes ?? 17,
       width: null,
       height: null,
       durationSeconds: null,
@@ -172,6 +176,25 @@ describe("routes/admin.ts + controllers/admin.ts (E8)", () => {
     it("200s for mosni_owner alone - no second superuser branch needed", async () => {
       asUser("user:superuser", { roles: [], mosni_owner: true });
       const res = await call("t");
+      expect(res.statusCode).toBe(200);
+    });
+  });
+
+  // Found only by executing (D-55): a hard navigation to /admin has no matching physical file and, unlike
+  // "/f/*"/"/t/:token" (registerPreviewRoutes' real server routes), no server-side document route either -
+  // it fell straight through to server.ts's setNotFoundHandler (the real 404 page), so the SPA never even
+  // loaded and AdminPage's client-side router had nothing to mount into. Unguarded, like "/" itself - the
+  // gate is client-side rendering plus the API's 404, never this shell.
+  describe("GET /admin - the SPA shell itself, not the app data", () => {
+    it("serves the SPA shell (200), not the 404 view - a hard navigation must reach the client router", async () => {
+      const res = await req("GET", "/admin");
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["content-type"]).toContain("text/html");
+      expect(res.body).toContain('<div id="root">');
+    });
+
+    it("serves the same shell for a signed-out visitor too - no gate on the shell itself", async () => {
+      const res = await req("GET", "/admin");
       expect(res.statusCode).toBe(200);
     });
   });
@@ -297,7 +320,10 @@ describe("routes/admin.ts + controllers/admin.ts (E8)", () => {
   describe("GET /api/admin/usage", () => {
     it("reports volume, tracked bytes and file count, byOwner and topCollections shapes", async () => {
       const collection = await seedCollection("user:owner");
-      await seedFile({ collectionId: collection.id, ownerSub: "user:owner" });
+      // A deliberately huge byte count - usage.ts's topCollections queries the SAME shared MariaDB every
+      // integration test file writes into, so a small, ordinary-sized fixture is not guaranteed a spot in
+      // a LIMIT 10 ranking; this one is.
+      await seedFile({ collectionId: collection.id, ownerSub: "user:owner", bytes: 999_999_999_999 });
 
       asUser("user:admin", { roles: ["files:write", "files:delete"] });
       const res = await req("GET", "/api/admin/usage", { token: "t" });

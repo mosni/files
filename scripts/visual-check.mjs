@@ -977,6 +977,35 @@ const PAGES = [
       "even though its ordinary /f/ path would 200 anonymously with a reveal-nothing shell.",
     expectStatuses: [404],
   },
+  {
+    id: "admin-panel",
+    label: "Admin panel - Usage and Access sections (E8)",
+    url: "/admin",
+    note: "Both sections, signed in as an admin. Access lists the two grants already seeded above " +
+      "(shareTargetPrivate's real-looking account and its link:<id> invite) - the same fixture the share " +
+      "dialog states use, so a truncated raw sub renders here too (D-222). Usage shows the real volume this " +
+      "container's storage mount reports.",
+    init: signedInAsReal(ADMIN, adminToken),
+    interact: async (p) => {
+      await p.waitForSelector('h1:has-text("Usage")', { timeout: 10_000 });
+      await p.waitForSelector('h1:has-text("Access")', { timeout: 10_000 });
+      await p.waitForTimeout(150);
+    },
+  },
+  {
+    // D3.2's own risk, re-shot with an ADMIN identity specifically - "browser-admin-browse" above already
+    // put ADMIN through both viewports, so the mobile shot from THAT state is this check's evidence too
+    // (E2 does not duplicate it as a second near-identical state); this one is named separately because
+    // it is the state a reviewer should actually look at for the 360px header risk, landing on "/" (not
+    // "/admin") so the identity block sits in its normal place next to ordinary page content.
+    id: "landing-admin-header",
+    label: "Landing - signed in as an admin (header risk, D3.2)",
+    url: "/",
+    note: "The header's admin-only icon button, first in the tagline's flex row with flexShrink:0. At the " +
+      "mobile viewport the brand must stay untruncated, the button must stay fully visible, and the name " +
+      "keeps giving way exactly as it already does without the button (review 052's phone-header defect).",
+    init: signedInAsReal(ADMIN, adminToken),
+  },
 ];
 
 const browser = await chromium.launch();
