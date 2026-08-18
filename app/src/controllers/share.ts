@@ -13,7 +13,7 @@
 
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "../config.ts";
-import { claimsFromBearer } from "../auth/bearer.ts";
+import { requireClaims } from "../auth/bearer.ts";
 import { listAccounts, mintInviteLink, setAccountRole } from "../auth/internalApi.ts";
 import { can, isSuperuser, type VerifiedClaims } from "../lib/roles.ts";
 import { actorLabel } from "../lib/audit.ts";
@@ -31,15 +31,6 @@ import {
   type ResolvedCollection,
 } from "../storage/collections.ts";
 import { grantFileAcl, listFileGrants, resolveById, resolveEffective, revokeFileAcl, type ResolvedFile } from "../storage/files.ts";
-
-async function requireClaims(request: FastifyRequest, reply: FastifyReply, config: Config): Promise<VerifiedClaims | null> {
-  const claims = await claimsFromBearer(request, config.appOrigin);
-  if (claims === null) {
-    reply.code(401).send();
-    return null;
-  }
-  return claims;
-}
 
 function isShareObjectType(value: unknown): value is ShareObjectType {
   return value === "file" || value === "collection";

@@ -20,6 +20,7 @@ import { registerDeliveryRoutes } from "./routes/delivery.ts";
 import { registerPreviewRoutes } from "./routes/preview.ts";
 import { registerManageRoutes } from "./routes/manage.ts";
 import { registerShareRoutes } from "./routes/share.ts";
+import { registerAdminRoutes } from "./routes/admin.ts";
 import { registerBrowseRoutes } from "./routes/browse.ts";
 import { registerEmbedRoutes } from "./routes/embed.ts";
 import { initEmbedShell } from "./storage/embedShell.ts";
@@ -113,6 +114,8 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
   await registerManageRoutes(app, config);
   // E7: private sharing & invites - files.mosni.dev-only, same containment reasoning as manage above.
   await registerShareRoutes(app, config);
+  // E8: the admin panel's API (access + usage) - files.mosni.dev-only, same containment reasoning above.
+  await registerAdminRoutes(app, config);
   // E4: the file browser's listing API. files.mosni.dev-only; scope=visible is this app's first and only
   // anonymous listing endpoint (D-94).
   await registerBrowseRoutes(app, config);
