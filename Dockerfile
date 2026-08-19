@@ -84,24 +84,20 @@ COPY --from=build /repo/app/dist ./app/dist
 # the visible consequence of D-44 (the server runs built output, not source).
 COPY --from=build /repo/app/src/storage/migrations ./app/dist/migrations
 
-# Review 060/SEC-2: drop root. At ingest this process hands ATTACKER-CONTROLLED bytes to sharp/libvips,
-# ffprobe and ffmpeg - three of the largest parser attack surfaces in common use - with STORAGE_ROOT
-# mounted read-write. Running that as root means a single libvips or ffmpeg memory bug is root in the
-# container. `node` (uid/gid 1000) ships in the base image already.
+# Review 060/SEC-2, PARTIALLY REVERTED (Hannah's call, 2026-08-19). This stage briefly ran as `USER node`
+# to get the media parsers off root: at ingest this process hands ATTACKER-CONTROLLED bytes to
+# sharp/libvips, ffprobe and ffmpeg with STORAGE_ROOT mounted read-write, so a parser bug there is root in
+# the container. That change is BACKED OUT for now because it cannot land on its own - the host directory
+# bind-mounted at STORAGE_ROOT keeps its own ownership through a bind mount, so the box needs
+# `chown -R 1000:1000 /srv/stack/data/files/storage` BEFORE the image can boot non-root, and shipping the
+# two out of order takes the app down (@tus/file-store creates STORAGE_ROOT/.tus on construction).
 #
-# ⚠ BOX-TIME PREREQUISITE, and the app will NOT BOOT without it: the host storage directory bind-mounted
-# at STORAGE_ROOT must be owned by uid 1000, because @tus/file-store creates STORAGE_ROOT/.tus on
-# construction. See README.md's deploy steps and docker-compose.yml's volume comment:
-#     chown -R 1000:1000 /srv/stack/data/files/storage
-# nginx still reads those bytes directly (X-Accel-Redirect): files land 0644 and directories 0755, so a
-# non-root owner changes nothing for it.
-RUN chown -R node:node /app
-# Docker seeds a NAMED volume from the image path it is mounted at, ownership included - so creating this
-# here is what lets the e2e tier's `e2e-storage` volume be writable by uid 1000 without any host-side step.
-# A BIND mount (production, docker-compose.yml) keeps the host directory's own ownership regardless, which
-# is why the chown above is still a box-time prerequisite there.
-RUN mkdir -p /data/storage && chown -R node:node /data/storage
-USER node
+# The half that needed no box change DID ship and is still in place: every ffmpeg/ffprobe invocation now
+# goes through app/src/storage/mediaExec.ts, which bounds timeout and stdout and raises a distinguishable
+# error rather than letting a killed probe read as "unrecognised file" and skip the metadata strip.
+#
+# To finish this: do the chown on the box, then restore `RUN chown -R node:node /app` + `USER node` here
+# and the uid-1000 note in docker-compose.yml's volume block. e2e/seedStorage.ts is already in place for it.
 
 EXPOSE 3000
 CMD ["node", "app/dist/server.js"]

@@ -258,12 +258,10 @@ services:
     # exact path app-e2e will stat() - there is no live IdP in this sandbox to drive a real upload (same
     # limitation upload-delivery.spec.ts documents), so seeding writes bytes directly into this volume and
     # inserts the matching row straight into mariadb.
-    # ⚠ Review 060/SEC-2: app-e2e now runs as `node` (uid 1000). Docker seeds a fresh named volume from the
-    # image path it is mounted at, ownership included, and the Dockerfile creates /data/storage node-owned
-    # for exactly that reason - so a clean checkout needs no extra step. An EXISTING e2e-storage volume
-    # from before this change is still root-owned and Docker will not re-seed it, which surfaces as the app
-    # failing to create STORAGE_ROOT/.tus at boot. One-time fix:
-    #     docker volume rm files_e2e-storage
+    # Shared with verify-e2e, which seeds fixtures into it directly (see e2e/seedStorage.ts). If app-e2e is
+    # ever moved off root (review 060/SEC-2, currently backed out - see the Dockerfile), a pre-existing
+    # root-owned volume will not be re-seeded by Docker and the app will fail to create STORAGE_ROOT/.tus;
+    # `docker volume rm files_e2e-storage` once is the fix.
     volumes:
       - e2e-storage:/data/storage
     # D-70 Wave D: real DNS aliases on the compose network, so e2e/preview.spec.ts's browser-driven tests
@@ -319,12 +317,10 @@ services:
       DB_USER: files
       DB_PASS: filespass
       DB_NAME: files
-    # ⚠ Review 060/SEC-2: app-e2e now runs as `node` (uid 1000). Docker seeds a fresh named volume from the
-    # image path it is mounted at, ownership included, and the Dockerfile creates /data/storage node-owned
-    # for exactly that reason - so a clean checkout needs no extra step. An EXISTING e2e-storage volume
-    # from before this change is still root-owned and Docker will not re-seed it, which surfaces as the app
-    # failing to create STORAGE_ROOT/.tus at boot. One-time fix:
-    #     docker volume rm files_e2e-storage
+    # Shared with verify-e2e, which seeds fixtures into it directly (see e2e/seedStorage.ts). If app-e2e is
+    # ever moved off root (review 060/SEC-2, currently backed out - see the Dockerfile), a pre-existing
+    # root-owned volume will not be re-seeded by Docker and the app will fail to create STORAGE_ROOT/.tus;
+    # `docker volume rm files_e2e-storage` once is the fix.
     volumes:
       - e2e-storage:/data/storage
     command: ["npx", "playwright", "test"]

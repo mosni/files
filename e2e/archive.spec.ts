@@ -65,7 +65,7 @@ async function seedFile(
   const diskDir = "2026/08";
   const diskName = `${id}-${opts.name}`;
   const abs = path.join(STORAGE_ROOT, diskDir, diskName);
-  // Review 060/SEC-2: shared-writable, because app-e2e writes this same directory as uid 1000.
+  // Review 060/SEC-2: shared-writable - app-e2e writes this same directory. See e2e/seedStorage.ts.
   await ensureSharedDir(path.dirname(abs));
   await writeFile(abs, opts.body);
   const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);

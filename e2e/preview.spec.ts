@@ -80,7 +80,7 @@ async function seed(opts: {
   const collectionLinkToken = randomUUID().replace(/-/g, "").slice(0, 5);
 
   const abs = path.join(STORAGE_ROOT, diskDir, diskName);
-  // Review 060/SEC-2: shared-writable, because app-e2e writes this same directory as uid 1000.
+  // Review 060/SEC-2: shared-writable - app-e2e writes this same directory. See e2e/seedStorage.ts.
   await ensureSharedDir(path.dirname(abs));
   await writeFile(abs, opts.bytes ?? "e2e preview fixture bytes");
 
