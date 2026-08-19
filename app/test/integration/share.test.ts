@@ -356,7 +356,11 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
   describe("grant -> real delivery goes 403 -> 200; revoke -> 200 -> 403 again", () => {
     it("round-trips against the real delivery controller", async () => {
       const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
-      listAccountsMock.mockResolvedValue({ ok: true, value: [] });
+      // Review 060/SEC-6: this used to stub an EMPTY directory, which now means "user:grantee does not
+      // exist" and 400s the grant below. The directory has to contain the grantee for the round trip to
+      // be the round trip - which is also what a real deploy looks like, since auth only ever returns
+      // accounts that have actually signed in.
+      listAccountsMock.mockResolvedValue(directory(["user:grantee"]) as never);
       setAccountRoleMock.mockResolvedValue({ ok: true, value: undefined });
 
       asUser("user:grantee");
