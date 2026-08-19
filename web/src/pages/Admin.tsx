@@ -33,6 +33,13 @@ const IDENTITY_TEXT: React.CSSProperties = {
   verticalAlign: "bottom",
 };
 
+// The Access table carries TWO identity columns side by side (owner and grantee) plus a date pair, and at
+// 1280px that is wide enough to push the Revoke button off the panel's edge - review session 059 added the
+// owner column, looked at the screenshot, and found exactly that. A tighter cap here and non-wrapping
+// timestamps buy the room back; `.table-scroll` still handles genuinely narrow viewports.
+const ACCESS_IDENTITY_TEXT: React.CSSProperties = { ...IDENTITY_TEXT, maxWidth: "11rem" };
+const TIMESTAMP_CELL: React.CSSProperties = { whiteSpace: "nowrap" };
+
 function freeSpaceColor(freeBytes: number): string | undefined {
   if (freeBytes <= DISK_CRITICAL_FREE_BYTES) return "var(--color-danger, #c0392b)";
   if (freeBytes <= DISK_WARN_FREE_BYTES) return "var(--color-warning, #b8860b)";
@@ -48,7 +55,7 @@ function UsageSection({ usage }: { usage: AdminUsageResponse }) {
         <p>
           <strong style={{ color: freeSpaceColor(usage.volume.freeBytes) }}>{humanSize(usage.volume.freeBytes)} free</strong>
           {" of "}
-          {humanSize(usage.volume.totalBytes)} ({humanSize(usage.volume.usedBytes)} used)
+          {humanSize(usage.volume.totalBytes)} ({humanSize(usage.volume.usedBytes)} used) on the storage volume.
         </p>
       )}
       <p>
@@ -56,11 +63,17 @@ function UsageSection({ usage }: { usage: AdminUsageResponse }) {
         {usage.tracked.fileCount === 1 ? "" : "s"}.
       </p>
       {/* Two numbers that disagree with no explanation is how this panel gets read as broken - this line
-          names what the delta is, in words, rather than leaving it implicit. */}
+          names what the delta is, in words, rather than leaving it implicit.
+
+          Review session 059 corrected what those words SAY. The volume is the box's own disk, shared with
+          every other app on it (current-context.md: Foundry, dscan, tracks, auth, TeamSpeak and others),
+          and `usedBytes` is total-minus-available, so it also counts the blocks reserved for root. The
+          delta is therefore dominated by things that are not this app at all - listing only this app's own
+          untracked bytes made a mostly-other-apps figure read as "the app has lost 900 GB of files". */}
       <p>
         {usage.untrackedBytes === null
-          ? "Not tracked by the app: unknown (volume figures are unavailable)."
-          : `Not tracked by the app (thumbnails, in-flight uploads, files left on disk before migration 002): ${humanSize(usage.untrackedBytes)}.`}
+          ? "Everything else on the volume: unknown (volume figures are unavailable)."
+          : `Everything else on the volume: ${humanSize(usage.untrackedBytes)}. This disk is shared with the rest of the box, so most of that belongs to other apps; it also covers space reserved for root and this app's own untracked bytes (thumbnails, in-flight uploads, files left on disk before migration 002).`}
       </p>
 
       <h3>By owner</h3>
@@ -135,6 +148,11 @@ function AccessSection({
           <thead>
             <tr>
               <th scope="col">Object</th>
+              {/* Review session 059: the owner is joined by listAllGrants and was on the wire from the
+                  start, but the table dropped it - so two grants on two different files both called
+                  "photo.jpg" rendered as indistinguishable rows, in the one panel whose entire job is
+                  answering "who has access to what". */}
+              <th scope="col">Owner</th>
               <th scope="col">Grantee</th>
               <th scope="col">Upload</th>
               <th scope="col">Granted</th>
@@ -150,11 +168,20 @@ function AccessSection({
                   {grant.targetName} <span style={{ opacity: 0.65 }}>({grant.targetType})</span>
                 </td>
                 <td>
-                  <span style={IDENTITY_TEXT} title={grant.sub}>{grant.sub}</span>
+                  {grant.ownerSub === null ? (
+                    "—"
+                  ) : (
+                    <span style={ACCESS_IDENTITY_TEXT} title={grant.ownerSub}>{grant.ownerSub}</span>
+                  )}
+                </td>
+                <td>
+                  <span style={ACCESS_IDENTITY_TEXT} title={grant.sub}>{grant.sub}</span>
                 </td>
                 <td>{grant.targetType === "collection" && grant.canUpload ? "Yes" : "—"}</td>
-                <td>{formatDateTimeLocal(grant.grantedAt)}</td>
-                <td>{grant.expiresAt === null ? "Permanent" : formatDateTimeLocal(grant.expiresAt)}</td>
+                <td style={TIMESTAMP_CELL}>{formatDateTimeLocal(grant.grantedAt)}</td>
+                <td style={TIMESTAMP_CELL}>
+                  {grant.expiresAt === null ? "Permanent" : formatDateTimeLocal(grant.expiresAt)}
+                </td>
                 <td>{grant.status === "expired" ? "Expired" : "Active"}</td>
                 <td>
                   <button type="button" className="btn-ghost" onClick={() => onRevoke(grant)}>

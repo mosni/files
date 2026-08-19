@@ -100,13 +100,33 @@ describe("AdminPage (E8)", () => {
     expect(container.textContent).toContain("photo.jpg");
   });
 
-  it("shows the untracked line", async () => {
+  // Review session 059: the owner was joined by the API and dropped by the table, so two grants on two
+  // different files both named "photo.jpg" rendered identically.
+  it("names the object's OWNER in the Access row, not just the object", async () => {
+    fetchUsageMock.mockResolvedValue(jsonResponse(USAGE));
+    fetchGrantsMock.mockResolvedValue(jsonResponse({ grants: [ACTIVE_GRANT] }));
+    render();
+    await flush();
+
+    const headers = Array.from(container.querySelectorAll("th")).map((th) => th.textContent);
+    expect(headers).toContain("Owner");
+    const row = Array.from(container.querySelectorAll("tbody tr")).find((tr) => tr.textContent?.includes("photo.jpg"))!;
+    const cells = Array.from(row.querySelectorAll("td")).map((td) => td.textContent);
+    expect(cells[1]).toBe("user:owner"); // the cell right after the object, before the grantee
+    expect(cells[2]).toBe("user:grantee");
+  });
+
+  // Review session 059: the delta between the volume and the app's tracked bytes is dominated by OTHER
+  // apps on the shared box, so the line must say so - the original copy named only this app's own
+  // untracked bytes, which reads as "the app has lost most of the disk".
+  it("shows the untracked line, and says the volume is shared with the rest of the box", async () => {
     fetchUsageMock.mockResolvedValue(jsonResponse(USAGE));
     fetchGrantsMock.mockResolvedValue(jsonResponse({ grants: [] }));
     render();
     await flush();
 
-    expect(container.textContent).toContain("Not tracked by the app");
+    expect(container.textContent).toContain("Everything else on the volume");
+    expect(container.textContent).toContain("shared with the rest of the box");
   });
 
   it("volume: null degrades without throwing", async () => {

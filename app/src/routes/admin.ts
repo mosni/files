@@ -9,7 +9,7 @@ import type { FastifyInstance } from "fastify";
 import type { Config } from "../config.ts";
 import { writeRateLimit } from "./manage.ts";
 import { getSpaShell } from "../storage/spaShell.ts";
-import { listGrantsHandler, revokeGrantHandler, usageHandler } from "../controllers/admin.ts";
+import { adminGate, listGrantsHandler, revokeGrantHandler, usageHandler } from "../controllers/admin.ts";
 
 const revokeGrantSchema = {
   body: {
@@ -26,6 +26,11 @@ const revokeGrantSchema = {
 
 export async function registerAdminRoutes(app: FastifyInstance, config: Config): Promise<void> {
   const filesHost = new URL(config.appOrigin).hostname;
+  // D-217's gate, as an onRequest hook so it answers before Fastify parses or validates the body - see
+  // controllers/admin.ts for the measurement that made this a hook rather than a call inside each handler.
+  // Attached per route: registerAdminRoutes is handed the ROOT instance (no encapsulating scope), so
+  // app.addHook here would gate the whole application.
+  const gate = adminGate(config);
 
   // D3.1's route is a client-only React Router entry with no matching physical file, unlike "/" (served
   // by @fastify/static's index.html) and "/f/*"/"/t/:token" (registerPreviewRoutes' real server routes) -
@@ -41,23 +46,23 @@ export async function registerAdminRoutes(app: FastifyInstance, config: Config):
   // needs the stricter write budget.
   app.get(
     "/api/admin/grants",
-    { constraints: { host: filesHost } },
+    { constraints: { host: filesHost }, onRequest: gate },
     async (request, reply) => {
-      await listGrantsHandler(request, reply, config);
+      await listGrantsHandler(request, reply);
     },
   );
 
   app.post(
     "/api/admin/grants/revoke",
-    { constraints: { host: filesHost }, schema: revokeGrantSchema, config: { rateLimit: writeRateLimit } },
+    { constraints: { host: filesHost }, schema: revokeGrantSchema, config: { rateLimit: writeRateLimit }, onRequest: gate },
     async (request, reply) => {
-      await revokeGrantHandler(request, reply, config);
+      await revokeGrantHandler(request, reply);
     },
   );
 
   app.get(
     "/api/admin/usage",
-    { constraints: { host: filesHost } },
+    { constraints: { host: filesHost }, onRequest: gate },
     async (request, reply) => {
       await usageHandler(request, reply, config);
     },

@@ -122,7 +122,14 @@ describe("storage/usage.ts (E8 Wave B1)", () => {
     expect(byOwner.find((r) => r.ownerSub === ownerB)).toEqual({ ownerSub: ownerB, bytes: 300, fileCount: 1 });
   });
 
-  it("trackedBytesTopCollections groups by collection across three collections, respects LIMIT, orders by bytes DESC", async () => {
+  // Review session 059 rewrote this test's ASSERTIONS, not its subject. It used to seed 10/40/1000-byte
+  // collections and assert they were the global top two - which is only true while nothing bigger exists
+  // anywhere in this shared MariaDB. It went red the moment the D-79 visual check (which seeds a 308 KB
+  // fixture collection into the same database) ran before `npm run verify`, so the gate's result depended
+  // on which of the two rituals a session happened to run first. The claims in the name are all still
+  // asserted, just relative to this test's OWN rows: grouping and ordering among the three it seeded, and
+  // LIMIT as a row count, which is what LIMIT actually promises.
+  it("trackedBytesTopCollections groups by collection, orders by bytes DESC, and respects LIMIT", async () => {
     const owner = `user:${randomUUID()}`;
     const small = await seedCollection(owner);
     const medium = await seedCollection(owner);
@@ -132,11 +139,19 @@ describe("storage/usage.ts (E8 Wave B1)", () => {
     await seedFile({ collectionId: medium, ownerSub: owner, bytes: 20 });
     await seedFile({ collectionId: large, ownerSub: owner, bytes: 1000 });
 
-    const top = await trackedBytesTopCollections(2);
-    expect(top).toHaveLength(2);
-    expect(top[0]).toMatchObject({ collectionId: large, bytes: 1000, fileCount: 1 });
-    expect(top[1]).toMatchObject({ collectionId: medium, bytes: 40, fileCount: 2 });
-    expect(top.some((r) => r.collectionId === small)).toBe(false); // LIMIT 2 excludes the smallest
+    const all = await trackedBytesTopCollections(10_000);
+    const at = (id: string) => all.findIndex((r) => r.collectionId === id);
+    expect(all.find((r) => r.collectionId === large)).toMatchObject({ bytes: 1000, fileCount: 1 });
+    expect(all.find((r) => r.collectionId === medium)).toMatchObject({ bytes: 40, fileCount: 2 });
+    expect(all.find((r) => r.collectionId === small)).toMatchObject({ bytes: 10, fileCount: 1 });
+    // ORDER BY bytes DESC, read off the positions of this test's own three rows.
+    expect(at(large)).toBeLessThan(at(medium));
+    expect(at(medium)).toBeLessThan(at(small));
+    // The whole list is ordered, not just these three.
+    expect([...all].sort((a, b) => b.bytes - a.bytes).map((r) => r.bytes)).toEqual(all.map((r) => r.bytes));
+    // LIMIT is a row count and is asserted as one.
+    expect(await trackedBytesTopCollections(1)).toHaveLength(1);
+    expect((await trackedBytesTopCollections(3)).length).toBeLessThanOrEqual(3);
   });
 
   // mysql2 returns SUM() over BIGINT UNSIGNED as a string or BigInt once past 32-bit magnitude - this

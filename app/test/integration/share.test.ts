@@ -446,7 +446,7 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
       const linkId = `L${randomUUID()}`;
       mintInviteLinkMock.mockResolvedValue({
         ok: true,
-        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt: "2026-08-13T00:00:00.000Z" },
+        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt: futureIso() },
       });
       asUser("user:owner");
       const res = await req("POST", "/api/invites", { token: "t", body: { type: "file", id: file.id } });
@@ -459,7 +459,7 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
       const linkId = `L${randomUUID()}`;
       mintInviteLinkMock.mockResolvedValue({
         ok: true,
-        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt: "2026-08-13T00:00:00.000Z" },
+        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt: futureIso() },
       });
       asUser("user:owner");
       const res = await req("POST", "/api/invites", {
@@ -517,6 +517,30 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
       expect((rows as { expires_at: Date }[])[0]?.expires_at?.toISOString()).toBe(expiresAt);
     });
 
+    // Review session 059. D-220 made auth's `expires_at` STRING the thing that bounds access - before E8
+    // it was carried on the wire and rendered nowhere (E7-QA2 hand-off §0.5), so its format had never
+    // mattered. Every tier here mocks the mint and supplies its own ISO-8601 value, so no test in this repo
+    // can see a format divergence; that makes the unparseable case worth pinning explicitly, because the
+    // failure it must never have is a grant with NO expiry (permanent access from a 30-minute invite,
+    // which is the exact bug D-220 exists to fix).
+    it("refuses the invite rather than writing an unbounded grant when auth's expiry cannot be parsed", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      const linkId = `L${randomUUID()}`;
+      mintInviteLinkMock.mockResolvedValue({
+        ok: true,
+        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: linkId, expiresAt: "not-a-date" },
+      });
+      asUser("user:owner");
+      const res = await req("POST", "/api/invites", { token: "t", body: { type: "file", id: file.id } });
+      const [rows] = await getPool().query("SELECT expires_at FROM file_acl WHERE file_id = ? AND sub = ?", [
+        file.id,
+        `link:${linkId}`,
+      ]);
+      expect(res.statusCode).toBe(502);
+      // The load-bearing half: no row at all is fine, a row with a NULL expiry is NOT.
+      expect(rows as unknown[]).toHaveLength(0);
+    });
+
     // E7-QA1 D-195: replaces the old "409 not_private" test - an invite for a non-private object now
     // mints and grants exactly like a private one does.
     it("invite creation succeeds for a non-private object too (D-195)", async () => {
@@ -554,7 +578,11 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
       const linkId = `lnk_${randomUUID()}`;
       mintInviteLinkMock.mockResolvedValue({
         ok: true,
-        value: { url: "https://auth.mosni.dev/i/tok", id: linkId, expiresAt: "x" },
+        // Was the placeholder `"x"` until review session 059. An E7-era fixture could put anything here
+        // because the string was rendered nowhere and stored nowhere; D-220 made it the grant's lifetime,
+        // at which point this test was asserting that a garbage expiry still grants access - which it did,
+        // by writing NULL. Now a real value, and the garbage case has its own test above.
+        value: { url: "https://auth.mosni.dev/i/tok", id: linkId, expiresAt: futureIso() },
       });
       asUser("user:owner");
       const res = await req("POST", "/api/invites", {
@@ -575,7 +603,7 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
     beforeEach(() => {
       mintInviteLinkMock.mockResolvedValue({
         ok: true,
-        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: `lnk_${randomUUID()}`, expiresAt: "2026-08-13T00:00:00.000Z" },
+        value: { url: `https://auth.mosni.dev/i/tok_${randomUUID()}`, id: `lnk_${randomUUID()}`, expiresAt: futureIso() },
       });
     });
 

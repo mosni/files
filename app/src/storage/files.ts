@@ -310,16 +310,22 @@ export async function listFileGrants(fileId: string): Promise<string[]> {
   return (rows as { sub: string }[]).map((row) => row.sub);
 }
 
-// Idempotent: re-granting an existing sub is a no-op, never an error - INSERT IGNORE against the
-// (file_id, sub) primary key. E8 Wave A4 (D-219/D-220): `expiresAt` defaults to null (permanent-until-
-// revoked, the ordinary-share case); an invite grant passes auth's OWN returned expiry so the ACL row and
-// the link can never disagree. `granted_at` is left to the column default.
+// Idempotent: re-granting an existing sub is never an error. E8 Wave A4 (D-219/D-220): `expiresAt`
+// defaults to null (permanent-until-revoked, the ordinary-share case); an invite grant passes auth's OWN
+// returned expiry so the ACL row and the link can never disagree. `granted_at` is left to the column
+// default.
+//
+// Review session 059 replaced INSERT IGNORE with ON DUPLICATE KEY UPDATE, matching grantCollectionAcl:
+// under IGNORE a re-grant kept whatever expiry the existing row already had and dropped the new one
+// silently, so re-sharing something whose grant had expired would 200 and change nothing. Not reachable
+// today (an invite's `link:<id>` sub is unique per mint and an ordinary share always passes null), which
+// is exactly why the two halves were allowed to drift - the day anything re-grants a file to a sub it has
+// granted before, the caller's expiry must win.
 export async function grantFileAcl(fileId: string, sub: string, expiresAt: Date | null = null): Promise<void> {
-  await getPool().query("INSERT IGNORE INTO file_acl (file_id, sub, expires_at) VALUES (?, ?, ?)", [
-    fileId,
-    sub,
-    expiresAt,
-  ]);
+  await getPool().query(
+    "INSERT INTO file_acl (file_id, sub, expires_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE expires_at = VALUES(expires_at)",
+    [fileId, sub, expiresAt],
+  );
 }
 
 export async function revokeFileAcl(fileId: string, sub: string): Promise<void> {

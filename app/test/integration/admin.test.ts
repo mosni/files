@@ -180,6 +180,45 @@ describe("routes/admin.ts + controllers/admin.ts (E8)", () => {
     });
   });
 
+  // Review session 059: the gate must run BEFORE Fastify parses and schema-validates the body, or the
+  // schema answers first and D-217 is bypassed by simply sending a bad body. Measured with the gate in the
+  // handler: an anonymous caller AND an authenticated non-admin both got
+  // `400 {"code":"FST_ERR_VALIDATION","message":"body must have required property 'targetType'"}` from
+  // POST /api/admin/grants/revoke, while a genuinely non-existent /api/admin/* route answered 404 - so the
+  // route and its exact body schema were discoverable by anyone. Every gate test above sends a WELL-FORMED
+  // body, which is precisely why none of them could see it.
+  describe("the gate runs before body validation (D-217, review 059)", () => {
+    it("a non-admin sending a MALFORMED body still gets 404, never a schema error", async () => {
+      asUser("user:writer", { roles: ["files:write"] });
+      const res = await req("POST", "/api/admin/grants/revoke", { token: "t", body: {} });
+      expect(res.statusCode).toBe(404);
+      expect(res.body).not.toContain("targetType");
+    });
+
+    it("an anonymous caller sending a MALFORMED body still gets 401, never a schema error", async () => {
+      const res = await req("POST", "/api/admin/grants/revoke", { body: {} });
+      expect(res.statusCode).toBe(401);
+      expect(res.body).not.toContain("targetType");
+    });
+
+    it("a non-admin sending NO body at all still gets 404 - body parsing runs after onRequest too", async () => {
+      asUser("user:writer", { roles: ["files:write"] });
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/admin/grants/revoke",
+        headers: { host: FILES_HOST, authorization: "Bearer t", "content-type": "application/json" },
+      });
+      expect(res.statusCode).toBe(404);
+    });
+
+    // The admin path still reaches the schema, so a genuinely bad body from a genuine admin is still a 400.
+    it("an ADMIN sending a malformed body gets the schema's 400", async () => {
+      asUser("user:admin", { roles: ["files:write", "files:delete"] });
+      const res = await req("POST", "/api/admin/grants/revoke", { token: "t", body: { targetType: "nope", targetId: "x", sub: "y" } });
+      expect(res.statusCode).toBe(400);
+    });
+  });
+
   // Found only by executing (D-55): a hard navigation to /admin has no matching physical file and, unlike
   // "/f/*"/"/t/:token" (registerPreviewRoutes' real server routes), no server-side document route either -
   // it fell straight through to server.ts's setNotFoundHandler (the real 404 page), so the SPA never even

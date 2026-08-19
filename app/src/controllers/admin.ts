@@ -12,7 +12,7 @@ import { listAllGrants } from "../storage/grants.ts";
 import { resolveById, revokeFileAcl } from "../storage/files.ts";
 import { resolveCollectionById, revokeCollectionAcl } from "../storage/collections.ts";
 import { setAccountRole } from "../auth/internalApi.ts";
-import { volumeUsage } from "../lib/diskUsage.ts";
+import { volumeUsage } from "../storage/diskUsage.ts";
 import { trackedBytesByOwner, trackedBytesTopCollections, trackedBytesTotal } from "../storage/usage.ts";
 import type { AdminGrantRow, AdminUsageResponse } from "../lib/adminContext.ts";
 
@@ -20,19 +20,45 @@ const USAGE_TOP_COLLECTIONS_LIMIT = 10;
 
 // C2.1: the one shared gate. An unauthenticated caller still gets 401 - every authenticated route does,
 // so it discloses nothing - and only a genuine admin ever sees past that to a real 200.
-async function requireAdmin(request: FastifyRequest, reply: FastifyReply, config: Config): Promise<VerifiedClaims | null> {
-  const claims = await requireClaims(request, reply, config);
-  if (claims === null) return null;
-  if (!isFilesAdmin(claims)) {
+//
+// It runs as an `onRequest` hook, which is the ONLY hook that precedes both body parsing and schema
+// validation. Review session 059 measured the alternative: with the gate inside the handler, Fastify's AJV
+// answered first, so POST /api/admin/grants/revoke returned
+// `400 {"code":"FST_ERR_VALIDATION","message":"body must have required property 'targetType'"}` to an
+// anonymous caller and to an authenticated non-admin alike - while a genuinely non-existent /api/admin/*
+// route returned 404. Sending a deliberately malformed body therefore revealed both the endpoint and its
+// exact schema, which is the disclosure D-217 exists to prevent. A `preValidation` hook is not enough
+// either: an empty body fails at PARSING, earlier still.
+//
+// The verified claims are carried to the handler on a WeakMap rather than re-verified there - the gate has
+// already done the work, and a second verify() per admin request would be pure waste.
+const adminClaimsFor = new WeakMap<FastifyRequest, VerifiedClaims>();
+
+export function adminGate(config: Config) {
+  return async function gate(request: FastifyRequest, reply: FastifyReply): Promise<FastifyReply | void> {
+    const claims = await requireClaims(request, reply, config);
+    if (claims === null) return reply; // 401 already sent - returning the reply halts the lifecycle
+    if (!isFilesAdmin(claims)) {
+      reply.code(404).send();
+      return reply;
+    }
+    adminClaimsFor.set(request, claims);
+  };
+}
+
+// Fail closed: a handler reached without the gate having run (a route registered without `onRequest`)
+// answers 404 rather than serving admin data.
+function requireAdmin(request: FastifyRequest, reply: FastifyReply): VerifiedClaims | null {
+  const claims = adminClaimsFor.get(request);
+  if (claims === undefined) {
     reply.code(404).send();
     return null;
   }
   return claims;
 }
 
-export async function listGrantsHandler(request: FastifyRequest, reply: FastifyReply, config: Config): Promise<void> {
-  const claims = await requireAdmin(request, reply, config);
-  if (claims === null) return;
+export async function listGrantsHandler(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  if (requireAdmin(request, reply) === null) return;
   const grants = await listAllGrants();
   const rows: AdminGrantRow[] = grants.map((grant) => ({
     ...grant,
@@ -42,8 +68,8 @@ export async function listGrantsHandler(request: FastifyRequest, reply: FastifyR
   reply.send({ grants: rows });
 }
 
-export async function revokeGrantHandler(request: FastifyRequest, reply: FastifyReply, config: Config): Promise<void> {
-  const claims = await requireAdmin(request, reply, config);
+export async function revokeGrantHandler(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  const claims = requireAdmin(request, reply);
   if (claims === null) return;
   const body = request.body as { targetType?: string; targetId?: string; sub?: string };
   if (
@@ -76,8 +102,7 @@ export async function revokeGrantHandler(request: FastifyRequest, reply: Fastify
 }
 
 export async function usageHandler(request: FastifyRequest, reply: FastifyReply, config: Config): Promise<void> {
-  const claims = await requireAdmin(request, reply, config);
-  if (claims === null) return;
+  if (requireAdmin(request, reply) === null) return;
 
   const [volume, tracked, byOwner, topCollections] = await Promise.all([
     volumeUsage(config.storageRoot),

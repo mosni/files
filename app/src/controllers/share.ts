@@ -279,7 +279,23 @@ export async function createInviteHandler(request: FastifyRequest, reply: Fastif
   // D-220: the ACL row's expiry is auth's OWN returned expiry for THIS mint, not a recomputed value, so
   // the row and the link can never disagree. Passed regardless of allow_register - the switch changes who
   // the identity is (upgraded account vs. link-bound), never how long the grant lasts.
+  //
+  // Checked rather than trusted (review session 059, measured): mysql2 serialises an Invalid Date to SQL
+  // NULL, and a NULL expiry is a PERMANENT grant - so a format this app cannot parse would answer 201 with
+  // a bounded-looking expiry in the body while writing exactly the unbounded grant D-220 exists to
+  // prevent. The string's format is auth's, not ours, and no tier here can see a divergence because every
+  // test mocks the mint and supplies its own ISO-8601 value - the same blind spot as the `link:${id}` sub
+  // (verification-concept.md's mandatory box check). Fail loudly instead: the link is already live and
+  // grants nothing, which is the safe direction, and the log line names the incident.
   const expiresAt = new Date(minted.value.expiresAt);
+  if (Number.isNaN(expiresAt.getTime())) {
+    request.log.error(
+      { linkId: minted.value.id, expiresAt: minted.value.expiresAt },
+      "controllers/share: auth returned an unparseable link expiry - refusing to write an unbounded grant (D-220)",
+    );
+    reply.code(502).send({ error: "acl_write_failed" });
+    return;
+  }
   try {
     if (target.type === "file") {
       await grantFileAcl(target.file.id, sub, expiresAt);

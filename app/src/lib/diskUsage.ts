@@ -1,7 +1,10 @@
-// E8 Wave B2: the volume half of the admin panel's Usage section. Node 24 (Dockerfile) ships fs.statfs,
-// so no shelling out to `df` is needed.
-
-import { statfs } from "node:fs/promises";
+// E8 Wave B2: the pure half of the admin panel's volume figures - the thresholds and the arithmetic.
+//
+// The statfs() call itself lives in storage/diskUsage.ts, not here: `lib` is I/O-free and `storage` is the
+// only layer that touches the filesystem (technical-baseline.md §2). That split is not bookkeeping - this
+// module is imported by web/src/pages/Admin.tsx for the thresholds, so while it held `import { statfs }
+// from "node:fs/promises"` every `vite build` printed *Module "node:fs/promises" has been externalized for
+// browser compatibility* and the SPA's dependency graph reached a Node builtin (review session 059).
 
 export type VolumeUsage = { totalBytes: number; freeBytes: number; usedBytes: number };
 
@@ -12,18 +15,15 @@ export type VolumeUsage = { totalBytes: number; freeBytes: number; usedBytes: nu
 export const DISK_WARN_FREE_BYTES = 300 * 1024 ** 3;
 export const DISK_CRITICAL_FREE_BYTES = 100 * 1024 ** 3;
 
+// The subset of Node's StatsFs this needs. Declared structurally so the arithmetic can be tested against
+// values a real filesystem will not reproduce on demand - in particular bavail < bfree.
+export type BlockCounts = { bsize: number; blocks: number; bavail: number };
+
 // `bavail`, not `bfree`: they differ by the blocks reserved for the root user, and `bavail` is the honest
-// answer to "can this box still accept an ordinary upload". Returns null (never throws) on any failure -
-// logged at warn - because a container whose storage mount is missing is exactly when an admin most needs
-// the REST of the panel to still render.
-export async function volumeUsage(storageRoot: string): Promise<VolumeUsage | null> {
-  try {
-    const stats = await statfs(storageRoot);
-    const totalBytes = stats.bsize * stats.blocks;
-    const freeBytes = stats.bsize * stats.bavail;
-    return { totalBytes, freeBytes, usedBytes: totalBytes - freeBytes };
-  } catch (err) {
-    console.warn(`lib/diskUsage: statfs("${storageRoot}") failed`, err);
-    return null;
-  }
+// answer to "can this box still accept an ordinary upload". `usedBytes` is therefore total-minus-available,
+// which counts the reserved margin as used - deliberate, for the same reason.
+export function volumeFromBlocks(stats: BlockCounts): VolumeUsage {
+  const totalBytes = stats.bsize * stats.blocks;
+  const freeBytes = stats.bsize * stats.bavail;
+  return { totalBytes, freeBytes, usedBytes: totalBytes - freeBytes };
 }
