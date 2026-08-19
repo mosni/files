@@ -16,7 +16,28 @@ export type AdminGrantRow = {
 };
 
 export type AdminOwnerUsage = { ownerSub: string; bytes: number; fileCount: number };
-export type AdminCollectionUsage = { collectionId: string; name: string; ownerSub: string; bytes: number; fileCount: number };
+
+// `url` is built server-side (controllers/admin.ts) from the object's EFFECTIVE protection, exactly like
+// every other link this app hands out (D-96/D-100) - the client never constructs one, because it never
+// sees a link_token. Null when the row vanished between the aggregate and the URL resolution, in which
+// case the panel renders a plain label rather than a dead link.
+export type AdminCollectionUsage = {
+  collectionId: string;
+  name: string;
+  ownerSub: string;
+  bytes: number;
+  fileCount: number;
+  url: string | null;
+};
+
+export type AdminFileUsage = {
+  fileId: string;
+  name: string;
+  collectionName: string | null; // null for a root-level file (D-126)
+  ownerSub: string | null;
+  bytes: number;
+  url: string | null;
+};
 
 export type AdminUsageResponse = {
   volume: { totalBytes: number; freeBytes: number; usedBytes: number } | null;
@@ -24,4 +45,5 @@ export type AdminUsageResponse = {
   untrackedBytes: number | null;
   byOwner: AdminOwnerUsage[];
   topCollections: AdminCollectionUsage[];
+  topFiles: AdminFileUsage[];
 };

@@ -14,6 +14,7 @@ import type { Claims } from "../../../app/src/lib/roles.ts";
 import { DEFAULT_INVITE_DURATION_INDEX, INVITE_DURATION_STOPS } from "../../../app/src/lib/inviteDuration.ts";
 import type { DirectoryAccount, InviteMinted, ShareObjectType, ShareState } from "../../../app/src/lib/shareContext.ts";
 import { toastMutationFailure } from "../lib/mutationError.ts";
+import { IdentityChip } from "./Identity.tsx";
 import { createInvite, fetchAccounts, fetchShareState, grantShare, revokeShare } from "../lib/share.ts";
 import { CopyLink } from "./CopyLink.tsx";
 
@@ -42,68 +43,9 @@ function useCurrentUserSub(): string | null {
   return sub;
 }
 
-// D-169: the working avatar pattern this app already uses elsewhere (lib/previewContext.ts's
-// uploaderAvatarUrl) - auth.mosni.dev/avatar/<sub> DIRECTLY, on the CSP img-src allowlist. F3's defect was
-// rendering auth's raw `picture` field instead, which is an IdP CDN URL (e.g. Google's) that img-src does
-// not allow at all.
-function avatarUrlFor(sub: string): string {
-  return `https://auth.mosni.dev/avatar/${encodeURIComponent(sub)}`;
-}
-
-// F3: a broken-image robustness wrapper, same pattern PreviewCard.tsx's own uploader avatar already uses -
-// on load failure, degrade to an initial/placeholder rather than the browser's broken-image icon.
-function GrantAvatar({ sub }: { sub: string }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) {
-    return (
-      <span
-        aria-hidden="true"
-        style={{
-          width: 20,
-          height: 20,
-          borderRadius: "50%",
-          background: "var(--mosni-surface-2, #eee)",
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontSize: "0.7rem",
-          flexShrink: 0,
-        }}
-      >
-        {sub.slice(-1).toUpperCase()}
-      </span>
-    );
-  }
-  return (
-    <img
-      src={avatarUrlFor(sub)}
-      alt=""
-      width={20}
-      height={20}
-      style={{ borderRadius: "50%", flexShrink: 0 }}
-      onError={() => setFailed(true)}
-    />
-  );
-}
-
-// Review session 052 (Hannah, live: "the link usernames remain untruncated everywhere they are
-// displayed"). A displayed identity is `name ?? sub`, and when the directory has no name the fallback is
-// a raw sub - for an invite that is `link:<uuid>`, ~40 opaque characters. Session 048 added ellipsis
-// truncation here and commit `b5ba853` reverted it along with the label substitution it was bundled
-// with; only the LABEL half was ever the problem (it parsed the sub, violating invariant 6). Truncation
-// parses nothing, so it comes back on its own.
-//
-// Why the dialog's `overflowWrap: anywhere` is not enough: it makes the sub WRAP rather than overflow, so
-// nothing is clipped and review 049's overflow check stayed clean - but a 40-character id wrapped over
-// three lines still shoves the Upload badge and the Remove button around and reads as broken. One line
-// with an ellipsis, and the full value in `title` so it is still recoverable on hover.
-const IDENTITY_TEXT: React.CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
+// The avatar + name combo lives in components/Identity.tsx now (Hannah, 2026-08-19) - one definition
+// instead of the three near-copies this file, headerIdentity.tsx and the admin panel were carrying. The
+// tooltip gained the sub alongside the name in the same change.
 
 export function ShareDialog({
   type,
@@ -294,8 +236,7 @@ export function ShareDialog({
             <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "0.5rem" }}>
               {state.grants.map((grant) => (
                 <li key={grant.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
-                  <GrantAvatar sub={grant.sub} />
-                  <span style={IDENTITY_TEXT} title={grant.name ?? grant.sub}>{grant.name ?? grant.sub}</span>
+                  <IdentityChip sub={grant.sub} name={grant.name} grow />
                   {grant.canUpload && <span className="badge">Upload</span>}
                   <button
                     type="button"
@@ -354,8 +295,7 @@ export function ShareDialog({
               ) : (
                 candidates.map((account) => (
                   <li key={account.sub} style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
-                    <GrantAvatar sub={account.sub} />
-                    <span style={IDENTITY_TEXT} title={account.name ?? account.sub}>{account.name ?? account.sub}</span>
+                    <IdentityChip sub={account.sub} name={account.name} grow />
                     <button
                       type="button"
                       className="btn-ghost btn-sm"

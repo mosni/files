@@ -14,12 +14,9 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { isFilesAdmin, type VerifiedClaims } from "../../../app/src/lib/roles.ts";
+// D-169's avatar URL has one definition now (components/Identity.tsx) - this file used to carry its own.
+import { avatarUrlFor } from "../components/Identity.tsx";
 
-const AUTH_ORIGIN = "https://auth.mosni.dev"; // matches lib/csp.ts's imgSrc entry and D-169's direct avatar link
-
-function avatarUrlFor(sub: string): string {
-  return `${AUTH_ORIGIN}/avatar/${encodeURIComponent(sub)}`;
-}
 
 // D-168: name if captured, else the sub, unconditionally - the same fallback rule PreviewCard's uploader
 // line and lib/audit.ts's actorLabel() already use, so identity display reads consistently everywhere.
@@ -62,7 +59,8 @@ function useSignedInUser(): VerifiedClaims | null {
 // PreviewCard's uploader avatar and ShareDialog's GrantAvatar already follow, as a state flag rather than
 // an `error` listener that removes the node behind React's back.
 // E8/D-217: a small, admin-only icon button reaching the admin panel, in the tagline slot beside the
-// identity. Icon-only at every width, `flexShrink: 0` - the header's tagline is the one part of this app
+// identity - to the RIGHT of it, after the name (Hannah, 2026-08-19: *"the admin panel link icon should
+// be to the right of the logged-in user, not the left"*). Icon-only at every width, `flexShrink: 0` - the header's tagline is the one part of this app
 // with a width budget it has already blown (review 052's phone-header defect), and unlike the name (which
 // truncates by design) a shrinking admin button would just become a useless few-pixel smear. The server's
 // 404 for a non-admin (controllers/admin.ts) is what actually matters; this button's absence for anyone
@@ -72,7 +70,7 @@ function AdminButton() {
     <Link
       to="/admin"
       aria-label="Admin"
-      style={{ display: "flex", alignItems: "center", flexShrink: 0, marginRight: "0.5em" }}
+      style={{ display: "flex", alignItems: "center", flexShrink: 0, marginLeft: "0.5em" }}
     >
       <mosni-icon name="shield" size={16} />
     </Link>
@@ -150,7 +148,6 @@ export function HeaderIdentity() {
         maxWidth: "100%",
       }}
     >
-      {isFilesAdmin(user) && <AdminButton />}
       {narrow ? null : "Logged in as "}
       <HeaderAvatar sub={user.sub} />
       {/* Review session 052: D-168's fallback renders the raw `sub` whenever no name was captured, and
@@ -177,6 +174,7 @@ export function HeaderIdentity() {
       >
         {name}
       </span>
+      {isFilesAdmin(user) && <AdminButton />}
     </span>
   );
 }

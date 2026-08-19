@@ -382,6 +382,55 @@ describe("routes/admin.ts + controllers/admin.ts (E8)", () => {
       expect(typeof body.untrackedBytes === "number" || body.untrackedBytes === null).toBe(true);
     });
 
+    // Live-testing addition (2026-08-19, Hannah): the top lists are LINKS. The URL is built server-side
+    // from EFFECTIVE protection (D-96) - the client never sees a link_token and must never construct one.
+    it("gives each top collection and each top file a real, level-appropriate url", async () => {
+      const publicCollection = await seedCollection("user:owner", { protection: "public" });
+      const publicFile = await seedFile({
+        collectionId: publicCollection.id,
+        ownerSub: "user:owner",
+        protection: "public",
+        bytes: 999_999_999_998,
+      });
+
+      asUser("user:admin", { roles: ["files:write", "files:delete"] });
+      const res = await req("GET", "/api/admin/usage", { token: "t" });
+      const body = res.json() as {
+        topCollections: { collectionId: string; url: string | null }[];
+        topFiles: { fileId: string; name: string; collectionName: string | null; url: string | null }[];
+      };
+
+      const collectionRow = body.topCollections.find((r) => r.collectionId === publicCollection.id)!;
+      expect(collectionRow.url).toBe(`https://files.mosni.dev/f/${encodeURIComponent(publicCollection.name)}`);
+
+      const fileRow = body.topFiles.find((r) => r.fileId === publicFile.id)!;
+      expect(fileRow.collectionName).toBe(publicCollection.name);
+      expect(fileRow.url).toBe(
+        `https://files.mosni.dev/f/${encodeURIComponent(publicCollection.name)}/${encodeURIComponent(publicFile.name)}`,
+      );
+    });
+
+    // D-96/D-100: a file whose EFFECTIVE level does not resolve at a readable path is offered its token,
+    // never a path that leaks where it lives. The file below is stored `public` inside a `secret`
+    // collection, so reading its own column would produce the wrong URL - which is the whole point.
+    it("offers the token URL for a file gated by its collection, never the readable path", async () => {
+      const secretCollection = await seedCollection("user:owner", { protection: "secret" });
+      const file = await seedFile({
+        collectionId: secretCollection.id,
+        ownerSub: "user:owner",
+        protection: "public",
+        bytes: 999_999_999_997,
+      });
+
+      asUser("user:admin", { roles: ["files:write", "files:delete"] });
+      const res = await req("GET", "/api/admin/usage", { token: "t" });
+      const body = res.json() as { topFiles: { fileId: string; url: string | null }[] };
+      const row = body.topFiles.find((r) => r.fileId === file.id)!;
+
+      expect(row.url).toMatch(/^https:\/\/files\.mosni\.dev\/t\//);
+      expect(row.url).not.toContain(secretCollection.name);
+    });
+
     it("volume: null degrades to a 200 with untrackedBytes: null, when the storage root is unreachable", async () => {
       const brokenApp = Fastify({ logger: false });
       const brokenConfig = makeTestConfig({ storageRoot: "/no/such/storage/root/at/all" });

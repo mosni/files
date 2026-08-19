@@ -13,10 +13,21 @@ import { resolveById, revokeFileAcl } from "../storage/files.ts";
 import { resolveCollectionById, revokeCollectionAcl } from "../storage/collections.ts";
 import { setAccountRole } from "../auth/internalApi.ts";
 import { volumeUsage } from "../storage/diskUsage.ts";
-import { trackedBytesByOwner, trackedBytesTopCollections, trackedBytesTotal } from "../storage/usage.ts";
-import type { AdminGrantRow, AdminUsageResponse } from "../lib/adminContext.ts";
+import {
+  trackedBytesByOwner,
+  trackedBytesTopCollections,
+  trackedBytesTopFiles,
+  trackedBytesTotal,
+  type CollectionUsage,
+  type FileUsage,
+} from "../storage/usage.ts";
+import { collectionPath, protectionChain } from "../storage/collections.ts";
+import { mostRestrictive, type Protection } from "../lib/protection.ts";
+import { buildCollectionPreviewUrl, buildFileUrls } from "../lib/fileUrls.ts";
+import type { AdminCollectionUsage, AdminFileUsage, AdminGrantRow, AdminUsageResponse } from "../lib/adminContext.ts";
 
-const USAGE_TOP_COLLECTIONS_LIMIT = 10;
+// Live-testing addition (2026-08-19, Hannah): "both top lists limited to the 10 largest".
+const USAGE_TOP_LIMIT = 10;
 
 // C2.1: the one shared gate. An unauthenticated caller still gets 401 - every authenticated route does,
 // so it discloses nothing - and only a genuine admin ever sees past that to a real 200.
@@ -101,14 +112,98 @@ export async function revokeGrantHandler(request: FastifyRequest, reply: Fastify
   reply.send({});
 }
 
+// The top lists are LINKS, not labels (Hannah, 2026-08-19), so each row needs the same URL the browse API
+// would hand out for that object. That means EFFECTIVE protection - the most restrictive level along the
+// ancestor chain (D-96), never the stored column - so the chain is walked here rather than guessed.
+//
+// At most ten rows per list, and the two lists overlap heavily in practice (the biggest files live in the
+// biggest collections), so one ancestor walk per DISTINCT collection is memoised for the request. Ten rows
+// on an Atom N2800 (D-78) is already cheap; this keeps it to a handful of queries rather than twenty.
+function collectionResolver() {
+  const cache = new Map<string, Promise<{ path: string[]; chain: Protection[] } | null>>();
+  return async function resolve(collectionId: string) {
+    if (collectionId === "") return { path: [], chain: [] }; // D-126: a root file has no ancestors
+    let pending = cache.get(collectionId);
+    if (pending === undefined) {
+      pending = (async () => {
+        try {
+          const [path, chain] = await Promise.all([collectionPath(collectionId), protectionChain(collectionId)]);
+          return { path, chain };
+        } catch {
+          // A collection deleted between the aggregate and this walk - the row gets a null url and the
+          // panel renders a plain label. Never fail the whole page for one stale link.
+          return null;
+        }
+      })();
+      cache.set(collectionId, pending);
+    }
+    return pending;
+  };
+}
+
+async function shapeTopCollections(
+  rows: CollectionUsage[],
+  config: Config,
+  resolve: ReturnType<typeof collectionResolver>,
+): Promise<AdminCollectionUsage[]> {
+  return Promise.all(
+    rows.map(async (row) => {
+      const resolved = await resolve(row.collectionId);
+      const url =
+        resolved === null
+          ? null
+          : buildCollectionPreviewUrl(config, mostRestrictive(resolved.chain), resolved.path, row.linkToken);
+      return {
+        collectionId: row.collectionId,
+        name: row.name,
+        ownerSub: row.ownerSub,
+        bytes: row.bytes,
+        fileCount: row.fileCount,
+        url,
+      };
+    }),
+  );
+}
+
+async function shapeTopFiles(
+  rows: FileUsage[],
+  config: Config,
+  resolve: ReturnType<typeof collectionResolver>,
+): Promise<AdminFileUsage[]> {
+  return Promise.all(
+    rows.map(async (row) => {
+      const resolved = await resolve(row.collectionId);
+      const url =
+        resolved === null
+          ? null
+          : buildFileUrls(config, mostRestrictive([...resolved.chain, row.protection]), [...resolved.path, row.name], row.linkToken)
+              .previewUrl;
+      return {
+        fileId: row.fileId,
+        name: row.name,
+        collectionName: row.collectionName,
+        ownerSub: row.ownerSub,
+        bytes: row.bytes,
+        url,
+      };
+    }),
+  );
+}
+
 export async function usageHandler(request: FastifyRequest, reply: FastifyReply, config: Config): Promise<void> {
   if (requireAdmin(request, reply) === null) return;
 
-  const [volume, tracked, byOwner, topCollections] = await Promise.all([
+  const [volume, tracked, byOwner, topCollectionRows, topFileRows] = await Promise.all([
     volumeUsage(config.storageRoot),
     trackedBytesTotal(),
     trackedBytesByOwner(),
-    trackedBytesTopCollections(USAGE_TOP_COLLECTIONS_LIMIT),
+    trackedBytesTopCollections(USAGE_TOP_LIMIT),
+    trackedBytesTopFiles(USAGE_TOP_LIMIT),
+  ]);
+  const resolve = collectionResolver();
+  const [topCollections, topFiles] = await Promise.all([
+    shapeTopCollections(topCollectionRows, config, resolve),
+    shapeTopFiles(topFileRows, config, resolve),
   ]);
 
   // Clamped at 0: the volume is shared with other apps on the box (technical-baseline.md), so the delta
@@ -116,6 +211,6 @@ export async function usageHandler(request: FastifyRequest, reply: FastifyReply,
   // actually is.
   const untrackedBytes = volume === null ? null : Math.max(0, volume.usedBytes - tracked.bytes);
 
-  const body: AdminUsageResponse = { volume, tracked, untrackedBytes, byOwner, topCollections };
+  const body: AdminUsageResponse = { volume, tracked, untrackedBytes, byOwner, topCollections, topFiles };
   reply.send(body);
 }

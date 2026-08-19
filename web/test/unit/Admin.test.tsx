@@ -10,13 +10,19 @@ vi.mock("../../src/lib/admin.ts", () => ({
   revokeGrant: vi.fn(),
 }));
 
+// The directory is a separate, deliberately non-blocking fetch (see AdminPage.loadNames) - mocked here so
+// every identity in the panel can be asserted as a NAME rather than a raw sub.
+vi.mock("../../src/lib/share.ts", () => ({ fetchAccounts: vi.fn() }));
+
 import { AdminPage } from "../../src/pages/Admin.tsx";
 import { fetchGrants, fetchUsage, revokeGrant } from "../../src/lib/admin.ts";
+import { fetchAccounts } from "../../src/lib/share.ts";
 import type { AdminGrantRow, AdminUsageResponse } from "../../../app/src/lib/adminContext.ts";
 
 const fetchGrantsMock = vi.mocked(fetchGrants);
 const fetchUsageMock = vi.mocked(fetchUsage);
 const revokeGrantMock = vi.mocked(revokeGrant);
+const fetchAccountsMock = vi.mocked(fetchAccounts);
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -27,8 +33,25 @@ const USAGE: AdminUsageResponse = {
   tracked: { bytes: 500_000_000_000, fileCount: 42 },
   untrackedBytes: 100_000_000_000,
   byOwner: [{ ownerSub: "user:owner", bytes: 500_000_000_000, fileCount: 42 }],
-  topCollections: [{ collectionId: "c1", name: "photos", ownerSub: "user:owner", bytes: 500_000_000_000, fileCount: 42 }],
+  topCollections: [
+    { collectionId: "c1", name: "photos", ownerSub: "user:owner", bytes: 500_000_000_000, fileCount: 42, url: "https://files.mosni.dev/f/photos" },
+  ],
+  topFiles: [
+    {
+      fileId: "f1",
+      name: "holiday.mp4",
+      collectionName: "photos",
+      ownerSub: "user:owner",
+      bytes: 400_000_000_000,
+      url: "https://files.mosni.dev/f/photos/holiday.mp4",
+    },
+  ],
 };
+
+const DIRECTORY = [
+  { sub: "user:owner", name: "Hannah", picture: "" },
+  { sub: "user:grantee", name: "Alex", picture: "" },
+];
 
 const ACTIVE_GRANT: AdminGrantRow = {
   targetType: "file",
@@ -76,6 +99,7 @@ describe("AdminPage (E8)", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
+    fetchAccountsMock.mockResolvedValue(jsonResponse(DIRECTORY));
   });
 
   afterEach(() => {
@@ -87,6 +111,7 @@ describe("AdminPage (E8)", () => {
     fetchGrantsMock.mockReset();
     fetchUsageMock.mockReset();
     revokeGrantMock.mockReset();
+    fetchAccountsMock.mockReset();
   });
 
   it("renders both sections from the stubbed API", async () => {
@@ -102,7 +127,10 @@ describe("AdminPage (E8)", () => {
 
   // Review session 059: the owner was joined by the API and dropped by the table, so two grants on two
   // different files both named "photo.jpg" rendered identically.
-  it("names the object's OWNER in the Access row, not just the object", async () => {
+  //
+  // Hannah, 2026-08-19: *"grantee and owner columns should always be name with sub in the tooltip, never
+  // plain sub"* - so both cells assert the resolved NAME, with the sub recoverable from the title.
+  it("shows the owner and the grantee as name + avatar, with the sub in the tooltip", async () => {
     fetchUsageMock.mockResolvedValue(jsonResponse(USAGE));
     fetchGrantsMock.mockResolvedValue(jsonResponse({ grants: [ACTIVE_GRANT] }));
     render();
@@ -111,33 +139,120 @@ describe("AdminPage (E8)", () => {
     const headers = Array.from(container.querySelectorAll("th")).map((th) => th.textContent);
     expect(headers).toContain("Owner");
     const row = Array.from(container.querySelectorAll("tbody tr")).find((tr) => tr.textContent?.includes("photo.jpg"))!;
-    const cells = Array.from(row.querySelectorAll("td")).map((td) => td.textContent);
-    expect(cells[1]).toBe("user:owner"); // the cell right after the object, before the grantee
-    expect(cells[2]).toBe("user:grantee");
+    const cells = Array.from(row.querySelectorAll("td"));
+    expect(cells[1]!.textContent).toBe("Hannah"); // the cell right after the object, before the grantee
+    expect(cells[2]!.textContent).toBe("Alex");
+    expect(cells[1]!.querySelector("[title]")!.getAttribute("title")).toBe("Hannah (user:owner)");
+    expect(cells[2]!.querySelector("[title]")!.getAttribute("title")).toBe("Alex (user:grantee)");
+    expect(cells[1]!.querySelector("img")).not.toBeNull(); // the picture half of the combo
   });
 
-  // Review session 059: the delta between the volume and the app's tracked bytes is dominated by OTHER
-  // apps on the shared box, so the line must say so - the original copy named only this app's own
-  // untracked bytes, which reads as "the app has lost most of the disk".
-  it("shows the untracked line, and says the volume is shared with the rest of the box", async () => {
+  // D-222 is not reversed: auth's directory excludes link-bound accounts, so there is no name to resolve
+  // and the raw sub is still what renders - with the full value in the tooltip.
+  it("falls back to the raw sub for an identity the directory does not know", async () => {
+    fetchUsageMock.mockResolvedValue(jsonResponse(USAGE));
+    fetchGrantsMock.mockResolvedValue(jsonResponse({ grants: [EXPIRED_GRANT] }));
+    render();
+    await flush();
+
+    const row = Array.from(container.querySelectorAll("tbody tr")).find((tr) => tr.textContent?.includes("link:"))!;
+    const grantee = Array.from(row.querySelectorAll("td"))[2]!;
+    expect(grantee.textContent).toBe(EXPIRED_GRANT.sub);
+    expect(grantee.querySelector("[title]")!.getAttribute("title")).toBe(EXPIRED_GRANT.sub);
+  });
+
+  // An unreachable directory must degrade to raw subs, never blank the panel - the names are decoration.
+  it("still renders every row when the account directory cannot be fetched", async () => {
+    fetchAccountsMock.mockRejectedValue(new Error("auth is down"));
+    fetchUsageMock.mockResolvedValue(jsonResponse(USAGE));
+    fetchGrantsMock.mockResolvedValue(jsonResponse({ grants: [ACTIVE_GRANT] }));
+    render();
+    await flush();
+
+    expect(container.textContent).toContain("photo.jpg");
+    expect(container.textContent).toContain("user:grantee");
+  });
+
+  // Hannah, 2026-08-19: "revoke button should be danger-highlighted" and "status should be a badge".
+  it("styles Revoke as a danger button and the status as a badge", async () => {
+    fetchUsageMock.mockResolvedValue(jsonResponse(USAGE));
+    fetchGrantsMock.mockResolvedValue(jsonResponse({ grants: [ACTIVE_GRANT, EXPIRED_GRANT] }));
+    render();
+    await flush();
+
+    const revoke = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Revoke")!;
+    expect(revoke.className).toContain("btn-danger");
+
+    const badges = Array.from(container.querySelectorAll("span.badge"));
+    expect(badges.find((b) => b.textContent === "Active")!.className).toContain("success");
+    expect(badges.find((b) => b.textContent === "Expired")!.className).toContain("error");
+  });
+
+  // Hannah, 2026-08-19: Usage is a metric grid now, not prose - five tiles, one desktop row, and no
+  // sentence explaining the gap between "volume used" and "tracked by the app" (*"the gap is obvious to
+  // literally anyone"*). Review 059's actual bug was a label making a WRONG claim about that gap; the
+  // claim is gone, so what this asserts is that no prose came back with it.
+  it("renders the volume figures as five labelled metrics, with no explanatory prose", async () => {
     fetchUsageMock.mockResolvedValue(jsonResponse(USAGE));
     fetchGrantsMock.mockResolvedValue(jsonResponse({ grants: [] }));
     render();
     await flush();
 
-    expect(container.textContent).toContain("Everything else on the volume");
-    expect(container.textContent).toContain("shared with the rest of the box");
+    for (const label of ["Volume total", "Volume free", "Volume used", "Tracked by the app", "Files"]) {
+      expect(container.textContent).toContain(label);
+    }
+    expect(container.textContent).not.toContain("Everything else");
+    expect(container.textContent).not.toContain("Not tracked by the app");
+    expect(container.textContent).not.toContain("shared with the rest of the box");
   });
 
-  it("volume: null degrades without throwing", async () => {
+  // Hannah, 2026-08-19: "top collections table should link to the collections" and "top files should exist
+  // similar to top collections".
+  it("links each top collection and each top file to the object itself", async () => {
+    fetchUsageMock.mockResolvedValue(jsonResponse(USAGE));
+    fetchGrantsMock.mockResolvedValue(jsonResponse({ grants: [] }));
+    render();
+    await flush();
+
+    const hrefs = Array.from(container.querySelectorAll("a")).map((a) => a.getAttribute("href"));
+    expect(hrefs).toContain("https://files.mosni.dev/f/photos");
+    expect(hrefs).toContain("https://files.mosni.dev/f/photos/holiday.mp4");
+    expect(container.textContent).toContain("Top files");
+    expect(container.textContent).toContain("holiday.mp4");
+  });
+
+  // A row whose object vanished between the aggregate and the URL resolution renders as a label, never as
+  // a dead link.
+  it("renders a top row with no url as plain text", async () => {
     fetchUsageMock.mockResolvedValue(
-      jsonResponse({ volume: null, tracked: { bytes: 0, fileCount: 0 }, untrackedBytes: null, byOwner: [], topCollections: [] }),
+      jsonResponse({ ...USAGE, topCollections: [{ ...USAGE.topCollections[0]!, url: null }] }),
     );
     fetchGrantsMock.mockResolvedValue(jsonResponse({ grants: [] }));
     render();
     await flush();
 
-    expect(container.textContent).toContain("Volume figures are unavailable");
+    expect(container.textContent).toContain("photos");
+    expect(Array.from(container.querySelectorAll("a")).map((a) => a.textContent)).not.toContain("photos");
+  });
+
+  it("volume: null degrades without throwing - the rest of the panel still renders", async () => {
+    fetchUsageMock.mockResolvedValue(
+      jsonResponse({
+        volume: null,
+        tracked: { bytes: 0, fileCount: 0 },
+        untrackedBytes: null,
+        byOwner: [],
+        topCollections: [],
+        topFiles: [],
+      }),
+    );
+    fetchGrantsMock.mockResolvedValue(jsonResponse({ grants: [] }));
+    render();
+    await flush();
+
+    expect(container.textContent).toContain("unavailable");
+    expect(container.textContent).toContain("Tracked by the app"); // the app-side metrics still render
+    expect(container.textContent).toContain("Access");
   });
 
   it("renders an expired grant as expired", async () => {

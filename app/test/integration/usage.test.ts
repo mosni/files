@@ -11,7 +11,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { applyMigrations, closeDb, getPool, initDb } from "../../src/storage/db.ts";
 import { claimFileRow, commitFileRow, diskRelPath, initFilesStorage } from "../../src/storage/files.ts";
 import { createCollection } from "../../src/storage/collections.ts";
-import { trackedBytesByOwner, trackedBytesTopCollections, trackedBytesTotal } from "../../src/storage/usage.ts";
+import {
+  trackedBytesByOwner,
+  trackedBytesTopCollections,
+  trackedBytesTopFiles,
+  trackedBytesTotal,
+} from "../../src/storage/usage.ts";
 
 describe("storage/usage.ts (E8 Wave B1)", () => {
   let root: string;
@@ -47,8 +52,8 @@ describe("storage/usage.ts (E8 Wave B1)", () => {
     }
   });
 
-  async function seedCollection(ownerSub: string): Promise<string> {
-    const collection = await createCollection({ parentId: "", name: `c-${randomUUID()}`, ownerSub });
+  async function seedCollection(ownerSub: string, name?: string): Promise<string> {
+    const collection = await createCollection({ parentId: "", name: name ?? `c-${randomUUID()}`, ownerSub });
     createdCollectionIds.push(collection.id);
     return collection.id;
   }
@@ -61,8 +66,9 @@ describe("storage/usage.ts (E8 Wave B1)", () => {
     ownerSub: string | null;
     bytes: number;
     state?: "pending" | "committed";
+    name?: string;
   }): Promise<string> {
-    const name = `f-${randomUUID()}.bin`;
+    const name = opts.name ?? `f-${randomUUID()}.bin`;
     const diskDir = "2026/08";
     const claimed = await claimFileRow({
       collectionId: opts.collectionId,
@@ -152,6 +158,69 @@ describe("storage/usage.ts (E8 Wave B1)", () => {
     // LIMIT is a row count and is asserted as one.
     expect(await trackedBytesTopCollections(1)).toHaveLength(1);
     expect((await trackedBytesTopCollections(3)).length).toBeLessThanOrEqual(3);
+  });
+
+  // Live-testing addition (2026-08-19, Hannah): "top files should exist similar to top collections".
+  // Scoped to this test's OWN rows for the same reason the collections test above is - the database is
+  // shared with every other integration file and with scripts/visual-check.mjs.
+  it("trackedBytesTopFiles orders by bytes DESC, respects LIMIT, and excludes a pending row", async () => {
+    const owner = `user:${randomUUID()}`;
+    const collectionId = await seedCollection(owner);
+    const bigName = `big-${randomUUID()}.bin`;
+    const smallName = `small-${randomUUID()}.bin`;
+    const pendingName = `pending-${randomUUID()}.bin`;
+    await seedFile({ collectionId, ownerSub: owner, bytes: 5_000, name: bigName });
+    await seedFile({ collectionId, ownerSub: owner, bytes: 100, name: smallName });
+    await seedFile({ collectionId, ownerSub: owner, bytes: 9_999_999, name: pendingName, state: "pending" });
+
+    const all = await trackedBytesTopFiles(10_000);
+    const at = (name: string) => all.findIndex((r) => r.name === name);
+    expect(at(bigName)).toBeGreaterThanOrEqual(0);
+    expect(at(bigName)).toBeLessThan(at(smallName));
+    expect(all.some((r) => r.name === pendingName)).toBe(false); // D-85: an upload in flight is not the app's
+    expect([...all].sort((a, b) => b.bytes - a.bytes).map((r) => r.bytes)).toEqual(all.map((r) => r.bytes));
+    expect(await trackedBytesTopFiles(1)).toHaveLength(1);
+  });
+
+  // The row carries what the caller needs to build the file's real share URL - its own protection and
+  // token (controllers/admin.ts folds the ancestor chain in for the EFFECTIVE level, D-96).
+  it("trackedBytesTopFiles returns the collection name, protection and link token per row", async () => {
+    const owner = `user:${randomUUID()}`;
+    const collectionName = `usage-top-${randomUUID()}`;
+    const collectionId = await seedCollection(owner, collectionName);
+    const name = `linked-${randomUUID()}.bin`;
+    await seedFile({ collectionId, ownerSub: owner, bytes: 4_242, name });
+
+    const row = (await trackedBytesTopFiles(10_000)).find((r) => r.name === name)!;
+    expect(row.collectionId).toBe(collectionId);
+    expect(row.collectionName).toBe(collectionName);
+    expect(row.ownerSub).toBe(owner);
+    expect(row.bytes).toBe(4_242);
+    expect(row.protection).toBeTruthy();
+    expect(row.linkToken).toBeTruthy();
+  });
+
+  // LEFT JOIN, not JOIN: a root-level file has collection_id = '' and no collections row (D-126). An
+  // INNER JOIN would silently drop the largest file on the box if it happened to sit at the root.
+  it("trackedBytesTopFiles includes a ROOT-level file, with a null collection name", async () => {
+    const owner = `user:${randomUUID()}`;
+    const name = `root-${randomUUID()}.bin`;
+    await seedFile({ collectionId: "", ownerSub: owner, bytes: 7_777, name });
+
+    const row = (await trackedBytesTopFiles(10_000)).find((r) => r.name === name);
+    expect(row).toBeDefined();
+    expect(row!.collectionName).toBeNull();
+    expect(row!.collectionId).toBe("");
+  });
+
+  // The collections rows carry their own token for the same reason.
+  it("trackedBytesTopCollections returns each collection's link token", async () => {
+    const owner = `user:${randomUUID()}`;
+    const collectionId = await seedCollection(owner);
+    await seedFile({ collectionId, ownerSub: owner, bytes: 321 });
+
+    const row = (await trackedBytesTopCollections(10_000)).find((r) => r.collectionId === collectionId)!;
+    expect(row.linkToken).toBeTruthy();
   });
 
   // mysql2 returns SUM() over BIGINT UNSIGNED as a string or BigInt once past 32-bit magnitude - this

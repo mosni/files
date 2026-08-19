@@ -284,6 +284,21 @@ describe("HeaderIdentity (live-testing addition, 2026-08-06)", () => {
       expect(link!.getAttribute("href")).toBe("/admin");
     });
 
+    // Hannah, 2026-08-19: *"the admin panel link icon should be to the right of the logged-in user, not
+    // the left"*. Asserted as DOM order rather than as a style, because that is what actually decides it.
+    it("sits to the RIGHT of the identity, after the name", async () => {
+      const sdk = installSdk();
+      render();
+      await flush();
+      sdk.signIn({ name: "Hannah", roles: ["files:write", "files:delete"] });
+      await flush();
+
+      const link = container.querySelector('a[aria-label="Admin"]')!;
+      const nameEl = container.querySelector("[data-identity-name]")!;
+      // Node.DOCUMENT_POSITION_FOLLOWING (4): the link comes after the name in document order.
+      expect(nameEl.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
     it("renders for mosni_owner alone", async () => {
       const sdk = installSdk();
       render();
