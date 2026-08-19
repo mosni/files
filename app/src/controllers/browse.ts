@@ -27,7 +27,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
 import { can, isFilesAdmin, isSuperuser, type Claims } from "../lib/roles.ts";
-import { buildCollectionPreviewUrl, buildFileUrls, buildThumbUrl } from "../lib/fileUrls.ts";
+import { buildCollectionPreviewUrl, buildFileUrls, buildSignedDeliveryUrls, buildThumbUrl } from "../lib/fileUrls.ts";
 import { fileKindFor } from "../lib/fileKind.ts";
 import { isListedFor, mostRestrictive, type Protection, type VisibilityReason } from "../lib/protection.ts";
 import type { BrowseCollection, BrowseFile, BrowseResponse, Scope } from "../lib/browseContext.ts";
@@ -194,13 +194,29 @@ async function shapeFile(
     grants.hostedInOwnCollection,
   );
   const urls = buildFileUrls(config, effectiveProtection, [...pathSegments, record.name], record.linkToken);
-  const thumbUrl = buildThumbUrl(
+  const readableThumbUrl = buildThumbUrl(
     config,
     effectiveProtection,
     [...pathSegments, record.name],
     record.linkToken,
     record.thumbName !== null,
   );
+  // Review 060/BUG-1: a `private` row's readable path RESOLVES (readablePathResolves only rejects
+  // `secret`), so buildFileUrls/buildThumbUrl hand back `dl.mosni.dev/<path>` and `.../thumb/<path>` for
+  // it - URLs nothing in a browser can authorize, because neither an <img src> nor the archive service
+  // worker's fetch() carries a Bearer. The listing's own thumbnails 401'd into broken images for the
+  // file's OWNER, and "Download all" skipped every private file into its `failed` list. The preview page
+  // never had this bug because it signs (D-84); this is the same signing, through the same helper.
+  //
+  // ⚠ The signature carries DELIVERY_URL_TTL_SECONDS (default 300s), extended to cover a video's own
+  // duration (BUG-3). That is right for a thumbnail, which is fetched on paint, and it is the ceiling on
+  // how long an archive containing private files may take to run - the duration extension is passed here
+  // for exactly that reason, since "Download all" fetches these same URLs one file at a time. Unlike the
+  // preview page, a listing does NOT renew them; see .env.example.
+  const signed =
+    effectiveProtection === "private"
+      ? buildSignedDeliveryUrls(config, record.id, record.thumbName !== null, record.durationSeconds)
+      : null;
   return {
     id: record.id,
     name: record.name,
@@ -209,8 +225,8 @@ async function shapeFile(
     effectiveProtection,
     reason,
     previewUrl: urls.previewUrl,
-    directUrl: urls.directUrl,
-    thumbUrl,
+    directUrl: signed === null ? urls.directUrl : signed.directUrl,
+    thumbUrl: signed === null ? readableThumbUrl : signed.thumbUrl,
     // Live-testing addition (2026-08-06): the display kind behind the row's icon. Derived server-side
     // because it needs `isText`, which lives on the record and is deliberately never exposed raw.
     kind: fileKindFor(record.name, record.isText),

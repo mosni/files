@@ -19,7 +19,7 @@ import { can, isSuperuser, type VerifiedClaims } from "../lib/roles.ts";
 import { actorLabel } from "../lib/audit.ts";
 import { buildCollectionPreviewUrl, buildFileUrls } from "../lib/fileUrls.ts";
 import { DEFAULT_INVITE_TTL_SECONDS, isValidInviteTtl } from "../lib/inviteDuration.ts";
-import type { ShareGrant, ShareObjectType, ShareState } from "../lib/shareContext.ts";
+import type { DirectoryAccount, ShareGrant, ShareObjectType, ShareState } from "../lib/shareContext.ts";
 import { emitAuditEvent } from "../storage/audit.ts";
 import {
   collectionPath,
@@ -88,14 +88,29 @@ async function destinationUrlFor(config: Config, target: ResolvedShareTarget): P
   return buildCollectionPreviewUrl(config, target.collection.effectiveProtection, segments, target.collection.linkToken);
 }
 
-async function buildShareState(target: ResolvedShareTarget): Promise<ShareState> {
+// Review 060/SEC-6: the directory as a sub-keyed Map, fetched once per request. `ok: false` means auth
+// could not be reached at all, which grantShareHandler must fail closed on and buildShareState must NOT
+// (B3 below) - so the two facts stay separate rather than collapsing into an empty map.
+type Directory = { ok: boolean; accounts: Map<string, DirectoryAccount> };
+
+async function fetchDirectory(): Promise<Directory> {
+  const result = await listAccounts();
+  return {
+    ok: result.ok,
+    accounts: new Map(result.ok ? result.value.map((account) => [account.sub, account]) : []),
+  };
+}
+
+async function buildShareState(target: ResolvedShareTarget, known?: Directory): Promise<ShareState> {
   const meta = targetMeta(target);
   const rawGrants = await grantsFor(target);
   // B3: if listAccounts() fails, the list of who has access must not depend on auth being up - every
   // grant still returns, just with name/picture null (the same shape an invited/link-bound sub always
   // renders as, since auth's directory excludes those too).
-  const directoryResult = await listAccounts();
-  const directory = new Map(directoryResult.ok ? directoryResult.value.map((account) => [account.sub, account]) : []);
+  // `known` lets a caller that already fetched the directory this request (grantShareHandler, for its own
+  // SEC-6 validation) reuse it rather than issuing a second identical call.
+  const directoryResult = known ?? (await fetchDirectory());
+  const directory = directoryResult.accounts;
   const grants: ShareGrant[] = rawGrants.map((grant) => {
     const account = directory.get(grant.sub);
     return { sub: grant.sub, name: account?.name ?? null, picture: account?.picture ?? null, canUpload: grant.canUpload };
@@ -172,6 +187,26 @@ export async function grantShareHandler(request: FastifyRequest, reply: FastifyR
     reply.code(400).send({ error: "cannot_share_with_self" });
     return;
   }
+  // Review 060/SEC-6: `sub` arrived as any non-empty string - the schema never constrained it and nothing
+  // checked it existed. A typo'd or invented sub wrote a permanent ACL row that renders forever as a
+  // nameless grantee, and the client already carried an `unknown_account` message the server had never
+  // once sent. The directory is the authority: auth returns real accounts only (`WHERE link_id IS NULL`),
+  // so "not in it" covers an invented sub AND a link-bound one in a single check.
+  //
+  // Deliberately a Map lookup, never a prefix test (security invariant 6: a sub is matched byte-for-byte
+  // and NEVER parsed) - which is also why a link-bound sub cannot get its own distinct message here.
+  //
+  // Fails CLOSED when auth is unreachable: writing an unvalidated grant because the validator was down is
+  // exactly the outcome this check exists to prevent, and 502 is a state the dialog already renders.
+  const directory = await fetchDirectory();
+  if (!directory.ok) {
+    reply.code(502).send({ error: "auth_unavailable" });
+    return;
+  }
+  if (!directory.accounts.has(body.sub)) {
+    reply.code(400).send({ error: "unknown_account" });
+    return;
+  }
   // D-182: this app does NOT call POST /internal/roles when granting to an ordinary account - the row IS
   // the grant, there is no role to add. auth is only involved for invites (createInviteHandler) and for
   // the files:read cleanup on revoke (D-192, below).
@@ -183,7 +218,7 @@ export async function grantShareHandler(request: FastifyRequest, reply: FastifyR
     await grantCollectionAcl(target.collection.id, body.sub, body.canUpload === true);
   }
   emitAuditEvent({ action: "share-change", actor: actorLabel(claims), target: meta.name });
-  reply.send(await buildShareState(target));
+  reply.send(await buildShareState(target, directory));
 }
 
 export async function revokeShareHandler(request: FastifyRequest, reply: FastifyReply, config: Config): Promise<void> {

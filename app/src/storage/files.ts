@@ -133,6 +133,15 @@ export async function deleteFileRow(id: string): Promise<void> {
 // Applies the D-85 "pending rows are exempt" rule and the D-16 vanished-bytes prune uniformly to every
 // row-level lookup (by names, by token, or by id). A `pending` row's bytes are legitimately not on disk
 // yet, so it is treated exactly like "no row" rather than pruned.
+// Review 060/BUG-9: the guard on D-16's vanished-bytes prune below. Deliberately checks the ROOT rather
+// than the file's own parent directory: a "<YYYY>/<mm>" directory legitimately disappears once its last
+// file is deleted, so its absence proves nothing, while the root is created before first boot and never
+// removed in normal operation.
+async function storageRootIsMounted(root: string): Promise<boolean> {
+  const rootStat = await stat(root).catch(() => null);
+  return rootStat !== null && rootStat.isDirectory();
+}
+
 async function materialize(row: FileRow): Promise<FileRecord | null> {
   if (row.state === "pending") return null;
 
@@ -140,6 +149,18 @@ async function materialize(row: FileRow): Promise<FileRecord | null> {
   const absolutePath = resolveRelPath(root, diskRelPath({ diskDir: row.disk_dir, diskName: row.disk_name }));
   const entryStat = absolutePath === null ? null : await stat(absolutePath).catch(() => null);
   if (entryStat === null) {
+    // Review 060/BUG-9: D-16's prune could not tell "this one file is gone" from "the storage volume is
+    // not mounted". With STORAGE_ROOT absent or mispathed at boot, ordinary browse and delivery traffic
+    // walked the table and DELETED the row for every file whose bytes were in fact perfectly fine - an
+    // unrecoverable metadata loss caused by read traffic. So the prune now requires positive evidence
+    // that the volume is there: an unreachable root degrades to a 404 (the row survives, nothing is
+    // served) instead of destroying the row.
+    if (!(await storageRootIsMounted(root))) {
+      console.error(
+        `storage/files: STORAGE_ROOT ("${root}") is not a readable directory - refusing to prune row "${row.id}" (D-16/BUG-9)`,
+      );
+      return null;
+    }
     await deleteFileRow(row.id);
     return null;
   }

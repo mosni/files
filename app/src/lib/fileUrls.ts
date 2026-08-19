@@ -8,6 +8,7 @@
 
 import type { Protection } from "./protection.ts";
 import { readablePathResolves } from "./protection.ts";
+import { signDelivery, type DeliveryScope } from "./deliverySignature.ts";
 
 export type FileUrls = { previewUrl: string; directUrl: string };
 
@@ -68,4 +69,55 @@ export function buildCollectionPreviewUrl(
     return `${origins.appOrigin}/f/${encodeSegments(pathSegments)}`;
   }
   return `${origins.appOrigin}/t/${linkToken}`;
+}
+
+// --- D-84 signed delivery URLs -------------------------------------------------------------------------
+//
+// Extracted here (from controllers/preview.ts's withSignedDirectUrl, which was its only caller) because
+// review 060/BUG-1 found the SECOND caller that should always have existed: controllers/browse.ts. A
+// `private` row's readable path resolves (readablePathResolves only rejects `secret`), so the listing was
+// handing out `dl.mosni.dev/<path>` and `dl.mosni.dev/thumb/<path>` for private files - URLs no <img> and
+// no service-worker fetch can ever authorize, since neither carries a Bearer. The listing's thumbnails
+// 401'd into broken images for the file's own owner, and "Download all" skipped every private file.
+//
+// Both URL shapes are signed from the SAME (fileId, expiry) pair, so a caller cannot accidentally sign one
+// and not the other. `scope` is part of the signed input (review 060/SEC-5) - see lib/deliverySignature.ts.
+export type SignedDeliveryUrls = { directUrl: string; thumbUrl: string | null; expiresAt: number };
+
+// Review 060/BUG-3, first half. A signed URL is the ONLY way a private file's bytes reach its own player,
+// and DELIVERY_URL_TTL_SECONDS defaults to 300 - so a private video longer than five minutes had its own
+// range requests start 404ing mid-playback, and the player's error fallback offered the same dead URL as a
+// download. The fix cannot be "renew the URL client-side" alone: web/src/components/VideoPreview.tsx keys
+// <MediaPlayer> on the URL, so swapping it under a playing element restarts the video from zero, which is
+// worse than the bug for everything shorter than the TTL.
+//
+// So the SERVER makes the lifetime cover the media instead. `minLifetimeSeconds` is the probed duration
+// (storage/probe.ts); the URL lives at least that long plus a margin for buffering and pauses, and never
+// less than the configured TTL. Capped, because a caller must not be able to mint a day-long credential by
+// uploading a long file.
+const SIGNED_MEDIA_MARGIN_SECONDS = 15 * 60;
+const SIGNED_MAX_TTL_SECONDS = 6 * 60 * 60;
+
+export function buildSignedDeliveryUrls(
+  config: { dlOrigin: string; deliverySigningSecret: string; deliveryUrlTtlSeconds: number },
+  fileId: string,
+  hasThumb: boolean,
+  minLifetimeSeconds: number | null = null,
+  nowSeconds: number = Date.now() / 1000,
+): SignedDeliveryUrls {
+  const mediaLifetime =
+    minLifetimeSeconds === null || !Number.isFinite(minLifetimeSeconds) || minLifetimeSeconds <= 0
+      ? 0
+      : Math.ceil(minLifetimeSeconds) + SIGNED_MEDIA_MARGIN_SECONDS;
+  // The cap bounds the DURATION-DERIVED extension only - never the operator's own configured TTL, which
+  // stays a floor. Clamping the whole result would silently shorten a deliberately-raised
+  // DELIVERY_URL_TTL_SECONDS, which is the opposite of what an operator raising it asked for.
+  const ttl = Math.max(config.deliveryUrlTtlSeconds, Math.min(SIGNED_MAX_TTL_SECONDS, mediaLifetime));
+  const expiresAt = Math.floor(nowSeconds) + ttl;
+  const sign = (scope: DeliveryScope) => signDelivery(config.deliverySigningSecret, fileId, expiresAt, scope);
+  return {
+    directUrl: `${config.dlOrigin}/s/${fileId}?exp=${expiresAt}&sig=${sign("full")}`,
+    thumbUrl: hasThumb ? `${config.dlOrigin}/thumb/s/${fileId}?exp=${expiresAt}&sig=${sign("thumb")}` : null,
+    expiresAt,
+  };
 }

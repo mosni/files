@@ -12,8 +12,12 @@ export type WriteAction =
   | "delete"
   | "protection-change"
   | "share-change"
-  | "invite-create"
-  | "invite-revoke";
+  | "invite-create";
+// Review 060/OPS-5: "invite-revoke" was declared here with a verb and a test and emitted by nothing.
+// Revoking an invite is revoking its ACL row, which both controllers/share.ts and controllers/admin.ts
+// already report as "share-change" - the separate action was reserved for an invite-revocation flow that
+// shipped as part of sharing instead. Removed rather than left as a decoy; if a distinct invite lifecycle
+// ever lands, it can reintroduce this along with the code that emits it.
 
 export type AuditEvent = {
   action: WriteAction;
@@ -45,7 +49,6 @@ const VERBS: Record<WriteAction, string> = {
   "protection-change": "changed the protection level of",
   "share-change": "changed the sharing of",
   "invite-create": "created an invite for",
-  "invite-revoke": "revoked an invite for",
 };
 
 function formatBytes(bytes: number): string {

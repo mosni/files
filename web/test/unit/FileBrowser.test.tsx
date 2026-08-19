@@ -177,7 +177,9 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(container.textContent!.indexOf("Photos")).toBeLessThan(container.textContent!.indexOf("photo.png"));
   });
 
-  it("signed in with files:write: defaults to scope=mine with a Bearer", async () => {
+  // ADD-1 (Hannah, 2026-08-19): Browse is the landing tab for EVERYONE now, signed in included - it used
+  // to default to "mine" once a user was known.
+  it("signed in with files:write: defaults to scope=visible with a Bearer", async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => ({ sub: "user:a", roles: ["files:write"] }),
       token: () => "tok",
@@ -192,7 +194,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     await flush();
 
     expect(fetchSpy).toHaveBeenCalledWith(
-      expect.stringContaining("/api/browse?scope=mine"),
+      expect.stringContaining("/api/browse?scope=visible"),
       expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer tok" }) }),
     );
   });
@@ -252,7 +254,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
   it.each([
     ["a non-admin", { sub: "user:a", roles: ["files:write"] }],
     ["an admin", { sub: "user:admin", roles: ["files:write", "files:delete"] }],
-  ])("exactly two tabs - My files / Browse - render for a signed-in viewer (%s), Browse issues scope=visible", async (_label, claims) => {
+  ])("exactly two tabs - Browse / My files - render for a signed-in viewer (%s), My files issues scope=mine", async (_label, claims) => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => claims,
       token: () => "tok",
@@ -270,14 +272,16 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     // the label - no more a `label` attribute on a custom element.
     const tabs = container.querySelectorAll('[role="tab"]');
     expect(tabs).toHaveLength(2);
-    expect(Array.from(tabs).map((t) => t.textContent)).toEqual(["My files", "Browse"]);
+    // ADD-1: Browse first, and therefore the selected one on arrival.
+    expect(Array.from(tabs).map((t) => t.textContent)).toEqual(["Browse", "My files"]);
     expect(Array.from(tabs).some((t) => t.textContent === "All files")).toBe(false);
+    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=visible"), expect.anything());
 
     await act(async () => {
       (tabs[1] as HTMLElement).click();
       await flush();
     });
-    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=visible"), expect.anything());
+    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=mine"), expect.anything());
   });
 
   it("a signed-out visitor gets no tab bar and a scope=visible request", async () => {
@@ -748,7 +752,7 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(document.body.textContent).not.toContain("1 files");
   });
 
-  it("clicking the Browse tab switches scope and resets to the root", async () => {
+  it("clicking the My files tab switches scope and resets to the root", async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => ({ sub: "user:a", roles: ["files:write"] }),
       token: () => "tok",
@@ -761,16 +765,16 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       root.render(<MemoryRouter><FileBrowser /></MemoryRouter>);
     });
     await flush();
-    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=mine"), expect.anything());
+    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=visible"), expect.anything());
 
-    // Tab order is "My files" (0), "Browse" (1) - exactly two tabs now (D-116).
+    // ADD-1: tab order is "Browse" (0), "My files" (1) - exactly two tabs, still (D-116).
     const tabs = container.querySelectorAll('[role="tab"]');
     await act(async () => {
       (tabs[1] as HTMLElement).click();
       await flush();
     });
 
-    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=visible"), expect.anything());
+    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining("scope=mine"), expect.anything());
   });
 
   // C8: rename swaps the NAME CELL to an input, in place - no extra <tr>, and the actions cell swaps to
@@ -1144,11 +1148,31 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
     expect(input.closest(".field")).not.toBeNull();
   });
 
-  it("Browse (scope=visible) shows no collection-create button, even for a signed-in admin", async () => {
+  // ADD-1 (Hannah, 2026-08-19): reversed. "New collection" belongs in BOTH tabs - it used to be gated on
+  // scope === "mine". Creating from Browse needs no special server handling: POST /api/collections makes a
+  // root collection owned by the caller, and the Browse listing's signed-in branch includes `owner_sub = ?`
+  // (storage/collections.ts's listVisibleChildCollections), so it appears in the reload straight after.
+  it("Browse (scope=visible) shows the collection-create button too, for a writer", async () => {
     (window as unknown as { mosni: unknown }).mosni = {
       user: () => ({ sub: "user:a", roles: ["files:write", "files:delete"] }),
       token: () => "tok",
       onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: ["files:write", "files:delete"] }),
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse())));
+
+    act(() => {
+      root.render(<MemoryRouter><FileBrowser initialScope="visible" /></MemoryRouter>);
+    });
+    await flush();
+
+    expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("New collection"))).toBe(true);
+  });
+
+  it("Browse still shows no collection-create button to a viewer without files:write", async () => {
+    (window as unknown as { mosni: unknown }).mosni = {
+      user: () => ({ sub: "user:a", roles: [] }),
+      token: () => "tok",
+      onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: [] }),
     };
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse())));
 
@@ -1837,6 +1861,128 @@ describe("FileBrowser (E4 waves D: the browser component)", () => {
       await flush();
 
       expect(container.textContent).not.toContain("Drop files here");
+    });
+  });
+
+  // --- Review 060: BUG-4 / BUG-5 --------------------------------------------------------------------
+
+  // BUG-4: D-115 (files:delete) and D-190 (the containing collection's owner) each widened DELETE
+  // /api/files/:id ONLY. DELETE /api/collections/:id is still owner-or-superuser
+  // (controllers/manage.ts's authorizeCollectionOwner), so offering Delete on a collection row to either
+  // population produced a menu item the server answers 404 to - and, since requestDelete() bailed
+  // silently on the failed dry run, one that did nothing observable at all.
+  describe("delete gating is row-type aware (BUG-4)", () => {
+    function signIn(roles: string[]) {
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles }),
+      };
+    }
+
+    async function renderWith(body: Partial<BrowseResponse>) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(makeResponse(body))));
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser initialScope="visible" /></MemoryRouter>);
+      });
+      await flush();
+    }
+
+    it("a files:delete holder is offered Delete on a FILE they do not own", async () => {
+      signIn(["files:delete"]);
+      await renderWith({ files: [makeFile({ reason: "public" })] });
+      const row = container.querySelector("tbody tr") as Element;
+      expect(rowActionValues(row)).toContain("delete");
+    });
+
+    it("a files:delete holder is NOT offered Delete on a COLLECTION they do not own", async () => {
+      signIn(["files:delete"]);
+      await renderWith({ collections: [makeCollection({ reason: "public" })] });
+      const row = container.querySelector("tbody tr") as Element;
+      expect(rowActionValues(row)).not.toContain("delete");
+    });
+
+    it("a `hosted` COLLECTION row is not offered Delete either, though a hosted FILE row is (D-190)", async () => {
+      signIn([]);
+      await renderWith({ collections: [makeCollection({ reason: "hosted" })], files: [makeFile({ reason: "hosted" })] });
+      const rows = container.querySelectorAll("tbody tr");
+      // Collections list before files (D-102), so row 0 is the collection.
+      expect(rowActionValues(rows[0]!)).not.toContain("delete");
+      expect(rowActionValues(rows[1]!)).toContain("delete");
+    });
+
+    it("an owner is still offered Delete on their own collection", async () => {
+      signIn([]);
+      await renderWith({ collections: [makeCollection({ reason: "own" })] });
+      const row = container.querySelector("tbody tr") as Element;
+      expect(rowActionValues(row)).toContain("delete");
+    });
+  });
+
+  // BUG-5: both delete paths were `if (res.ok) { … }` with no else, so a rejected delete left the
+  // confirmation modal open, the row in place, and the user with nothing to read.
+  describe("a failed delete says so (BUG-5)", () => {
+    it("a file delete that fails toasts and closes the modal", async () => {
+      const toast = vi.fn();
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles: [] }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: [] }),
+        toast,
+      };
+      const fetchSpy = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(makeResponse({ files: [makeFile({ reason: "own" })] })))
+        .mockResolvedValueOnce(jsonResponse({}, false, 404))
+        .mockResolvedValue(jsonResponse(makeResponse({ files: [] })));
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser initialScope="visible" /></MemoryRouter>);
+      });
+      await flush();
+
+      const row = container.querySelector("tbody tr") as Element;
+      await selectRowAction(row, "delete");
+      // <Modal> portals to document.body (E7.5 Wave D) - not a descendant of `container`.
+      const confirm = Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent === "Yes, delete");
+      await act(async () => {
+        confirm?.click();
+        await flush();
+      });
+
+      expect(toast).toHaveBeenCalledWith(
+        "That couldn't be deleted — it may already be gone, or you may not have permission.",
+        { variant: "error" },
+      );
+    });
+
+    it("a collection delete whose dry run fails toasts instead of doing nothing at all", async () => {
+      const toast = vi.fn();
+      (window as unknown as { mosni: unknown }).mosni = {
+        user: () => ({ sub: "user:a", roles: [] }),
+        token: () => "tok",
+        onChange: (cb: (u: unknown) => void) => cb({ sub: "user:a", roles: [] }),
+        toast,
+      };
+      const fetchSpy = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(makeResponse({ collections: [makeCollection({ reason: "own" })] })))
+        .mockResolvedValue(jsonResponse({}, false, 404));
+      vi.stubGlobal("fetch", fetchSpy);
+
+      act(() => {
+        root.render(<MemoryRouter><FileBrowser initialScope="visible" /></MemoryRouter>);
+      });
+      await flush();
+
+      const row = container.querySelector("tbody tr") as Element;
+      await selectRowAction(row, "delete");
+
+      expect(toast).toHaveBeenCalledWith(
+        "That couldn't be deleted — it may already be gone, or you may not have permission.",
+        { variant: "error" },
+      );
     });
   });
 });

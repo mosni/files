@@ -51,9 +51,13 @@ type MosniUser = Claims | null;
 
 // D-116: exactly two tabs, always. "Browse" means scope=visible for every viewer - an admin sees more
 // INSIDE it because the server knows they are an admin, never because a third tab exists.
+// Hannah, 2026-08-19 (ADD-1): Browse comes FIRST and is the landing tab for everyone, signed in or not -
+// the app's front door is what is shared with you and what is public, not your own back catalogue.
+// `visibleTabs` below still drops "My files" while signed out, and since Browse is index 0 that no longer
+// changes which tab is selected the way a mine-first order did.
 const SCOPE_TABS: { scope: Scope; label: string }[] = [
-  { scope: "mine", label: "My files" },
   { scope: "visible", label: "Browse" },
+  { scope: "mine", label: "My files" },
 ];
 
 const TABLE_COLUMN_COUNT = 6; // icon, name, size, added, visibility, actions - the colSpan an expanded row panel needs
@@ -108,9 +112,24 @@ function canManage(reason: VisibilityReason, user: MosniUser): boolean {
   return reason === "own" || (user !== null && isSuperuser(user));
 }
 
-function canDelete(reason: VisibilityReason, user: MosniUser): boolean {
+// Review 060/BUG-4: `kind` is not decoration. D-115 (files:delete holders) and D-190 (the containing
+// collection's owner) each widened DELETE /api/files/:id and neither touched DELETE /api/collections/:id,
+// which is still owner-or-superuser (controllers/manage.ts's authorizeCollectionOwner). Applying the file
+// rule to collection rows offered a Delete action the server answers 404 to - and because requestDelete()
+// bails silently on a failed dry run, the menu item did NOTHING AT ALL: no modal, no toast, no error.
+//
+// The server is the correct side here (D-190 is deliberately "one right, not a general host authority"),
+// so the client narrows to match rather than the reverse.
+function canDelete(reason: VisibilityReason, user: MosniUser, kind: "file" | "collection"): boolean {
+  if (kind === "collection") return canManage(reason, user);
   return canManage(reason, user) || (user !== null && can(user, "files:delete")) || reason === "hosted";
 }
+
+// BUG-5: delete was the one mutation with no failure path - both handlers below were `if (res.ok) {…}`
+// with no else, so a rejected delete left the confirmation modal open and the row in place, which reads
+// as a hung UI. toastMutationFailure's own code map cannot cover this (a delete fails with 404), hence the
+// explicit fallback string.
+const DELETE_FAILED = "That couldn't be deleted — it may already be gone, or you may not have permission.";
 
 async function copyLinkToClipboard(url: string): Promise<void> {
   await navigator.clipboard.writeText(url);
@@ -282,7 +301,7 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
   const [moveCollections, setMoveCollections] = useState<CollectionOption[]>([]);
   const [moveCollectionsLoaded, setMoveCollectionsLoaded] = useState(false);
   const manage = canManage(row.reason, user);
-  const mayDelete = canDelete(row.reason, user);
+  const mayDelete = canDelete(row.reason, user, "file");
 
   function openMove() {
     setMoveDestination("");
@@ -353,7 +372,13 @@ function FileRow({ row, user, onReload }: { row: BrowseFile; user: MosniUser; on
     if (res.ok) {
       setDeleteOpen(false);
       onReload();
+      return;
     }
+    // BUG-5: say what happened, and close the modal - leaving it open invites a second click that fails
+    // identically. onReload() re-reads the listing so a row that was already gone disappears.
+    setDeleteOpen(false);
+    await toastMutationFailure(res, DELETE_FAILED);
+    onReload();
   }
 
   return (
@@ -485,7 +510,7 @@ function CollectionRow({
     setPending(null);
   }
   const manage = canManage(row.reason, user);
-  const mayDelete = canDelete(row.reason, user);
+  const mayDelete = canDelete(row.reason, user, "collection");
 
   function openMove() {
     setMoveDestination("");
@@ -558,7 +583,12 @@ function CollectionRow({
       method: "DELETE",
       headers: authHeaders(currentToken())?.headers,
     });
-    if (!res.ok) return;
+    if (!res.ok) {
+      // BUG-5: this `return` used to be bare, which is what made BUG-4's over-offered Delete a menu item
+      // that visibly did nothing whatsoever.
+      await toastMutationFailure(res, DELETE_FAILED);
+      return;
+    }
     setPending((await res.json()) as { collectionCount: number; fileCount: number });
     setDeleteOpen(true);
   }
@@ -569,7 +599,11 @@ function CollectionRow({
       setDeleteOpen(false);
       setPending(null);
       onReload();
+      return;
     }
+    closeDeleteModal();
+    await toastMutationFailure(res, DELETE_FAILED);
+    onReload();
   }
 
   return (
@@ -740,13 +774,13 @@ export function FileBrowser({
     };
   }, []);
 
-  // Default scope, once we know who is looking: an anonymous visitor starts on Browse (D-94/D-116);
-  // anyone signed in starts on their own things. `initialScope` (used by tests, and available to a future
-  // caller) skips this and is never overridden afterward.
+  // ADD-1 (Hannah, 2026-08-19): Browse is the default for EVERY viewer now, not just anonymous ones - it
+  // used to branch to "mine" once signed in. `initialScope` (used by tests, and available to a future
+  // caller) still skips this and is never overridden afterward.
   useEffect(() => {
     if (initialScope !== undefined || !authReady || scope !== null) return;
-    setScope(user !== null ? "mine" : "visible");
-  }, [initialScope, authReady, user, scope]);
+    setScope("visible");
+  }, [initialScope, authReady, scope]);
 
   useEffect(() => {
     // D-123 (E4.1 live-testing findings, Wave D, finding 5): gated on authReady too, not just `scope !==
@@ -957,9 +991,13 @@ export function FileBrowser({
   // all, even for its own owner. The server already computes canUpload for THAT specific collection
   // (Wave C4/G2's compact upload box uses the same field) - a collection route gates on it directly
   // instead of the tab scope, which does not exist in that mode.
+  // ADD-1 (Hannah, 2026-08-19): no longer gated on `scope === "mine"` - the button belongs in both tabs.
+  // Creating from Browse is not a special case server-side: POST /api/collections makes a root collection
+  // owned by the caller, and listVisibleChildCollections' signed-in branch includes `owner_sub = ?`, so it
+  // appears in the Browse listing the reload immediately afterward fetches.
   const canCreateHere = isCollectionRoute
     ? (data?.canUpload ?? false)
-    : scope === "mine" && user !== null && can(user, "files:write");
+    : user !== null && can(user, "files:write");
 
   return (
     <div style={{ display: "grid", gap: "1rem" }}>

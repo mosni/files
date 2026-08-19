@@ -17,6 +17,7 @@ function makeCtx(overrides: Partial<PreviewContext> = {}): PreviewContext {
     previewUrl: "https://files.mosni.dev/f/dir/photo.png",
     directUrl: "https://dl.mosni.dev/dir/photo.png",
     thumbUrl: null,
+    directUrlExpiresAt: null,
     kind: "image",
     mimeType: "image/png",
     inline: true,

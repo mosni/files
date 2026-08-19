@@ -103,6 +103,8 @@ describe("buildPreviewContext()", () => {
       previewUrl: urls.previewUrl,
       directUrl: urls.directUrl,
       thumbUrl: null,
+      // Review 060/BUG-3: only the signing step ever sets this; the plain builder always emits null.
+      directUrlExpiresAt: null,
       kind: "image",
       mimeType: "image/png",
       inline: true,

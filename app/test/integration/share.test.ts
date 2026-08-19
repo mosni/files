@@ -64,12 +64,21 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
   const createdCollectionIds: string[] = [];
   const createdRootFileIds: string[] = [];
 
-  // Every handler that returns a ShareState calls listAccounts() to resolve grant names/pictures (B3) -
-  // default it to an empty, successful directory so a test that does not care about the directory result
-  // does not have to stub it. Tests asserting directory-specific behaviour (the 502 case, the invite tests)
-  // override this per-test.
+  // Every handler that returns a ShareState calls listAccounts() to resolve grant names/pictures (B3).
+  //
+  // Review 060/SEC-6: POST /api/shares now VALIDATES the grantee against that same directory, so the old
+  // default of an empty directory would 400 every grant in this file. The default therefore names the subs
+  // this suite grants to - which is also more honest about what a real deploy looks like (auth returns
+  // real accounts; the point of SEC-6 is that a sub NOT in there is rejected). Tests asserting
+  // directory-specific behaviour (the 502 case, the unknown-account case, the invite tests) override it.
+  const DIRECTORY_SUBS = ["user:grantee", "user:owner", "user:third", "user:x", "user:stranger"];
+
+  function directory(subs: readonly string[] = DIRECTORY_SUBS) {
+    return { ok: true as const, value: subs.map((sub) => ({ sub, name: null, picture: null })) };
+  }
+
   beforeEach(() => {
-    listAccountsMock.mockResolvedValue({ ok: true, value: [] });
+    listAccountsMock.mockResolvedValue(directory() as never);
     setAccountRoleMock.mockResolvedValue({ ok: true, value: undefined });
   });
 
@@ -724,5 +733,76 @@ describe("routes/share.ts + controllers/share.ts (E7 §1.4 share API)", () => {
     asUser("user:has-files-read-only", { roles: ["files:read"] });
     const res = await req("GET", `/${encodeURIComponent(file.name)}`, { token: "t", host: DL_HOST });
     expect(res.statusCode).toBe(403);
+  });
+
+  // --- Review 060/SEC-6 -------------------------------------------------------------------------------
+  //
+  // `sub` arrived as any non-empty string and nothing checked it existed - a typo wrote a permanent ACL
+  // row that renders forever as a nameless grantee, and web/src/lib/mutationError.ts had carried an
+  // `unknown_account` message the server had never once sent. auth's directory returns real accounts only
+  // (`WHERE link_id IS NULL`), so "not in it" covers an invented sub and a link-bound one together.
+  describe("SEC-6: the grantee must exist in auth's directory", () => {
+    it("400 unknown_account for a sub the directory does not know, and writes NO row", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/shares", {
+        token: "t",
+        body: { type: "file", id: file.id, sub: "user:typo" },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: "unknown_account" });
+      expect(await hasAclGrant(file.id, "user:typo")).toBe(false);
+    });
+
+    it("400 unknown_account for a link-bound sub - auth's directory excludes those by design", async () => {
+      const collection = await seedCollection("user:owner", { protection: "private" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/shares", {
+        token: "t",
+        body: { type: "collection", id: collection.id, sub: "link:abc123" },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(await hasCollectionAclGrant(collection.id, "link:abc123")).toBe(false);
+    });
+
+    // Fails CLOSED, deliberately: writing an unvalidated grant because the validator was unreachable is
+    // the exact outcome this check exists to prevent.
+    it("502 rather than an unvalidated write when auth is unreachable", async () => {
+      listAccountsMock.mockResolvedValue({ ok: false, error: "auth_unreachable", status: 0 } as never);
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      asUser("user:owner");
+      const res = await req("POST", "/api/shares", {
+        token: "t",
+        body: { type: "file", id: file.id, sub: "user:grantee" },
+      });
+      expect(res.statusCode).toBe(502);
+      expect(await hasAclGrant(file.id, "user:grantee")).toBe(false);
+    });
+
+    // The authorization gate still runs FIRST: a stranger must not be able to probe the directory (or an
+    // object's existence) through this endpoint.
+    it("a non-owner still gets 404, never a directory answer", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      asUser("user:stranger");
+      const res = await req("POST", "/api/shares", {
+        token: "t",
+        body: { type: "file", id: file.id, sub: "user:typo" },
+      });
+      expect(res.statusCode).toBe(404);
+    });
+
+    // REVOKE is deliberately NOT validated: a row granted before this check existed, or to an account
+    // since removed from the directory, must always remain revocable.
+    it("revoke still works for a sub the directory does not know", async () => {
+      const file = await seedFile({ ownerSub: "user:owner", protection: "private" });
+      await getPool().query("INSERT INTO file_acl (file_id, sub) VALUES (?, ?)", [file.id, "user:legacy"]);
+      asUser("user:owner");
+      const res = await req("POST", "/api/shares/revoke", {
+        token: "t",
+        body: { type: "file", id: file.id, sub: "user:legacy" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(await hasAclGrant(file.id, "user:legacy")).toBe(false);
+    });
   });
 });

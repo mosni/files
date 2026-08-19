@@ -218,7 +218,9 @@ export async function deliverThumbSigned(
     reply.code(404).send();
     return;
   }
-  const valid = verifyDelivery(config.deliverySigningSecret, fileId, expiresAt, sig, Date.now() / 1000);
+  // Review 060/SEC-5: the scope is part of the signed input, so a `full` signature cannot be replayed
+  // against this route and a `thumb` signature cannot be replayed against deliverSigned below.
+  const valid = verifyDelivery(config.deliverySigningSecret, fileId, expiresAt, sig, Date.now() / 1000, "thumb");
   if (!valid) {
     reply.code(404).send();
     return;
@@ -244,7 +246,7 @@ export async function deliverSigned(
     reply.code(404).send();
     return;
   }
-  const valid = verifyDelivery(config.deliverySigningSecret, fileId, expiresAt, sig, Date.now() / 1000);
+  const valid = verifyDelivery(config.deliverySigningSecret, fileId, expiresAt, sig, Date.now() / 1000, "full");
   if (!valid) {
     reply.code(404).send();
     return;

@@ -21,6 +21,7 @@ function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
     previewUrl: "https://files.mosni.dev/f/photo.png",
     directUrl: "https://dl.mosni.dev/photo.png",
     thumbUrl: null,
+    directUrlExpiresAt: null,
     kind: "image",
     mimeType: "image/png",
     inline: true,

@@ -15,7 +15,6 @@ describe("formatAuditLine()", () => {
     "protection-change",
     "share-change",
     "invite-create",
-    "invite-revoke",
   ];
 
   it.each(actions)("formats a bare %s event with no optional fields", (action) => {

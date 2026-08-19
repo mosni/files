@@ -9,19 +9,18 @@
 // whole GOP and is exactly the kind of cost D-20/D-78 exist to rule out. No scene detection, no "smart"
 // frame picking, no directory-wide eagerness - one keyframe, once, at ingest.
 
-import { execFile } from "node:child_process";
 import { unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import sharp from "sharp";
 import { mediaKindByExtension } from "../lib/media.ts";
 import { THUMB_MAX_EDGE, thumbNameFor } from "../lib/thumbs.ts";
-
-const execFileAsync = promisify(execFile);
+import { runMediaTool } from "./mediaExec.ts";
 
 async function extractVideoKeyframe(sourceAbsPath: string, tempFramePath: string): Promise<void> {
-  await execFileAsync("ffmpeg", [
+  // Bounded by storage/mediaExec.ts (review 060/SEC-2). An abort surfaces as an ordinary failure here -
+  // generateThumb() already returns null on ANY error, and a missing thumbnail never fails an upload.
+  await runMediaTool("ffmpeg", [
     "-y", "-ss", "0", "-i", sourceAbsPath, "-frames:v", "1", tempFramePath,
   ]);
 }

@@ -1,6 +1,8 @@
 // E8 Wave C1: the admin read - every ACL row across both tables, with NO expiry filter (D-216/D-218). The
 // panel shows expired rows too; the authorization reads (storage/aclPredicates.ts) are the ones that
-// filter. `status` is computed in SQL so a client clock never decides whether access is live.
+// filter. `status` is computed in SQL so a client clock never decides whether access is live - against
+// UTC_TIMESTAMP() rather than NOW(), matching aclPredicates.ts exactly (review 060/OPS-4), so the badge
+// the panel shows and the predicate that actually gates access can never disagree by a session zone.
 
 import type { RowDataPacket } from "mysql2/promise";
 import { getPool } from "./db.ts";
@@ -52,12 +54,12 @@ export async function listAllGrants(): Promise<AdminGrant[]> {
     `SELECT * FROM (
        SELECT 'file' AS target_type, fa.file_id AS target_id, f.name AS target_name, f.owner_sub AS owner_sub,
               fa.sub AS sub, 0 AS can_upload, fa.granted_at AS granted_at, fa.expires_at AS expires_at,
-              CASE WHEN fa.expires_at IS NOT NULL AND fa.expires_at <= NOW() THEN 'expired' ELSE 'active' END AS status
+              CASE WHEN fa.expires_at IS NOT NULL AND fa.expires_at <= UTC_TIMESTAMP() THEN 'expired' ELSE 'active' END AS status
          FROM file_acl fa JOIN files f ON f.id = fa.file_id
        UNION ALL
        SELECT 'collection' AS target_type, ca.collection_id AS target_id, c.name AS target_name, c.owner_sub AS owner_sub,
               ca.sub AS sub, ca.can_upload AS can_upload, ca.granted_at AS granted_at, ca.expires_at AS expires_at,
-              CASE WHEN ca.expires_at IS NOT NULL AND ca.expires_at <= NOW() THEN 'expired' ELSE 'active' END AS status
+              CASE WHEN ca.expires_at IS NOT NULL AND ca.expires_at <= UTC_TIMESTAMP() THEN 'expired' ELSE 'active' END AS status
          FROM collection_acl ca JOIN collections c ON c.id = ca.collection_id
      ) AS grants
      ORDER BY granted_at DESC`,

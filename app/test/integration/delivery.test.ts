@@ -396,7 +396,7 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
     it("serves a private file's bytes given a valid, unexpired signature - no Bearer needed", async () => {
       const { fileId } = await seed({ protection: "private", ownerSub: "user:owner" });
       const exp = Math.floor(Date.now() / 1000) + 300;
-      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp, "full");
 
       const res = await get(`/s/${fileId}?exp=${exp}&sig=${sig}`);
       expect(res.statusCode).toBe(200);
@@ -407,14 +407,14 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
     it("404s an expired signature", async () => {
       const { fileId } = await seed({ protection: "private", ownerSub: "user:owner" });
       const exp = Math.floor(Date.now() / 1000) - 10;
-      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp, "full");
       expect((await get(`/s/${fileId}?exp=${exp}&sig=${sig}`)).statusCode).toBe(404);
     });
 
     it("404s a tampered signature", async () => {
       const { fileId } = await seed({ protection: "private", ownerSub: "user:owner" });
       const exp = Math.floor(Date.now() / 1000) + 300;
-      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp, "full");
       const tampered = sig.slice(0, -1) + (sig.at(-1) === "A" ? "B" : "A");
       expect((await get(`/s/${fileId}?exp=${exp}&sig=${tampered}`)).statusCode).toBe(404);
     });
@@ -423,7 +423,7 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
       const { fileId: fileA } = await seed({ protection: "private", ownerSub: "user:owner" });
       const { fileId: fileB } = await seed({ protection: "private", ownerSub: "user:owner" });
       const exp = Math.floor(Date.now() / 1000) + 300;
-      const sigForA = signDelivery(config.deliverySigningSecret, fileA, exp);
+      const sigForA = signDelivery(config.deliverySigningSecret, fileA, exp, "full");
       expect((await get(`/s/${fileB}?exp=${exp}&sig=${sigForA}`)).statusCode).toBe(404);
     });
 
@@ -435,7 +435,7 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
     it("sets no cookie and reads no Authorization header at all (D-33)", async () => {
       const { fileId } = await seed({ protection: "private", ownerSub: "user:owner" });
       const exp = Math.floor(Date.now() / 1000) + 300;
-      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp, "full");
       const res = await get(`/s/${fileId}?exp=${exp}&sig=${sig}`, { authorization: "Bearer garbage-never-checked" });
       expect(res.statusCode).toBe(200);
       expect(res.headers["set-cookie"]).toBeUndefined();
@@ -506,7 +506,7 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
     it("serves a private file's thumbnail given a valid, unexpired /thumb/s/:id signature - no Bearer needed", async () => {
       const { fileId, thumbName } = await seed({ protection: "private", ownerSub: "user:owner", withThumb: true });
       const exp = Math.floor(Date.now() / 1000) + 300;
-      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp, "thumb");
 
       const res = await get(`/thumb/s/${fileId}?exp=${exp}&sig=${sig}`);
       expect(res.statusCode).toBe(200);
@@ -516,11 +516,11 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
     it("404s an expired or tampered /thumb/s/:id signature, same as the full-bytes route", async () => {
       const { fileId } = await seed({ protection: "private", ownerSub: "user:owner", withThumb: true });
       const expiredExp = Math.floor(Date.now() / 1000) - 10;
-      const expiredSig = signDelivery(config.deliverySigningSecret, fileId, expiredExp);
+      const expiredSig = signDelivery(config.deliverySigningSecret, fileId, expiredExp, "thumb");
       expect((await get(`/thumb/s/${fileId}?exp=${expiredExp}&sig=${expiredSig}`)).statusCode).toBe(404);
 
       const exp = Math.floor(Date.now() / 1000) + 300;
-      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp, "thumb");
       const tampered = sig.slice(0, -1) + (sig.at(-1) === "A" ? "B" : "A");
       expect((await get(`/thumb/s/${fileId}?exp=${exp}&sig=${tampered}`)).statusCode).toBe(404);
     });
@@ -528,8 +528,25 @@ describe("routes/delivery.ts (D-81/D-84/D-90: resolved through the database, sig
     it("a signed thumbnail request for a file with no thumbnail 404s rather than serving the original", async () => {
       const { fileId } = await seed({ protection: "private", ownerSub: "user:owner", withThumb: false });
       const exp = Math.floor(Date.now() / 1000) + 300;
-      const sig = signDelivery(config.deliverySigningSecret, fileId, exp);
+      const sig = signDelivery(config.deliverySigningSecret, fileId, exp, "thumb");
       expect((await get(`/thumb/s/${fileId}?exp=${exp}&sig=${sig}`)).statusCode).toBe(404);
+    });
+
+    // Review 060/SEC-5: the two signed routes shared one signature, so removing "/thumb" from a signed
+    // thumbnail URL returned the ORIGINAL bytes. Only ever handed to a viewer already authorized for the
+    // full file, so it was never exploitable - but it made "a thumbnail-only URL" unrepresentable, which
+    // is exactly the guarantee a future listing would want. Both directions asserted.
+    it("a thumbnail signature is not a full-file signature, and the reverse (SEC-5)", async () => {
+      const { fileId } = await seed({ protection: "private", ownerSub: "user:owner", withThumb: true });
+      const exp = Math.floor(Date.now() / 1000) + 300;
+
+      const thumbSig = signDelivery(config.deliverySigningSecret, fileId, exp, "thumb");
+      expect((await get(`/thumb/s/${fileId}?exp=${exp}&sig=${thumbSig}`)).statusCode).toBe(200);
+      expect((await get(`/s/${fileId}?exp=${exp}&sig=${thumbSig}`)).statusCode).toBe(404);
+
+      const fullSig = signDelivery(config.deliverySigningSecret, fileId, exp, "full");
+      expect((await get(`/s/${fileId}?exp=${exp}&sig=${fullSig}`)).statusCode).toBe(200);
+      expect((await get(`/thumb/s/${fileId}?exp=${exp}&sig=${fullSig}`)).statusCode).toBe(404);
     });
   });
 });

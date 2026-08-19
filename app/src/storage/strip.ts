@@ -11,13 +11,10 @@
 // every unlisted or lying extension is a silent leak, and the list can never be complete. So this module
 // now asks sharp/ffprobe what the BYTES actually are, and the filename never decides.
 
-import { execFile } from "node:child_process";
 import { rename, unlink } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import sharp from "sharp";
-
-const execFileAsync = promisify(execFile);
+import { MediaToolAbortedError, runMediaTool } from "./mediaExec.ts";
 
 // ffmpeg/ffprobe attach these to the container itself, even on an already-stripped file - they are not
 // user metadata. Anything else present means the file still carries something to remove.
@@ -52,7 +49,7 @@ interface FfprobeOutput {
 }
 
 async function runFfprobe(absolutePath: string): Promise<FfprobeOutput> {
-  const { stdout } = await execFileAsync("ffprobe", [
+  const { stdout } = await runMediaTool("ffprobe", [
     "-v", "quiet",
     "-print_format", "json",
     "-show_format",
@@ -102,7 +99,13 @@ async function classify(absolutePath: string): Promise<Classification> {
   try {
     const probe = await runFfprobe(absolutePath);
     if ((probe.streams ?? []).some(isRealVideoStream)) return { kind: "video", probe };
-  } catch {
+  } catch (err) {
+    // Review 060/SEC-2: "ffprobe looked and could not identify this" is an ordinary answer, and swallowing
+    // it into `unknown` is correct (A6.3 - a non-media file is out of scope, not a failure). "ffprobe was
+    // killed before it answered" is NOT: swallowing THAT stores a file nothing ever inspected, which is
+    // the fail-open A6.4 forbids. Rethrow so stripInPlace rejects and controllers/upload.ts 422s the
+    // upload - the same path a failed strip already takes.
+    if (err instanceof MediaToolAbortedError) throw err;
     // Not a container ffprobe can identify at all.
   }
   return { kind: "unknown" };
@@ -210,7 +213,7 @@ async function stripVideo(absolutePath: string, temp: string, probe: FfprobeOutp
   // (confirmed empirically - this is not a hypothetical). Stream copy, never a transcode (D-20 - the box
   // is too weak): -map_metadata -1 drops all metadata, -c copy remuxes without touching the encoded
   // streams.
-  await execFileAsync("ffmpeg", [
+  await runMediaTool("ffmpeg", [
     "-y", "-i", absolutePath, "-map_metadata", "-1", "-c", "copy", "-f", muxer, temp,
   ]);
 }

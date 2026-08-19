@@ -8,13 +8,12 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Config } from "../config.ts";
 import { claimsFromBearer } from "../auth/bearer.ts";
 import { can, isSuperuser, type Claims } from "../lib/roles.ts";
-import { buildFileUrls, buildThumbUrl } from "../lib/fileUrls.ts";
+import { buildFileUrls, buildSignedDeliveryUrls, buildThumbUrl } from "../lib/fileUrls.ts";
 import { safeSegments } from "../lib/paths.ts";
 import { readablePathResolves } from "../lib/protection.ts";
 import { buildPreviewContext, previewKindFor, type PreviewContext } from "../lib/previewContext.ts";
 import { buildBreadcrumb } from "../lib/breadcrumb.ts";
 import { canSeeCollection, canSeeFile } from "../lib/accessVisibility.ts";
-import { signDelivery } from "../lib/deliverySignature.ts";
 import { injectHead } from "../lib/shellHtml.ts";
 import type { CollectionLocation } from "../lib/browseContext.ts";
 import {
@@ -299,13 +298,18 @@ async function previewBooleansFor(
 // already points straight at auth.mosni.dev's own public avatar route, not a files.mosni.dev proxy of it.
 function withSignedDirectUrl(ctx: PreviewContext, config: Config, record: ResolvedFile): PreviewContext {
   if (record.effectiveProtection !== "private") return ctx;
-  const expiresAt = Math.floor(Date.now() / 1000) + config.deliveryUrlTtlSeconds;
-  const sig = signDelivery(config.deliverySigningSecret, record.id, expiresAt);
+  // The URL construction itself moved to lib/fileUrls.ts (review 060/BUG-1) so controllers/browse.ts can
+  // sign a listing's private rows through the exact same code - two independent copies were how the
+  // listing ended up handing out unauthorizable URLs in the first place.
+  // BUG-3: a video's own duration extends the signature's lifetime, so it survives its own playback -
+  // see buildSignedDeliveryUrls for why this is the server's job rather than a client-side renewal.
+  const signed = buildSignedDeliveryUrls(config, record.id, record.thumbName !== null, record.durationSeconds);
   return {
     ...ctx,
-    directUrl: `${config.dlOrigin}/s/${record.id}?exp=${expiresAt}&sig=${sig}`,
-    thumbUrl:
-      record.thumbName === null ? null : `${config.dlOrigin}/thumb/s/${record.id}?exp=${expiresAt}&sig=${sig}`,
+    directUrl: signed.directUrl,
+    thumbUrl: signed.thumbUrl,
+    // BUG-3: the client needs the deadline to renew before it passes.
+    directUrlExpiresAt: signed.expiresAt,
   };
 }
 

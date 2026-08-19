@@ -112,6 +112,14 @@ services:
     environment:
       MOCK_ISSUER: http://mock-idp:9000
       MOCK_AUDIENCE: https://files-e2e.test
+    # Review 060/SEC-6: POST /api/shares now validates the grantee against auth's account directory, so the
+    # e2e tier needs something answering at `http://auth:3001/internal/accounts` - the address
+    # app/src/auth/internalApi.ts hardcodes (it is a fixed convention, not a per-deploy setting). mock-idp
+    # serves that on a second listener; this alias is what makes the name resolve.
+    networks:
+      default:
+        aliases:
+          - auth
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/health"]
       interval: 2s
@@ -242,6 +250,12 @@ services:
     # exact path app-e2e will stat() - there is no live IdP in this sandbox to drive a real upload (same
     # limitation upload-delivery.spec.ts documents), so seeding writes bytes directly into this volume and
     # inserts the matching row straight into mariadb.
+    # ⚠ Review 060/SEC-2: app-e2e now runs as `node` (uid 1000). Docker seeds a fresh named volume from the
+    # image path it is mounted at, ownership included, and the Dockerfile creates /data/storage node-owned
+    # for exactly that reason - so a clean checkout needs no extra step. An EXISTING e2e-storage volume
+    # from before this change is still root-owned and Docker will not re-seed it, which surfaces as the app
+    # failing to create STORAGE_ROOT/.tus at boot. One-time fix:
+    #     docker volume rm files_e2e-storage
     volumes:
       - e2e-storage:/data/storage
     # D-70 Wave D: real DNS aliases on the compose network, so e2e/preview.spec.ts's browser-driven tests
@@ -297,6 +311,12 @@ services:
       DB_USER: files
       DB_PASS: filespass
       DB_NAME: files
+    # ⚠ Review 060/SEC-2: app-e2e now runs as `node` (uid 1000). Docker seeds a fresh named volume from the
+    # image path it is mounted at, ownership included, and the Dockerfile creates /data/storage node-owned
+    # for exactly that reason - so a clean checkout needs no extra step. An EXISTING e2e-storage volume
+    # from before this change is still root-owned and Docker will not re-seed it, which surfaces as the app
+    # failing to create STORAGE_ROOT/.tus at boot. One-time fix:
+    #     docker volume rm files_e2e-storage
     volumes:
       - e2e-storage:/data/storage
     command: ["npx", "playwright", "test"]

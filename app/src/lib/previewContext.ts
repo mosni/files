@@ -22,6 +22,12 @@ export type PreviewContext = {
   createdAt: string; // ISO 8601, from files.created_at
   previewUrl: string; // files.mosni.dev/f/<path> or /t/<token>
   directUrl: string; // dl.mosni.dev/<path> or /t/<token> - or a D-84 signed URL for a private file's owner
+  // Unix seconds at which a D-84 signed directUrl/thumbUrl above stops verifying, or null when the URLs
+  // are not signed (every non-private file, and the anonymous embedded document copy). Review 060/BUG-3:
+  // the signed URLs used to be minted once and never renewed, so a private video longer than
+  // DELIVERY_URL_TTL_SECONDS 404'd mid-playback and the error fallback's Download link was the same dead
+  // URL. The client re-fetches its context before this passes; it is a deadline, never a credential.
+  directUrlExpiresAt: number | null;
   thumbUrl: string | null; // dl.mosni.dev/thumb/<path> or /thumb/t/<token> - null when no thumbnail exists
   // (non-image/video, generation failed, or a pre-E5 file, D-137/D-138). A D-84-style signed
   // /thumb/s/<id> URL for a private file's owner, mirroring directUrl exactly.
@@ -120,6 +126,9 @@ export function buildPreviewContext(
     previewUrl: urls.previewUrl,
     directUrl: urls.directUrl,
     thumbUrl: urls.thumbUrl,
+    // Only the signing step (controllers/preview.ts's withSignedDirectUrl) ever sets this - an unsigned
+    // URL has no deadline, and the anonymous document copy is never signed (D-75).
+    directUrlExpiresAt: null,
     kind: previewKindFor(record.name, record.isText),
     // Both from the same record-aware helpers delivery uses, so the page's own idea of the file can never
     // disagree with the headers its bytes actually arrive under (live-testing 2026-08-06).

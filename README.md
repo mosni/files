@@ -122,11 +122,17 @@ stored secrets (`.github/workflows/deploy.yml`).
    `ports:` mapping and `nginx.conf`'s `proxy_pass`.
 2. Copy `.env.example` to `.env` and fill in every var — `config.ts` fails fast and loudly at boot if one
    is missing.
-3. The TLS certificate for `files.mosni.dev` + `dl.mosni.dev` is issued automatically on first deploy by
+3. **Create the storage directory and give it to uid 1000.** The container runs as `node` (uid 1000), not
+   root (review 060/SEC-2), and `@tus/file-store` creates `STORAGE_ROOT/.tus` at boot — a root-owned mount
+   means the app will not start:
+   ```sh
+   mkdir -p /srv/stack/data/files/storage && chown -R 1000:1000 /srv/stack/data/files/storage
+   ```
+4. The TLS certificate for `files.mosni.dev` + `dl.mosni.dev` is issued automatically on first deploy by
    `../infrastructure/lib/deploy` (`ensure_cert()`, D-47) before the vhost is linked — no manual step
    needed. If it ever needs reissuing by hand: `certbot certonly --standalone -d files.mosni.dev -d
    dl.mosni.dev` (stop nginx first; standalone needs port 80/443 free).
-4. `docker inspect` the running container and confirm the `files` network alias is present — without it
+5. `docker inspect` the running container and confirm the `files` network alias is present — without it
    every internal auth call returns `403 unknown_caller`.
 
 **Manual checks after any deploy touching this area** (not covered by any automated test —

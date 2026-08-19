@@ -42,6 +42,7 @@ function makeContext(overrides: Partial<PreviewContext> = {}): PreviewContext {
     previewUrl: "https://files.mosni.dev/f/clip.mp4",
     directUrl: "https://dl.mosni.dev/clip.mp4",
     thumbUrl: null,
+    directUrlExpiresAt: null,
     kind: "video",
     mimeType: "video/mp4",
     inline: true,

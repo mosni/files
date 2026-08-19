@@ -7,14 +7,11 @@
 // Never throws: a probe failure must never fail an upload, since the file is already committed by then.
 
 import { open } from "node:fs/promises";
-import { execFile } from "node:child_process";
 import path from "node:path";
-import { promisify } from "node:util";
 import sharp from "sharp";
 import { mediaKindByExtension } from "../lib/media.ts";
 import { looksLikeText, TEXT_DETECT_SAMPLE_BYTES } from "../lib/textDetect.ts";
-
-const execFileAsync = promisify(execFile);
+import { runMediaTool } from "./mediaExec.ts";
 
 export type MediaProbe = {
   width: number | null;
@@ -56,7 +53,10 @@ interface FfprobeOutput {
 }
 
 async function probeVideo(absolutePath: string): Promise<MediaProbe> {
-  const { stdout } = await execFileAsync("ffprobe", [
+  // Bounded by storage/mediaExec.ts (review 060/SEC-2). Unlike strip.ts, an abort here needs no special
+  // handling: probeMedia() is allowed to fail entirely (its whole contract is "never fails an upload"),
+  // and dimensions being absent costs an unfurl hint, not an invariant.
+  const { stdout } = await runMediaTool("ffprobe", [
     "-v", "quiet",
     "-print_format", "json",
     "-show_format",

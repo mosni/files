@@ -177,6 +177,43 @@ describe("storage/files.ts - surrogate ids, two-phase commit (D-81/D-85)", () =>
     expect((rows as { n: number }[])[0]?.n).toBe(0);
   });
 
+  // Review 060/BUG-9. The prune above could not tell "this one file is gone" from "the storage volume is
+  // not mounted" - so with STORAGE_ROOT absent or mispathed at boot, ordinary browse and delivery traffic
+  // walked the table and DELETED the row for every file whose bytes were in fact perfectly fine.
+  // Unrecoverable metadata loss, caused by reads. The prune now demands positive evidence that the volume
+  // is there; an unreachable root degrades to a 404 instead.
+  it("BUG-9: does NOT prune when the storage root itself is unreachable - the row survives", async () => {
+    const { id } = await seedCommittedFile({});
+
+    // Point the module at a root that does not exist, exactly as a missing bind mount would.
+    initFilesStorage(path.join(root, "not-mounted"));
+    try {
+      expect(await resolveById(id)).toBeNull(); // still refuses to serve - it just does not destroy the row
+      const [rows] = await getPool().query("SELECT COUNT(*) AS n FROM files WHERE id = ?", [id]);
+      expect((rows as { n: number }[])[0]?.n).toBe(1);
+    } finally {
+      initFilesStorage(root);
+    }
+
+    // And with the volume back, the row is intact and resolves normally.
+    expect((await resolveById(id))?.id).toBe(id);
+  });
+
+  it("BUG-9: does not prune when the storage root exists but is a FILE rather than a directory", async () => {
+    const { id } = await seedCommittedFile({});
+    const notADirectory = path.join(root, `not-a-dir-${randomUUID()}`);
+    await writeFile(notADirectory, "");
+
+    initFilesStorage(notADirectory);
+    try {
+      expect(await resolveById(id)).toBeNull();
+      const [rows] = await getPool().query("SELECT COUNT(*) AS n FROM files WHERE id = ?", [id]);
+      expect((rows as { n: number }[])[0]?.n).toBe(1);
+    } finally {
+      initFilesStorage(root);
+    }
+  });
+
   it("resolveByToken resolves by token, and cleans up a dead one", async () => {
     const { id, linkToken, diskDir, diskName } = await seedCommittedFile({});
     expect((await resolveByToken(linkToken))?.id).toBe(id);

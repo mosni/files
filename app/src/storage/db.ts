@@ -24,6 +24,35 @@ export function initDb(params: DbConnectionParams): void {
     user: params.user,
     password: params.password,
     database: params.database,
+    // Review 060/OPS-4: pin BOTH halves of the date round-trip to UTC rather than leaving them on two
+    // defaults that only happen to agree. mysql2 defaults to `timezone: 'local'`, i.e. the Node process's
+    // zone, when serialising a JS Date into a DATETIME and when reading one back; MariaDB's own session
+    // zone decides what NOW()/CURRENT_TIMESTAMP mean. Both are UTC in the shipped containers, so this was
+    // correct - but `collection_acl.expires_at > NOW()` is an AUTHORIZATION decision (D-220/D-221), and a
+    // TZ env var on either side would silently shift a grant's lifetime by hours in whichever direction
+    // the drift ran. Pinned here, in SET time_zone below, and once more in the predicates themselves
+    // (storage/aclPredicates.ts uses UTC_TIMESTAMP(), not NOW()).
+    timezone: "Z",
+  });
+  // The write side is `timezone: "Z"` above; this is the read/compare side. Applied per connection because
+  // the session zone is per connection and a pool opens them lazily over the process's lifetime.
+  //
+  // A numeric offset, never a named zone: named zones need MariaDB's timezone tables to have been loaded,
+  // "+00:00" always resolves.
+  //
+  // The cast is deliberate and narrow. mysql2's promise pool re-emits this event's argument straight from
+  // the underlying CALLBACK pool (lib/promise/inherit_events.js forwards the arguments untouched), so the
+  // value here is a core callback-API connection even though the promise typings describe it as a promise
+  // PoolConnection. Calling it through the shape it actually has is more honest than awaiting a promise
+  // that does not exist.
+  pool.on("connection", (connection) => {
+    const core = connection as unknown as { query(sql: string, cb: (err: unknown) => void): void };
+    core.query("SET time_zone = '+00:00'", (err) => {
+      // Non-fatal: the authorization comparisons use UTC_TIMESTAMP() explicitly (storage/aclPredicates.ts)
+      // and Date round-trips use `timezone: "Z"`, so a failure here only affects how a TIMESTAMP column
+      // reads back for display.
+      if (err) console.error("db: could not pin the session time zone to UTC", err);
+    });
   });
 }
 

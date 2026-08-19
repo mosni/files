@@ -39,6 +39,11 @@ services:
       # Uploaded bytes live on the host disk, never baked into the image (D-13). This path is also what
       # nginx.conf's dl.mosni.dev vhost reads directly via X-Accel-Redirect (D-5/D-18: not backed up).
       #
+      # ⚠ Review 060/SEC-2: the container runs as `node` (uid 1000), not root, so this host directory must
+      # be owned by uid 1000 or the app cannot create STORAGE_ROOT/.tus and will fail to boot:
+      #     mkdir -p /srv/stack/data/files/storage && chown -R 1000:1000 /srv/stack/data/files/storage
+      # One-time, per box. nginx reads the same bytes directly and is unaffected (0644/0755).
+      #
       # Preliminary-review P3: the host path is DELIBERATELY outside the app's deploy dir
       # (/srv/stack/apps/files/) so a stack redeploy that rebuilds/cleans the app directory cannot wipe
       # uploaded files. INFRA CONFIRM NEEDED (flagged for Hannah): verify /srv/stack/data/ is the right

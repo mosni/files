@@ -44,8 +44,12 @@ describe("toastMutationFailure()", () => {
   });
 
   it.each([
-    ["unknown_account", "That account hasn't signed in yet — send them an invite instead."],
-    ["link_account_not_grantable", "That's an invite account; it already has access through its link."],
+    // Review 060/SEC-6: `unknown_account` is a code the server actually sends now (POST /api/shares
+    // validates the grantee against auth's directory). `link_account_not_grantable` was removed with the
+    // message - auth's directory excludes link-bound accounts, so they arrive as unknown_account, and
+    // separating them would mean parsing a sub (security invariant 6 forbids it).
+    ["unknown_account", "That account hasn't signed in yet — send them an invite link instead."],
+    ["invalid_ttl", "That link duration isn't one of the available options."],
     ["cannot_share_with_self", "You already have access to your own file."],
   ] as const)("409 %s -> %s (E7)", async (code, message) => {
     const toast = vi.fn();
@@ -65,14 +69,40 @@ describe("toastMutationFailure()", () => {
     const toast = vi.fn();
     (window as unknown as { mosni: unknown }).mosni = { toast };
     await toastMutationFailure(res(403, { error: "unknown_account" }));
-    expect(toast).toHaveBeenCalledWith("That account hasn't signed in yet — send them an invite instead.", { variant: "error" });
+    expect(toast).toHaveBeenCalledWith("That account hasn't signed in yet — send them an invite link instead.", { variant: "error" });
   });
 
-  it("502 always shows the auth-unavailable message, regardless of body (E7)", async () => {
+  it("502 auth_unavailable shows the auth-unavailable message (E7)", async () => {
     const toast = vi.fn();
     (window as unknown as { mosni: unknown }).mosni = { toast };
     await toastMutationFailure(res(502, { error: "auth_unavailable" }));
     expect(toast).toHaveBeenCalledWith("Can't reach the account directory right now.", { variant: "error" });
+  });
+
+  // Review 060/BUG-6: this 502 means the OPPOSITE of a dead directory - auth minted the invite fine and
+  // the ACL write then failed, leaving a live link that grants nothing. Sending the user to debug auth was
+  // pointing at the one service that had worked.
+  it("502 acl_write_failed says the link grants nothing, not that auth is down (BUG-6)", async () => {
+    const toast = vi.fn();
+    (window as unknown as { mosni: unknown }).mosni = { toast };
+    await toastMutationFailure(res(502, { error: "acl_write_failed" }));
+    expect(toast).toHaveBeenCalledWith(
+      "The invite link was created but access couldn't be applied to it — it grants nothing. Revoke it and try again.",
+      { variant: "error" },
+    );
+  });
+
+  // BUG-5: delete fails with a 404, which no code in MESSAGES covers - without an explicit fallback the
+  // caller got total silence and left its confirmation modal open.
+  it("a 404 is silent by default but toasts the caller's fallback when one is given (BUG-5)", async () => {
+    const toast = vi.fn();
+    (window as unknown as { mosni: unknown }).mosni = { toast };
+
+    await toastMutationFailure(res(404, {}));
+    expect(toast).not.toHaveBeenCalled();
+
+    await toastMutationFailure(res(404, {}), "Could not delete that.");
+    expect(toast).toHaveBeenCalledWith("Could not delete that.", { variant: "error" });
   });
 
   it("never throws when window.mosni is not yet loaded", async () => {

@@ -196,6 +196,51 @@ export function PreviewPage() {
     // re-run so window.mosni.token() is read again, this time with a real value.
   }, [location.pathname, authReady]);
 
+  // Review 060/BUG-3, second half. A private file's directUrl/thumbUrl are D-84 signed and carry a
+  // deadline (`directUrlExpiresAt`); nothing used to renew them, so a page left open past
+  // DELIVERY_URL_TTL_SECONDS was left holding a dead Download button. This re-fetches the context at ~⅔ of
+  // the remaining lifetime, and because a successful refresh moves the deadline, the effect re-arms itself.
+  //
+  // ⚠ Deliberately SKIPPED for `kind === "video"`. VideoPreview keys <MediaPlayer> on ctx.directUrl and
+  // memoises its source object on it, so swapping the URL under a playing element restarts the video from
+  // zero - a far worse outcome than a stale download link. A video does not need this anyway: the server
+  // signs it for its own probed duration plus a margin (lib/fileUrls.ts's buildSignedDeliveryUrls), which
+  // is the half of BUG-3 that actually keeps playback alive. Do not "unify" the two paths without first
+  // making VideoPreview key on ctx.id.
+  const signedExpiresAt =
+    state.status === "file" && state.context.kind !== "video" ? state.context.directUrlExpiresAt : null;
+
+  useEffect(() => {
+    if (signedExpiresAt === null) return;
+    const remainingMs = signedExpiresAt * 1000 - Date.now();
+    // Floored rather than clamped to zero: an already-expired or nearly-expired deadline still waits a
+    // beat, so a clock skew or a slow response can never turn this into a refetch loop.
+    const delayMs = Math.max(5_000, Math.floor(remainingMs * (2 / 3)));
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        const authToken = typeof window.mosni !== "undefined" ? window.mosni.token() : null;
+        if (authToken === null) return; // signed out since - nothing to renew with
+        try {
+          const res = await fetch(`/api/preview${location.pathname}`, {
+            headers: { Authorization: `Bearer ${authToken}` },
+          });
+          if (cancelled || !res.ok) return;
+          const target = (await res.json()) as ApiTarget;
+          // Never drops to `loading` on the way through: this is a quiet swap of URLs behind rendered
+          // content, not a navigation.
+          if (!cancelled) setState(stateFromTarget(target));
+        } catch {
+          // Keep the URLs we have; they are still the best available until the next mount.
+        }
+      })();
+    }, delayMs);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [signedExpiresAt, location.pathname]);
+
   if (state.status === "loading") {
     return <span className="spinner" role="status" aria-label="Loading" />;
   }

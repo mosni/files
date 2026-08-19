@@ -2,7 +2,7 @@ import { Redis } from "ioredis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildServer } from "../../src/server.ts";
 import { makeTestConfig } from "../helpers/testConfig.ts";
-import { UPLOAD_CHUNK_SIZE, UPLOAD_EXPIRY_MS } from "../../src/lib/uploadConfig.ts";
+import { UPLOAD_CHUNK_SIZE } from "../../src/lib/uploadConfig.ts";
 
 // Mandatory, never-delete tests (verification-concept.md): each maps to a security invariant in
 // technical-baseline.md §1 and must never be deleted, skipped, or weakened to make a change pass.
@@ -160,13 +160,18 @@ describe("security headers", () => {
     expect(imgSrc).toContain("https://auth.mosni.dev");
   });
 
-  it("GET /api/config returns the server-authoritative upload chunk size (P10) and expiry window (E6 A4)", async () => {
+  // Review 060/OPS-5: `uploadExpiryMs` was removed from this response - nothing ever read it off the wire
+  // (UploadStack.tsx imports UPLOAD_EXPIRY_MS from lib/uploadConfig.ts directly, which is the same single
+  // source of truth). `uploadChunkSize` genuinely has to be runtime: it is coupled to routes/upload.ts's
+  // rate-limit budget, so a stale bundle must not pick a chunk size the server did not budget for. The
+  // exact-shape assertion is the point - a field nothing consumes should not quietly reappear.
+  it("GET /api/config returns exactly the server-authoritative upload chunk size (P10)", async () => {
     const res = await app.inject({
       method: "GET",
       url: "/api/config",
       headers: { host: "files.mosni.dev" },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ uploadChunkSize: UPLOAD_CHUNK_SIZE, uploadExpiryMs: UPLOAD_EXPIRY_MS });
+    expect(res.json()).toEqual({ uploadChunkSize: UPLOAD_CHUNK_SIZE });
   });
 });

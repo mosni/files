@@ -52,7 +52,10 @@ const liveUploads = new Map<string, tus.Upload>();
 const pendingQueue: string[] = [];
 let activeCount = 0;
 
-// Test-only override so a unit test can drive the chunk size without going through /api/config.
+// The server-authoritative chunk size (preliminary-review P10). DropZone.tsx is the real caller - it
+// fetches GET /api/config on mount and pushes the value in here - and unit tests use it to drive a small
+// chunk size directly. It was labelled "test-only" for three epics while a production path called it on
+// every page load (review 060/OPS-5); the label mattered because it invited someone to delete it.
 export function setUploadChunkSize(size: number): void {
   chunkSize = size;
 }

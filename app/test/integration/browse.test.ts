@@ -13,6 +13,7 @@ import { applyMigrations, closeDb, getPool, initDb } from "../../src/storage/db.
 import { claimFileRow, commitFileRow, diskRelPath, initFilesStorage } from "../../src/storage/files.ts";
 import { createCollection } from "../../src/storage/collections.ts";
 import { makeTestConfig } from "../helpers/testConfig.ts";
+import { verifyDelivery } from "../../src/lib/deliverySignature.ts";
 import type { Protection } from "../../src/lib/protection.ts";
 
 const verifyMock = vi.mocked(verify);
@@ -45,6 +46,7 @@ type BrowseResponse = {
 describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scopes by D-116)", () => {
   let root: string;
   let app: FastifyInstance;
+  let config: ReturnType<typeof makeTestConfig>;
 
   beforeAll(async () => {
     initDb({
@@ -59,7 +61,8 @@ describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scop
     initFilesStorage(root);
 
     app = Fastify({ logger: false });
-    await registerBrowseRoutes(app, makeTestConfig({ storageRoot: root }));
+    config = makeTestConfig({ storageRoot: root });
+    await registerBrowseRoutes(app, config);
     await app.ready();
   }, 30_000);
 
@@ -960,6 +963,100 @@ describe("GET /api/browse (§1.4 of the E4 waves hand-off, collapsed to two scop
       asUser("user:a", { roles: ["files:write"] });
       const res = await get("/api/browse?scope=mine", "t");
       expect((res.json() as BrowseResponse).canManage).toBe(false);
+    });
+  });
+
+  // --- Review 060/BUG-1 -------------------------------------------------------------------------------
+  //
+  // A `private` row's readable path RESOLVES (readablePathResolves only rejects `secret`), so this endpoint
+  // handed out `dl.mosni.dev/<path>` and `dl.mosni.dev/thumb/<path>` for private files - URLs nothing in a
+  // browser can authorize, because neither an <img src> nor the archive service worker's fetch() carries a
+  // Bearer. The listing's thumbnails 401'd into broken images for the file's OWNER, and "Download all"
+  // skipped every private file into its `failed` list. controllers/preview.ts had signed them since D-84;
+  // this endpoint never did.
+  describe("BUG-1: a private row's delivery URLs are D-84 signed, not bare readable paths", () => {
+    it("signs directUrl and thumbUrl for a private file, and both signatures verify at their own scope", async () => {
+      const collection = await seedCollection({ ownerSub: "user:owner", protection: "private" });
+      const file = await seedFile({
+        collectionId: collection.id,
+        ownerSub: "user:owner",
+        protection: "private",
+        withThumb: true,
+      });
+      asUser("user:owner");
+
+      const body = (await get(`/api/browse?scope=mine&collectionId=${collection.id}`, "t")).json() as BrowseResponse;
+      const row = body.files.find((f) => f.id === file.id)!;
+
+      const direct = new URL(row.directUrl);
+      expect(direct.pathname).toBe(`/s/${file.id}`);
+      expect(
+        verifyDelivery(
+          config.deliverySigningSecret,
+          file.id,
+          Number(direct.searchParams.get("exp")),
+          direct.searchParams.get("sig")!,
+          Date.now() / 1000,
+          "full",
+        ),
+      ).toBe(true);
+
+      const thumb = new URL(row.thumbUrl!);
+      expect(thumb.pathname).toBe(`/thumb/s/${file.id}`);
+      expect(
+        verifyDelivery(
+          config.deliverySigningSecret,
+          file.id,
+          Number(thumb.searchParams.get("exp")),
+          thumb.searchParams.get("sig")!,
+          Date.now() / 1000,
+          "thumb",
+        ),
+      ).toBe(true);
+    });
+
+    it("a private file with no thumbnail gets a signed directUrl and a null thumbUrl", async () => {
+      const collection = await seedCollection({ ownerSub: "user:owner", protection: "private" });
+      const file = await seedFile({ collectionId: collection.id, ownerSub: "user:owner", protection: "private" });
+      asUser("user:owner");
+
+      const body = (await get(`/api/browse?scope=mine&collectionId=${collection.id}`, "t")).json() as BrowseResponse;
+      const row = body.files.find((f) => f.id === file.id)!;
+      expect(row.directUrl).toContain("/s/");
+      expect(row.thumbUrl).toBeNull();
+    });
+
+    // D-96: the EFFECTIVE level decides, never the stored column - a file stored `public` inside a
+    // `private` collection is private to every reader, so its listing URLs must be signed too.
+    it("signs a row that is private only by its collection's effective level (D-96)", async () => {
+      const collection = await seedCollection({ ownerSub: "user:owner", protection: "private" });
+      const file = await seedFile({ collectionId: collection.id, ownerSub: "user:owner", protection: "public" });
+      asUser("user:owner");
+
+      const body = (await get(`/api/browse?scope=mine&collectionId=${collection.id}`, "t")).json() as BrowseResponse;
+      const row = body.files.find((f) => f.id === file.id)!;
+      expect(row.effectiveProtection).toBe("private");
+      expect(row.directUrl).toContain(`/s/${file.id}`);
+    });
+
+    // The other three levels are unchanged: signing them would be pointless (they need no authorization)
+    // and would silently put an expiry on links people copy and keep.
+    it("leaves public and unlisted rows on their bare readable path", async () => {
+      const collection = await seedCollection({ ownerSub: "user:owner", protection: "public" });
+      const file = await seedFile({
+        collectionId: collection.id,
+        ownerSub: "user:owner",
+        protection: "public",
+        withThumb: true,
+      });
+      asUser("user:owner");
+
+      const body = (await get(`/api/browse?scope=mine&collectionId=${collection.id}`, "t")).json() as BrowseResponse;
+      const row = body.files.find((f) => f.id === file.id)!;
+      expect(row.directUrl).not.toContain("/s/");
+      expect(row.directUrl).not.toContain("sig=");
+      expect(row.thumbUrl).toContain("/thumb/");
+      expect(row.thumbUrl).not.toContain("sig=");
     });
   });
 });
