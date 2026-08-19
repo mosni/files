@@ -76,6 +76,11 @@ function Metric({ label, value, tone, hint }: { label: string; value: string; to
   );
 }
 
+// Hannah, 2026-08-19: a heading sitting closer to the table ABOVE it than to its own table reads as a
+// label for the wrong one. Only the later headings need it - "Top collections" follows MetricGrid, which
+// already carries its own bottom margin.
+const SECTION_HEADING: React.CSSProperties = { marginTop: "2.25rem" };
+
 function MetricGrid({ children }: { children: React.ReactNode }) {
   return (
     <div
@@ -160,7 +165,7 @@ function UsageSection({ usage, nameFor }: { usage: AdminUsageResponse; nameFor: 
         </table>
       </div>
 
-      <h3>Top files</h3>
+      <h3 style={SECTION_HEADING}>Top files</h3>
       <div className="table-scroll">
         <table className="table">
           <thead>
@@ -190,7 +195,7 @@ function UsageSection({ usage, nameFor }: { usage: AdminUsageResponse; nameFor: 
         </table>
       </div>
 
-      <h3>By owner</h3>
+      <h3 style={SECTION_HEADING}>By owner</h3>
       <div className="table-scroll">
         <table className="table">
           <thead>
