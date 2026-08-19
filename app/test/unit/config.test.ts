@@ -32,6 +32,7 @@ describe("loadConfig()", () => {
       port: 3000,
       deliverySigningSecret: "test-signing-secret",
       deliveryUrlTtlSeconds: 300,
+      rateLimitDisabled: false,
     });
   });
 
@@ -66,5 +67,29 @@ describe("loadConfig()", () => {
   it("DELIVERY_URL_TTL_SECONDS is honoured when set", () => {
     const config = loadConfig({ ...VALID_ENV, DELIVERY_URL_TTL_SECONDS: "60" });
     expect(config.deliveryUrlTtlSeconds).toBe(60);
+  });
+
+  // Review 060: RATE_LIMIT_DISABLED turns off every limiter in the app (server.ts skips registering
+  // @fastify/rate-limit at all), so the interesting cases are the ones where it must NOT take effect.
+  describe("RATE_LIMIT_DISABLED", () => {
+    it("defaults to off when the variable is absent", () => {
+      expect(loadConfig(VALID_ENV).rateLimitDisabled).toBe(false);
+    });
+
+    it("is on only for the EXACT string \"true\", on a non-production origin", () => {
+      const env = { ...VALID_ENV, APP_ORIGIN: "https://files-e2e.test" };
+      expect(loadConfig({ ...env, RATE_LIMIT_DISABLED: "true" }).rateLimitDisabled).toBe(true);
+      for (const value of ["TRUE", "1", "yes", "", "false"]) {
+        expect(loadConfig({ ...env, RATE_LIMIT_DISABLED: value }).rateLimitDisabled).toBe(false);
+      }
+    });
+
+    // The guard that matters: a stray env var in a deploy manifest must not be able to remove a real
+    // defence. APP_ORIGIN is the discriminator because it is already required and already validated.
+    it("is REFUSED on the production origin, however it is set", () => {
+      const config = loadConfig({ ...VALID_ENV, RATE_LIMIT_DISABLED: "true" });
+      expect(config.appOrigin).toBe("https://files.mosni.dev");
+      expect(config.rateLimitDisabled).toBe(false);
+    });
   });
 });

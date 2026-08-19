@@ -77,13 +77,26 @@ export async function buildServer(redis: Redis, config: Config): Promise<Fastify
   // over the same redis instance - heavy tus traffic would count against (and could trip) everything
   // else's 100/min budget too, exactly what D1 exists to prevent. Confirmed empirically: an early version
   // without this let upload.test.ts's own rate-limit test 429 unrelated tests elsewhere in the same run.
-  await app.register(rateLimit, {
-    redis,
-    global: true,
-    max: 100,
-    timeWindow: "1 minute",
-    nameSpace: "fastify-rate-limit-global-",
-  });
+  //
+  // Review 060: skipped ENTIRELY when config.rateLimitDisabled is set - not registered with a huge `max`,
+  // because the per-route `config.rateLimit` overrides in routes/{upload,manage,delivery}.ts are read by
+  // THIS plugin's own onRoute hook, so not registering it turns every limiter in the app off in one place
+  // rather than leaving three more to remember. config.ts refuses the flag on the production origin
+  // outright; see its comment for why the e2e tier needs it at all.
+  if (config.rateLimitDisabled) {
+    app.log.warn(
+      "RATE LIMITING IS DISABLED for this process (RATE_LIMIT_DISABLED=true on a non-production origin). " +
+        "This is a test-tier setting and must never be seen in production.",
+    );
+  } else {
+    await app.register(rateLimit, {
+      redis,
+      global: true,
+      max: 100,
+      timeWindow: "1 minute",
+      nameSpace: "fastify-rate-limit-global-",
+    });
+  }
 
   // Serve the SPA. Deliberately UNconstrained by host: the SPA must be reachable both at files.mosni.dev
   // (via nginx's Host: files.mosni.dev) and at the container's own host (the deploy healthcheck / e2e hit

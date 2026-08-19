@@ -235,6 +235,14 @@ services:
       DL_ORIGIN: https://dl.mosni.dev
       STORAGE_ROOT: /data/storage
       DELIVERY_SIGNING_SECRET: e2e-tier-signing-secret
+      # Review 060: every request in this suite arrives from ONE address (the browser goes through
+      # nginx-e2e, the API specs come from verify-e2e), so the whole tier shared the single 100/min per-IP
+      # global budget - and Playwright's parallel workers pushed it over, landing 429s on whichever spec
+      # was unlucky. Failures shuffled between runs and any one spec passed when run alone; a baseline run
+      # logged 34 rate-limit rejections. The limiter is not what these specs test: app/test/integration's
+      # upload.test.ts and rate-limit-namespaces.test.ts cover it directly, with the flag OFF.
+      # config.ts refuses this flag on the production origin outright, so it cannot escape this tier.
+      RATE_LIMIT_DISABLED: "true"
       # D-70 Wave D: 80, not 3000, here specifically (production's own port; nothing else in the app
       # depends on the number 3000). Fastify's `constraints: { host }` does an EXACT string match against
       # the raw incoming Host header (find-my-way's accept-host strategy - confirmed by reading it), which

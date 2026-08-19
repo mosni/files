@@ -18,6 +18,8 @@ export function makeTestConfig(overrides: Partial<Config> = {}): Config {
     port: 0,
     deliverySigningSecret: "test-signing-secret",
     deliveryUrlTtlSeconds: 300,
+    // Off by default here, matching production - the tests that assert 429 behaviour depend on it.
+    rateLimitDisabled: false,
     ...overrides,
   };
 }

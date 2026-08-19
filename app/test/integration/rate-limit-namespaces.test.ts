@@ -22,6 +22,7 @@ import { registerDeliveryRoutes } from "../../src/routes/delivery.ts";
 import { registerManageRoutes } from "../../src/routes/manage.ts";
 import { registerMetaRoutes } from "../../src/routes/meta.ts";
 import { makeTestConfig } from "../helpers/testConfig.ts";
+import { buildServer } from "../../src/server.ts";
 
 const FILES_HOST = "files.mosni.dev";
 const DL_HOST = "dl.mosni.dev";
@@ -138,4 +139,49 @@ describe("rate-limit namespaces (D-180)", () => {
     });
     expect(delivery.statusCode).not.toBe(429);
   }, 90_000);
+
+  // Review 060: RATE_LIMIT_DISABLED. Built through buildServer() rather than by hand, because the whole
+  // point of the flag is that ONE branch in server.ts turns off the global limiter AND every per-route
+  // override (routes/{upload,manage,delivery}.ts read their `config.rateLimit` through this same plugin's
+  // onRoute hook, so not registering it disables those too). Asserting it against a hand-wired app would
+  // prove nothing about the wiring that actually ships.
+  describe("RATE_LIMIT_DISABLED removes every limiter, not just the global one", () => {
+    it("serves well past the global cap with no 429, and 429s normally when the flag is off", async () => {
+      const disabled = await buildServer(
+        redis,
+        makeTestConfig({ storageRoot: "/tmp", appOrigin: "https://files-e2e.test", rateLimitDisabled: true }),
+      );
+      await disabled.ready();
+      try {
+        const ip = "10.60.0.1";
+        for (let i = 0; i < GLOBAL_MAX + 25; i++) {
+          const res = await disabled.inject({
+            method: "GET",
+            url: "/health",
+            remoteAddress: ip,
+            headers: { host: "files-e2e.test" },
+          });
+          expect(res.statusCode, `request #${i + 1} must not be rate limited`).toBe(200);
+        }
+      } finally {
+        await disabled.close();
+      }
+
+      // The control: the SAME server shape with the flag off still enforces the cap, so the assertion
+      // above is about the flag rather than about /health being exempt somehow.
+      const enabled = await buildServer(redis, makeTestConfig({ storageRoot: "/tmp" }));
+      await enabled.ready();
+      try {
+        const ip = "10.60.0.2";
+        let sawLimit = false;
+        for (let i = 0; i < GLOBAL_MAX + 25 && !sawLimit; i++) {
+          const res = await enabled.inject({ method: "GET", url: "/health", remoteAddress: ip });
+          if (res.statusCode === 429) sawLimit = true;
+        }
+        expect(sawLimit, "the flag being OFF must still produce a 429").toBe(true);
+      } finally {
+        await enabled.close();
+      }
+    }, 60_000);
+  });
 });

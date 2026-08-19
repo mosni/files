@@ -63,6 +63,9 @@ describe("routes/upload.ts - tus upload, insert-then-move commit (D-85)", () => 
       port: 0,
       deliverySigningSecret: "upload-test-secret",
       deliveryUrlTtlSeconds: 300,
+      // Explicitly ON: this file asserts the tus limiter's real 429 behaviour, and review 060's
+      // RATE_LIMIT_DISABLED is an e2e-tier flag that must never quietly apply here.
+      rateLimitDisabled: false,
     };
 
     app = Fastify({ logger: false });

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
+import { ensureSharedDir } from "./seedStorage.ts";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import mysql from "mysql2/promise";
@@ -44,7 +45,8 @@ async function seedPrivateFile(conn: mysql.Connection, opts: { name: string; own
   const diskDir = "2026/08";
   const diskName = `${id}-${opts.name}`;
   const abs = path.join(STORAGE_ROOT, diskDir, diskName);
-  await mkdir(path.dirname(abs), { recursive: true });
+  // Review 060/SEC-2: shared-writable, because app-e2e writes this same directory as uid 1000.
+  await ensureSharedDir(path.dirname(abs));
   await writeFile(abs, "e7 share e2e fixture bytes");
   const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
   await conn.execute(
@@ -273,9 +275,13 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
 
     // The row's overflow menu -> Share. Waiting on the row first proves the browser actually rendered
     // before we start clicking, so a failure below is the dialog's and not a slow listing's.
-    const row = page.getByText(name, { exact: true }).first();
+    const row = page.locator("tbody tr").filter({ hasText: name });
     await expect(row).toBeVisible({ timeout: 20_000 });
-    await page.locator('button[aria-haspopup="menu"]').first().click();
+    // Review 060/ADD-1: scoped to THIS file's own row, never `.first()` on the page. The landing page now
+    // opens on Browse rather than My files, so the listing contains every other spec's visible fixtures
+    // too - `.first()` opened whichever row happened to sort first, which for a file this viewer does not
+    // own has no Share item at all, and the click timed out waiting for one.
+    await row.locator('button[aria-haspopup="menu"]').click();
     await page.getByRole("menuitem", { name: "Share" }).click();
 
     // The dialog must mount, real DOM built by <Modal>'s own render (a real <dialog class="modal"> React
@@ -283,7 +289,13 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
     // was built for no longer applies to this call site).
     // Scoped by heading: every row mounts THREE modals (Delete, Move, Share), so a bare `dialog.modal`
     // would be a strict-mode violation, not a signal.
-    const shareModal = page.locator("dialog.modal").filter({ has: page.locator(".modal-heading", { hasText: /^Share/ }) });
+    const shareModal = page
+      .locator("dialog.modal")
+      // Review 060/ADD-1: scoped to THIS file's heading, not just /^Share/. The comment above is right
+      // that a bare `dialog.modal` is a strict-mode violation - but so is a Share-only filter now that
+      // the landing page opens on Browse, because EVERY listed row mounts its own Share modal. The
+      // filename is what makes it one element again.
+      .filter({ has: page.locator(".modal-heading", { hasText: `Share "${name}"` }) });
     await expect(shareModal).toBeAttached({ timeout: 20_000 });
 
     // THEN the dialog must reach its LOADED state, not just mount - the crash this block guards against
@@ -336,11 +348,19 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
     `);
 
     await page.goto(`${FILES_ORIGIN}/`);
-    await expect(page.getByText(name, { exact: true }).first()).toBeVisible({ timeout: 20_000 });
+    const row = page.locator("tbody tr").filter({ hasText: name });
+    await expect(row).toBeVisible({ timeout: 20_000 });
 
-    const shareModal = page.locator("dialog.modal").filter({ has: page.locator(".modal-heading", { hasText: /^Share/ }) });
+    const shareModal = page
+      .locator("dialog.modal")
+      // Review 060/ADD-1: scoped to THIS file's heading, not just /^Share/. The comment above is right
+      // that a bare `dialog.modal` is a strict-mode violation - but so is a Share-only filter now that
+      // the landing page opens on Browse, because EVERY listed row mounts its own Share modal. The
+      // filename is what makes it one element again.
+      .filter({ has: page.locator(".modal-heading", { hasText: `Share "${name}"` }) });
     const openShare = async () => {
-      await page.locator('button[aria-haspopup="menu"]').first().click();
+      // Review 060/ADD-1: this file's own row, not `.first()` - see the note in the first test above.
+      await row.locator('button[aria-haspopup="menu"]').click();
       await page.getByRole("menuitem", { name: "Share" }).click();
       await expect(shareModal).toHaveAttribute("open", /.*/, { timeout: 20_000 });
     };
@@ -460,8 +480,10 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
     `);
 
     await page.goto(`${FILES_ORIGIN}/`);
-    await expect(page.getByText(name, { exact: true }).first()).toBeVisible({ timeout: 20_000 });
-    await page.locator('button[aria-haspopup="menu"]').first().click();
+    const row = page.locator("tbody tr").filter({ hasText: name });
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    // Review 060/ADD-1: this file's own row, not `.first()` - see the note in the first test above.
+    await row.locator('button[aria-haspopup="menu"]').click();
     await page.getByRole("menuitem", { name: "Share" }).click();
     await expect(page.getByText("Add people")).toBeVisible({ timeout: 20_000 });
 
@@ -527,12 +549,20 @@ test.describe("real mosni-chrome integration: the share dialog must OPEN without
     `);
 
     await page.goto(`${FILES_ORIGIN}/`);
-    await expect(page.getByText(name, { exact: true }).first()).toBeVisible({ timeout: 20_000 });
-    await page.locator('button[aria-haspopup="menu"]').first().click();
+    const row = page.locator("tbody tr").filter({ hasText: name });
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    // Review 060/ADD-1: this file's own row, not `.first()` - see the note in the first test above.
+    await row.locator('button[aria-haspopup="menu"]').click();
     await page.getByRole("menuitem", { name: "Share" }).click();
     await expect(page.getByText("Add people")).toBeVisible({ timeout: 20_000 });
 
-    const shareModal = page.locator("dialog.modal").filter({ has: page.locator(".modal-heading", { hasText: /^Share/ }) });
+    const shareModal = page
+      .locator("dialog.modal")
+      // Review 060/ADD-1: scoped to THIS file's heading, not just /^Share/. The comment above is right
+      // that a bare `dialog.modal` is a strict-mode violation - but so is a Share-only filter now that
+      // the landing page opens on Browse, because EVERY listed row mounts its own Share modal. The
+      // filename is what makes it one element again.
+      .filter({ has: page.locator(".modal-heading", { hasText: `Share "${name}"` }) });
     const rangeInput = shareModal.locator('input[type="range"]');
     // C1.1: the internal range input is built by <Slider>'s own render, so this is real DOM regardless of
     // mosnicat.js - what genuinely depends on the real stylesheet is the readout's legibility, below.

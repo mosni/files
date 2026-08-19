@@ -19,6 +19,10 @@ export type Config = {
   // signing every URL with the empty string.
   deliverySigningSecret: string;
   deliveryUrlTtlSeconds: number;
+  // Review 060: the e2e tier's rate-limit escape hatch. See RATE_LIMIT_DISABLED below - this is `true`
+  // ONLY for a non-production origin that explicitly asked for it, and server.ts then skips registering
+  // @fastify/rate-limit at all.
+  rateLimitDisabled: boolean;
 };
 
 const REQUIRED = [
@@ -38,6 +42,41 @@ const REQUIRED = [
 ] as const;
 
 const DEFAULT_DELIVERY_URL_TTL_SECONDS = 300;
+
+// The real deployment's origin. Named here, as a literal, for exactly one purpose: to make
+// RATE_LIMIT_DISABLED structurally unable to take effect on it.
+const PRODUCTION_APP_ORIGIN = "https://files.mosni.dev";
+
+/**
+ * RATE_LIMIT_DISABLED - turns off EVERY rate limiter in the app. Optional, off unless the value is the
+ * exact string "true".
+ *
+ * Why it exists: the e2e tier drives a real browser through real nginx into the real production image, and
+ * every request in the whole suite arrives from ONE address - so all of it shares the single 100/min
+ * per-IP global budget (server.ts). Playwright's own parallel workers then push it over that budget, and
+ * the 429s land on whichever spec happened to be running: browser specs failed in shuffling, irreproducible
+ * sets, and running any one of them alone passed. Measured at 34 rate-limit rejections in a single baseline
+ * run before this flag existed. A test tier that fails differently every time teaches nothing, and the
+ * limiter is not what any of those specs is testing - upload.test.ts and rate-limit-namespaces.test.ts
+ * cover the limiter itself, deliberately, with the flag off.
+ *
+ * ⚠ It is REFUSED on the production origin, whatever the environment says. A rate limiter is a real
+ * defence (D-1's own abuse ceiling, and the only thing between an unauthenticated caller and the delivery
+ * path), so a stray env var in a deploy manifest must not be able to remove it - the check is on
+ * APP_ORIGIN rather than on a NODE_ENV-style hint because APP_ORIGIN is already required, already
+ * validated, and cannot be wrong without the app being visibly broken in other ways first.
+ */
+function readRateLimitDisabled(env: NodeJS.ProcessEnv): boolean {
+  if (env.RATE_LIMIT_DISABLED !== "true") return false;
+  if (env.APP_ORIGIN === PRODUCTION_APP_ORIGIN) {
+    console.error(
+      `config: RATE_LIMIT_DISABLED=true was IGNORED - it is refused on the production origin (${PRODUCTION_APP_ORIGIN}). ` +
+        "Rate limiting stays on. If this is not the production deploy, APP_ORIGIN is wrong.",
+    );
+    return false;
+  }
+  return true;
+}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const missing = REQUIRED.filter((key) => !env[key]);
@@ -71,5 +110,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     deliveryUrlTtlSeconds: env.DELIVERY_URL_TTL_SECONDS
       ? Number(env.DELIVERY_URL_TTL_SECONDS)
       : DEFAULT_DELIVERY_URL_TTL_SECONDS,
+    rateLimitDisabled: readRateLimitDisabled(env),
   };
 }

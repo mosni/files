@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
+import { ensureSharedDir } from "./seedStorage.ts";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import mysql from "mysql2/promise";
@@ -63,7 +64,8 @@ async function seedFile(
   const diskDir = "2026/07";
   const diskName = `${id}-${opts.name}`;
   const abs = path.join(STORAGE_ROOT, diskDir, diskName);
-  await mkdir(path.dirname(abs), { recursive: true });
+  // Review 060/SEC-2: shared-writable, because app-e2e writes this same directory as uid 1000.
+  await ensureSharedDir(path.dirname(abs));
   await writeFile(abs, "browse e2e fixture bytes");
   const linkToken = randomUUID().replace(/-/g, "").slice(0, 5);
   await conn.execute(

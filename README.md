@@ -47,6 +47,12 @@ or from the cloud environment's setup script. A repository ruleset blocks `claud
 
 ## Browser-driven e2e (D-53, reverses D-28)
 
+The e2e tier runs with `RATE_LIMIT_DISABLED=true` (`docker-compose.verify.yml`). Every request in the suite
+arrives from one address, so all of it shared the single 100/min per-IP budget and Playwright's parallel
+workers tripped it — failures shuffled between runs and any one spec passed alone. The limiter itself stays
+covered, with the flag off, by `app/test/integration/{upload,rate-limit-namespaces}.test.ts`. The flag is
+refused on the production origin by `config.ts` and cannot escape that tier.
+
 `e2e/` holds Playwright specs, run only via `npx playwright test` / `npm run test:e2e` — **never** through
 Vitest (`vitest.config.ts` explicitly excludes `e2e/`; Playwright's own `test()` global conflicts with
 Vitest's). `npm run test:e2e` builds the real production image (`Dockerfile`, not just the Vite outputs)
